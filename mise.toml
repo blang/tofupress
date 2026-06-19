@@ -1,0 +1,9 @@
+[tools]
+go = "1.26.4"
+"go:golang.org/x/tools/cmd/goimports" = "0.44.0"
+golangci-lint = "2.11.4"
+prek = "0.3.8"
+yamllint = "1.38.0"
+
+[hooks]
+enter = "prek install"

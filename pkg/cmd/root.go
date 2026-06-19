@@ -1,3 +1,4 @@
+// Package cmd implements the tofupress CLI commands.
 package cmd
 
 import (

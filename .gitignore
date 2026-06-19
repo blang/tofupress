@@ -1,2 +1,4 @@
 /tofupress
+*.test
 .tofupress.d/
+.pi/

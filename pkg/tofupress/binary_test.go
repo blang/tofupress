@@ -543,3 +543,56 @@ func TestBinary_BundleWithSubpath(t *testing.T) {
 	err = validateZipFile(t, outputPath)
 	require.NoError(t, err, "bundle should be a valid zip archive")
 }
+
+// TestBinary_BundleNestedArchive verifies that bundling a directory that was itself
+// created by bundling another module works correctly. The sourcetree/ directory
+// should be preserved in the new bundle.
+func TestBinary_BundleNestedArchive(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test with network access")
+	}
+
+	binary := buildBinary(t)
+
+	// Create a fixture with a remote module
+	fixtureDir := t.TempDir()
+	mainTf := filepath.Join(fixtureDir, "main.tf")
+	err := os.WriteFile(mainTf, []byte(`
+module "remote" {
+  source = "git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git?ref=v5.0.0"
+  name   = "test"
+}
+`), 0644)
+	require.NoError(t, err)
+
+	// First bundle
+	firstBundlePath := filepath.Join(t.TempDir(), "first-bundle.zip")
+	cmd := exec.Command(binary, "bundle", fixtureDir, firstBundlePath) //nolint:gosec // G204: subprocess is intentional
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "first bundle failed: %s", string(output))
+	require.FileExists(t, firstBundlePath)
+
+	// Extract the first bundle
+	extractDir := t.TempDir()
+	cmd = exec.Command("unzip", "-q", firstBundlePath, "-d", extractDir)
+	output, err = cmd.CombinedOutput()
+	require.NoError(t, err, "unzip failed: %s", string(output))
+
+	// Verify the extracted bundle has sourcetree/
+	_, err = os.Stat(filepath.Join(extractDir, "sourcetree"))
+	require.NoError(t, err, "extracted bundle should have sourcetree/ directory")
+
+	// Second bundle (bundle the extracted bundle)
+	secondBundlePath := filepath.Join(t.TempDir(), "second-bundle.zip")
+	cmd = exec.Command(binary, "bundle", extractDir, secondBundlePath) //nolint:gosec // G204: subprocess is intentional
+	output, err = cmd.CombinedOutput()
+	require.NoError(t, err, "second bundle failed: %s", string(output))
+	require.FileExists(t, secondBundlePath)
+
+	// Verify the second bundle also contains sourcetree/
+	cmd = exec.Command("unzip", "-l", secondBundlePath)
+	output, err = cmd.CombinedOutput()
+	require.NoError(t, err, "unzip -l failed: %s", string(output))
+	require.Contains(t, string(output), "sourcetree/", "second bundle should contain sourcetree/ directory")
+	require.Contains(t, string(output), "main.tf", "second bundle should contain main.tf")
+}

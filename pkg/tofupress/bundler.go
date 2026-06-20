@@ -111,14 +111,14 @@ func (b *Bundler) bundleTarGZ(tree *ResolvedTree, outputPath string) error {
 		}
 	}()
 
-	if err := b.addDirectoryToTar(tarWriter, tree.Root.InstallDir, ""); err != nil {
+	if err := b.addDirectoryToTar(tarWriter, tree.Root.InstallDir, "", tree.Packages); err != nil {
 		return fmt.Errorf("failed to add root module: %w", err)
 	}
 
 	for _, pkg := range tree.Packages {
 		uniqueID := filepath.Base(pkg.LocalDir)
 		prefix := filepath.Join("sourcetree", uniqueID)
-		if err := b.addDirectoryToTar(tarWriter, pkg.LocalDir, prefix); err != nil {
+		if err := b.addDirectoryToTar(tarWriter, pkg.LocalDir, prefix, tree.Packages); err != nil {
 			return fmt.Errorf("failed to add package %s: %w", pkg.PackageAddr, err)
 		}
 	}
@@ -155,14 +155,14 @@ func (b *Bundler) bundleTarXZ(tree *ResolvedTree, outputPath string) error {
 		}
 	}()
 
-	if err := b.addDirectoryToTar(tarWriter, tree.Root.InstallDir, ""); err != nil {
+	if err := b.addDirectoryToTar(tarWriter, tree.Root.InstallDir, "", tree.Packages); err != nil {
 		return fmt.Errorf("failed to add root module: %w", err)
 	}
 
 	for _, pkg := range tree.Packages {
 		uniqueID := filepath.Base(pkg.LocalDir)
 		prefix := filepath.Join("sourcetree", uniqueID)
-		if err := b.addDirectoryToTar(tarWriter, pkg.LocalDir, prefix); err != nil {
+		if err := b.addDirectoryToTar(tarWriter, pkg.LocalDir, prefix, tree.Packages); err != nil {
 			return fmt.Errorf("failed to add package %s: %w", pkg.PackageAddr, err)
 		}
 	}
@@ -189,14 +189,14 @@ func (b *Bundler) bundleZIP(tree *ResolvedTree, outputPath string) error {
 		}
 	}()
 
-	if err := b.addDirectoryToZip(zipWriter, tree.Root.InstallDir, ""); err != nil {
+	if err := b.addDirectoryToZip(zipWriter, tree.Root.InstallDir, "", tree.Packages); err != nil {
 		return fmt.Errorf("failed to add root module: %w", err)
 	}
 
 	for _, pkg := range tree.Packages {
 		uniqueID := filepath.Base(pkg.LocalDir)
 		prefix := filepath.Join("sourcetree", uniqueID)
-		if err := b.addDirectoryToZip(zipWriter, pkg.LocalDir, prefix); err != nil {
+		if err := b.addDirectoryToZip(zipWriter, pkg.LocalDir, prefix, tree.Packages); err != nil {
 			return fmt.Errorf("failed to add package %s: %w", pkg.PackageAddr, err)
 		}
 	}
@@ -207,13 +207,19 @@ func (b *Bundler) bundleZIP(tree *ResolvedTree, outputPath string) error {
 // addDirectoryToTar recursively adds a directory to a tar archive.
 //
 //nolint:gocognit // complex but straightforward file walking logic
-func (b *Bundler) addDirectoryToTar(tw *tar.Writer, srcDir, prefix string) error {
+func (b *Bundler) addDirectoryToTar(tw *tar.Writer, srcDir, prefix string, packages map[string]*DownloadedPackage) error {
 	return filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
-		if info.IsDir() && (info.Name() == ".terraform" || info.Name() == ".git" || info.Name() == "sourcetree") {
+		if info.IsDir() && (info.Name() == ".terraform" || info.Name() == ".git") {
+			return filepath.SkipDir
+		}
+
+		// Only skip sourcetree/ when packages will be added separately (non-empty packages map)
+		// This prevents duplication in first bundle, but preserves sourcetree/ in nested bundles
+		if info.IsDir() && info.Name() == "sourcetree" && len(packages) > 0 {
 			return filepath.SkipDir
 		}
 
@@ -262,13 +268,19 @@ func (b *Bundler) addDirectoryToTar(tw *tar.Writer, srcDir, prefix string) error
 // addDirectoryToZip recursively adds a directory to a ZIP archive.
 //
 //nolint:gocognit // complex but straightforward file walking logic
-func (b *Bundler) addDirectoryToZip(zw *zip.Writer, srcDir, prefix string) error {
+func (b *Bundler) addDirectoryToZip(zw *zip.Writer, srcDir, prefix string, packages map[string]*DownloadedPackage) error {
 	return filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
-		if info.IsDir() && (info.Name() == ".terraform" || info.Name() == ".git" || info.Name() == "sourcetree") {
+		if info.IsDir() && (info.Name() == ".terraform" || info.Name() == ".git") {
+			return filepath.SkipDir
+		}
+
+		// Only skip sourcetree/ when packages will be added separately (non-empty packages map)
+		// This prevents duplication in first bundle, but preserves sourcetree/ in nested bundles
+		if info.IsDir() && info.Name() == "sourcetree" && len(packages) > 0 {
 			return filepath.SkipDir
 		}
 

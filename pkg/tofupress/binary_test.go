@@ -7,6 +7,7 @@ import (
 	"archive/zip"
 	"compress/gzip"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -264,4 +265,51 @@ func TestBinary_BundleAutoDetectsFormat(t *testing.T) {
 	// Verify it's a valid tar.gz (not zip)
 	err = validateTarGzFile(t, outputPath)
 	require.NoError(t, err, "bundle should be a valid tar.gz archive (auto-detected from .tar.gz extension)")
+}
+
+// TestBinary_BundleRemoteGitSource verifies that bundle accepts a remote git source
+// directly as the root input (not just local directories).
+// This is the RED phase test - it should FAIL until remote source support is implemented.
+func TestBinary_BundleRemoteGitSource(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test with network access")
+	}
+
+	binary := buildBinary(t)
+	outputPath := filepath.Join(t.TempDir(), "bundle.zip")
+
+	// Bundle a remote git module directly — current implementation only accepts local dirs
+	cmd := exec.Command(binary, "bundle", //nolint:gosec // G204: subprocess is intentional for testing binary
+		"git::https://github.com/blang/tftest-1.git",
+		outputPath)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "bundle remote git failed: %s", string(out))
+
+	// Verify bundle was created
+	_, err = os.Stat(outputPath)
+	require.NoError(t, err, "bundle file should exist")
+
+	// Verify it's a valid zip
+	err = validateZipFile(t, outputPath)
+	require.NoError(t, err, "bundle should be a valid zip archive")
+}
+
+// TestBinary_ResolveRemoteGitJSON verifies that resolve with --json works on a remote git source.
+// This is the RED phase test - it should FAIL until remote source support is implemented.
+func TestBinary_ResolveRemoteGitJSON(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test with network access")
+	}
+
+	binary := buildBinary(t)
+
+	cmd := exec.Command(binary, "resolve", "--json", //nolint:gosec // G204: subprocess is intentional for testing binary
+		"git::https://github.com/blang/tftest-1.git")
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "resolve remote git failed: %s", string(out))
+
+	// Must produce valid JSON with module tree
+	var result map[string]any
+	require.NoError(t, json.Unmarshal(out, &result), "output should be valid JSON")
+	assert.Contains(t, result, "modules", "JSON output should contain 'modules' key")
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -50,6 +51,14 @@ func resolveSource(ctx context.Context, source string) (workDir, packageRoot str
 	// go-getter expects the destination to not exist
 	packageDir := filepath.Join(tempDir, "package")
 
+	// Configure getters to copy files instead of creating symlinks for local directories
+	getters := make(map[string]getter.Getter)
+	maps.Copy(getters, getter.Getters)
+	// Override FileGetter to copy instead of symlink
+	getters["file"] = &getter.FileGetter{
+		Copy: true,
+	}
+
 	// Download/copy the package using go-getter
 	client := &getter.Client{
 		Ctx:       ctx,
@@ -58,12 +67,41 @@ func resolveSource(ctx context.Context, source string) (workDir, packageRoot str
 		Pwd:       pwd,
 		Mode:      getter.ClientModeDir,
 		Detectors: getter.Detectors,
-		Getters:   getter.Getters,
+		Getters:   getters,
 	}
 
 	if err := client.Get(); err != nil {
 		cleanup()
 		return "", "", nil, fmt.Errorf("failed to fetch source: %w", err)
+	}
+
+	// CRITICAL: go-getter's FileGetter may create a symlink even with Copy: true
+	// We need to resolve it to an actual directory copy
+	if info, err := os.Lstat(packageDir); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		// It's a symlink - resolve it and copy the actual contents
+		realPath, err := filepath.EvalSymlinks(packageDir)
+		if err != nil {
+			cleanup()
+			return "", "", nil, fmt.Errorf("failed to resolve symlink: %w", err)
+		}
+
+		// Remove the symlink
+		if err := os.Remove(packageDir); err != nil {
+			cleanup()
+			return "", "", nil, fmt.Errorf("failed to remove symlink: %w", err)
+		}
+
+		// Create a real directory and copy contents
+		if err := os.MkdirAll(packageDir, 0o755); err != nil { //nolint:gosec // G301: package dir needs standard permissions
+			cleanup()
+			return "", "", nil, fmt.Errorf("failed to create package directory: %w", err)
+		}
+
+		// Copy all contents from the real path to packageDir
+		if err := copyDir(realPath, packageDir); err != nil {
+			cleanup()
+			return "", "", nil, fmt.Errorf("failed to copy source contents: %w", err)
+		}
 	}
 
 	// Remove .git directory if present (clean up VCS metadata)
@@ -87,7 +125,6 @@ func resolveSource(ctx context.Context, source string) (workDir, packageRoot str
 
 	return workDir, packageRoot, cleanup, nil
 }
-
 
 // splitPackageSubdir detects whether the given address string has a subdirectory
 // portion (marked by //), and if so returns a non-empty subDir string along with

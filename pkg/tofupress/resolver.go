@@ -102,7 +102,7 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 				if source.Type == SourceLocal {
 					// Local module: resolve path relative to parent
 					localPath := filepath.Join(item.dir, source.Raw)
-					
+
 					// Check package boundary
 					if r.PackageRoot != "" {
 						relPath, err := filepath.Rel(r.PackageRoot, localPath)
@@ -114,7 +114,7 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 								mod.Name, item.dir, source.Raw, localPath, r.PackageRoot)
 						}
 					}
-					
+
 					child.InstallDir = localPath
 					child.IsLocal = true
 					child.IsRemote = false

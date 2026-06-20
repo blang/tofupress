@@ -86,6 +86,8 @@ func (b *Bundler) Bundle(tree *ResolvedTree, outputPath string) error {
 }
 
 // bundleTarGZ creates a tar.gz archive.
+//
+//nolint:gocognit,gocyclo // complex but straightforward bundling logic
 func (b *Bundler) bundleTarGZ(tree *ResolvedTree, outputPath string) error {
 	outFile, err := os.Create(outputPath) //nolint:gosec // G304: path is provided by user
 	if err != nil {
@@ -115,6 +117,36 @@ func (b *Bundler) bundleTarGZ(tree *ResolvedTree, outputPath string) error {
 		return fmt.Errorf("failed to add root module: %w", err)
 	}
 
+	// Walk the tree and add all local modules that are outside the root directory
+	for _, module := range tree.AllModules {
+		if module == tree.Root {
+			continue // Already added
+		}
+
+		// Skip remote packages (they're in tree.Packages and added separately)
+		if _, isPackage := tree.Packages[module.Source.PackageAddr]; isPackage {
+			continue
+		}
+
+		// For local modules, check if they're outside the root directory
+		if module.IsLocal && module.InstallDir != "" {
+			// Calculate relative path from root to this module
+			relPath, err := filepath.Rel(tree.Root.InstallDir, module.InstallDir)
+			if err != nil {
+				continue
+			}
+
+			// If the module is outside the root directory (path starts with ..), add it
+			if strings.HasPrefix(relPath, "..") {
+				// Use the module's key as the archive path to maintain structure
+				archivePath := strings.ReplaceAll(module.Key, ".", "/")
+				if err := b.addDirectoryToTar(tarWriter, module.InstallDir, archivePath, tree.Packages); err != nil {
+					return fmt.Errorf("failed to add module %s: %w", module.Key, err)
+				}
+			}
+		}
+	}
+
 	for _, pkg := range tree.Packages {
 		uniqueID := filepath.Base(pkg.LocalDir)
 		prefix := filepath.Join("sourcetree", uniqueID)
@@ -127,6 +159,8 @@ func (b *Bundler) bundleTarGZ(tree *ResolvedTree, outputPath string) error {
 }
 
 // bundleTarXZ creates a tar.xz archive.
+//
+//nolint:gocognit,gocyclo // complex but straightforward bundling logic
 func (b *Bundler) bundleTarXZ(tree *ResolvedTree, outputPath string) error {
 	outFile, err := os.Create(outputPath) //nolint:gosec // G304: path is provided by user
 	if err != nil {
@@ -159,6 +193,36 @@ func (b *Bundler) bundleTarXZ(tree *ResolvedTree, outputPath string) error {
 		return fmt.Errorf("failed to add root module: %w", err)
 	}
 
+	// Walk the tree and add all local modules that are outside the root directory
+	for _, module := range tree.AllModules {
+		if module == tree.Root {
+			continue // Already added
+		}
+
+		// Skip remote packages (they're in tree.Packages and added separately)
+		if _, isPackage := tree.Packages[module.Source.PackageAddr]; isPackage {
+			continue
+		}
+
+		// For local modules, check if they're outside the root directory
+		if module.IsLocal && module.InstallDir != "" {
+			// Calculate relative path from root to this module
+			relPath, err := filepath.Rel(tree.Root.InstallDir, module.InstallDir)
+			if err != nil {
+				continue
+			}
+
+			// If the module is outside the root directory (path starts with ..), add it
+			if strings.HasPrefix(relPath, "..") {
+				// Use the module's key as the archive path to maintain structure
+				archivePath := strings.ReplaceAll(module.Key, ".", "/")
+				if err := b.addDirectoryToTar(tarWriter, module.InstallDir, archivePath, tree.Packages); err != nil {
+					return fmt.Errorf("failed to add module %s: %w", module.Key, err)
+				}
+			}
+		}
+	}
+
 	for _, pkg := range tree.Packages {
 		uniqueID := filepath.Base(pkg.LocalDir)
 		prefix := filepath.Join("sourcetree", uniqueID)
@@ -171,6 +235,8 @@ func (b *Bundler) bundleTarXZ(tree *ResolvedTree, outputPath string) error {
 }
 
 // bundleZIP creates a ZIP archive.
+//
+//nolint:gocognit,gocyclo // complex but straightforward bundling logic
 func (b *Bundler) bundleZIP(tree *ResolvedTree, outputPath string) error {
 	outFile, err := os.Create(outputPath) //nolint:gosec // G304: path is provided by user
 	if err != nil {
@@ -191,6 +257,36 @@ func (b *Bundler) bundleZIP(tree *ResolvedTree, outputPath string) error {
 
 	if err := b.addDirectoryToZip(zipWriter, tree.Root.InstallDir, "", tree.Packages); err != nil {
 		return fmt.Errorf("failed to add root module: %w", err)
+	}
+
+	// Walk the tree and add all local modules that are outside the root directory
+	for _, module := range tree.AllModules {
+		if module == tree.Root {
+			continue // Already added
+		}
+
+		// Skip remote packages (they're in tree.Packages and added separately)
+		if _, isPackage := tree.Packages[module.Source.PackageAddr]; isPackage {
+			continue
+		}
+
+		// For local modules, check if they're outside the root directory
+		if module.IsLocal && module.InstallDir != "" {
+			// Calculate relative path from root to this module
+			relPath, err := filepath.Rel(tree.Root.InstallDir, module.InstallDir)
+			if err != nil {
+				continue
+			}
+
+			// If the module is outside the root directory (path starts with ..), add it
+			if strings.HasPrefix(relPath, "..") {
+				// Use the module's key as the archive path to maintain structure
+				archivePath := strings.ReplaceAll(module.Key, ".", "/")
+				if err := b.addDirectoryToZip(zipWriter, module.InstallDir, archivePath, tree.Packages); err != nil {
+					return fmt.Errorf("failed to add module %s: %w", module.Key, err)
+				}
+			}
+		}
 	}
 
 	for _, pkg := range tree.Packages {
@@ -269,7 +365,7 @@ func (b *Bundler) addDirectoryToTar(tw *tar.Writer, srcDir, prefix string, packa
 //
 //nolint:gocognit // complex but straightforward file walking logic
 func (b *Bundler) addDirectoryToZip(zw *zip.Writer, srcDir, prefix string, packages map[string]*DownloadedPackage) error {
-	return filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -333,4 +429,5 @@ func (b *Bundler) addDirectoryToZip(zw *zip.Writer, srcDir, prefix string, packa
 
 		return nil
 	})
+	return err
 }

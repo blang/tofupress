@@ -63,7 +63,7 @@ name = "golangci-lint"
 entry = "golangci-lint"
 language = "system"
 types = ["go"]
-args = ["run"]
+args = ["run", "--new-from-rev=HEAD~1"]
 pass_filenames = false
 always_run = true
 

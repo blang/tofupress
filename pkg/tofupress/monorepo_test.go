@@ -21,9 +21,9 @@ func TestBinary_BundleMonorepoComplex(t *testing.T) {
 	// Use the monorepo fixture - resolve absolute path
 	cwd, err := os.Getwd()
 	require.NoError(t, err)
-	
-	fixtureDir := filepath.Join(cwd, "..", "..", "test-fixtures", "monorepo", "infra", "environments", "prod")
-	
+
+	fixtureDir := filepath.Join(cwd, "..", "..", "test-fixtures", "monorepo") + "//infra/environments/prod"
+
 	// Verify fixture exists
 	_, err = os.Stat(fixtureDir)
 	require.NoError(t, err, "fixture directory should exist: %s", fixtureDir)
@@ -54,7 +54,7 @@ func TestBinary_BundleMonorepoComplex(t *testing.T) {
 
 	mainContent := string(content)
 	t.Logf("Root main.tf content:\n%s", mainContent)
-	
+
 	// All module sources should be relative (start with ./ or ../)
 	lines := strings.Split(mainContent, "\n")
 	for _, line := range lines {
@@ -64,9 +64,9 @@ func TestBinary_BundleMonorepoComplex(t *testing.T) {
 			if len(parts) == 2 {
 				source := strings.TrimSpace(parts[1])
 				source = strings.Trim(source, "\"")
-				
+
 				// Should be relative path (starts with ./ or ../)
-				assert.True(t, 
+				assert.True(t,
 					strings.HasPrefix(source, "./") || strings.HasPrefix(source, "../"),
 					"source should be relative path, got: %s", source)
 			}
@@ -82,7 +82,7 @@ func TestBinary_BundleMonorepoComplex(t *testing.T) {
 	entries, err := os.ReadDir(sourcetreeDir)
 	require.NoError(t, err)
 	t.Logf("Found %d modules in sourcetree (deduplication working)", len(entries))
-	
+
 	// Log the modules found
 	for _, entry := range entries {
 		t.Logf("  - %s", entry.Name())
@@ -93,7 +93,7 @@ func TestBinary_BundleMonorepoComplex(t *testing.T) {
 // from the same monorepo works correctly
 func TestBinary_BundleMonorepoMultipleEnvs(t *testing.T) {
 	binary := buildBinary(t)
-	
+
 	cwd, err := os.Getwd()
 	require.NoError(t, err)
 
@@ -103,15 +103,15 @@ func TestBinary_BundleMonorepoMultipleEnvs(t *testing.T) {
 	}{
 		{
 			name:       "staging environment",
-			fixtureDir: filepath.Join(cwd, "..", "..", "test-fixtures", "monorepo", "infra", "environments", "staging"),
+			fixtureDir: filepath.Join(cwd, "..", "..", "test-fixtures", "monorepo") + "//infra/environments/staging",
 		},
 		{
 			name:       "app1",
-			fixtureDir: filepath.Join(cwd, "..", "..", "test-fixtures", "monorepo", "apps", "app1"),
+			fixtureDir: filepath.Join(cwd, "..", "..", "test-fixtures", "monorepo") + "//apps/app1",
 		},
 		{
 			name:       "platform dev overlay",
-			fixtureDir: filepath.Join(cwd, "..", "..", "test-fixtures", "monorepo", "platform", "overlays", "dev"),
+			fixtureDir: filepath.Join(cwd, "..", "..", "test-fixtures", "monorepo") + "//platform/overlays/dev",
 		},
 	}
 

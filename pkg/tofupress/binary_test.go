@@ -6,6 +6,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -174,6 +175,74 @@ func TestBinary_BundleCreatesArchive(t *testing.T) {
 	// Verify it's a valid zip with entries
 	err = validateZipFile(t, outputPath)
 	require.NoError(t, err, "bundle should be a valid zip archive")
+}
+
+// TestBinary_BundlePreservesSource verifies that bundling does NOT modify source files.
+// This is the RED phase test - it should FAIL until temp directory isolation is implemented.
+func TestBinary_BundlePreservesSource(t *testing.T) {
+	binary := buildBinary(t)
+	fixture := createSimpleFixture(t)
+	outputPath := filepath.Join(t.TempDir(), "bundle.zip")
+
+	// Record original state of all source files
+	mainTfPath := filepath.Join(fixture, "main.tf")
+	childTfPath := filepath.Join(fixture, "child", "main.tf")
+
+	// Get original checksums
+	originalMainHash := hashFile(t, mainTfPath)
+	originalChildHash := hashFile(t, childTfPath)
+
+	// Get original modification times
+	originalMainInfo, err := os.Stat(mainTfPath)
+	require.NoError(t, err)
+	originalMainModTime := originalMainInfo.ModTime()
+
+	originalChildInfo, err := os.Stat(childTfPath)
+	require.NoError(t, err)
+	originalChildModTime := originalChildInfo.ModTime()
+
+	// Run bundle command
+	cmd := exec.Command(binary, "bundle", fixture, outputPath) //nolint:gosec // G204: subprocess is intentional for testing binary
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "bundle should succeed: %s", string(output))
+
+	// Verify bundle was created
+	_, err = os.Stat(outputPath)
+	require.NoError(t, err, "bundle file should exist")
+
+	// CRITICAL: Verify source files were NOT modified
+	afterMainHash := hashFile(t, mainTfPath)
+	afterChildHash := hashFile(t, childTfPath)
+
+	assert.Equal(t, originalMainHash, afterMainHash,
+		"main.tf checksum changed - source file was modified!")
+	assert.Equal(t, originalChildHash, afterChildHash,
+		"child/main.tf checksum changed - source file was modified!")
+
+	// Verify modification times did NOT change
+	afterMainInfo, err := os.Stat(mainTfPath)
+	require.NoError(t, err)
+	assert.Equal(t, originalMainModTime, afterMainInfo.ModTime(),
+		"main.tf modification time changed - source file was touched!")
+
+	afterChildInfo, err := os.Stat(childTfPath)
+	require.NoError(t, err)
+	assert.Equal(t, originalChildModTime, afterChildInfo.ModTime(),
+		"child/main.tf modification time changed - source file was touched!")
+
+	// Verify no sourcetree/ directory was created in source directory
+	sourcetreePath := filepath.Join(fixture, "sourcetree")
+	_, err = os.Stat(sourcetreePath)
+	assert.True(t, os.IsNotExist(err),
+		"sourcetree/ directory should NOT exist in source directory - bundling polluted the source!")
+}
+
+// hashFile returns the SHA-256 hash of a file's contents.
+func hashFile(t *testing.T, path string) [32]byte {
+	t.Helper()
+	content, err := os.ReadFile(path) //nolint:gosec // G304: path comes from test fixture
+	require.NoError(t, err)
+	return sha256.Sum256(content)
 }
 
 // TestBinary_BundleAutoDetectsFormat verifies that bundle auto-detects format from file extension.

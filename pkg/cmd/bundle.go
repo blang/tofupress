@@ -39,10 +39,8 @@ func runBundle(cmd *cobra.Command, args []string) error {
 
 	// Ensure output directory exists
 	outputDir := filepath.Dir(outputPath)
-	if outputDir != "" {
-		if err := os.MkdirAll(outputDir, 0o755); err != nil { //nolint:gosec // G301: 0755 is standard for directories
-			return fmt.Errorf("failed to create output directory: %w", err)
-		}
+	if err := os.MkdirAll(outputDir, 0o755); err != nil { //nolint:gosec // G301: 0755 is standard for directories
+		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
 	fmt.Fprintf(stdout, "Resolving modules in %s...\n", source) //nolint:errcheck // stdout writes are best-effort

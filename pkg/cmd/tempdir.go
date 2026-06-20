@@ -36,17 +36,33 @@ func resolveSource(ctx context.Context, source string) (workDir string, cleanup 
 		return "", nil, fmt.Errorf("failed to create temp directory: %w", err)
 	}
 
+	// Use PackageAddr for fetching (base URL without subpath)
+	fetchSource := src.PackageAddr
+	if fetchSource == "" {
+		fetchSource = source
+	}
+
 	fetcher := tofupress.NewFetcher()
-	if err := fetcher.Fetch(ctx, tempDir, source); err != nil {
+	if err := fetcher.Fetch(ctx, tempDir, fetchSource); err != nil {
 		os.RemoveAll(tempDir) //nolint:errcheck,gosec // cleanup after error
 		return "", nil, fmt.Errorf("failed to fetch remote source: %w", err)
+	}
+
+	// Navigate to SubDir if specified
+	workDir = tempDir
+	if src.SubDir != "" {
+		workDir = filepath.Join(tempDir, src.SubDir)
+		if _, err := os.Stat(workDir); err != nil {
+			os.RemoveAll(tempDir) //nolint:errcheck,gosec // cleanup after error
+			return "", nil, fmt.Errorf("subpath %s does not exist in fetched repository: %w", src.SubDir, err)
+		}
 	}
 
 	cleanup = func() {
 		os.RemoveAll(tempDir) //nolint:errcheck,gosec // cleanup failures are acceptable
 	}
 
-	return tempDir, cleanup, nil
+	return workDir, cleanup, nil
 }
 
 // prepareWorkDir copies the source directory to a temp location for processing.

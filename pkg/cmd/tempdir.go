@@ -1,11 +1,49 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+
+	"github.com/blang/tofupress/pkg/tofupress"
 )
+
+// resolveSource prepares a working directory from either a local path or remote source.
+// For remote sources, it downloads them to a temp directory using go-getter.
+// For local sources, it copies them to a temp directory.
+// Returns the temp directory path and a cleanup function.
+func resolveSource(source string) (workDir string, cleanup func(), err error) {
+	// Classify the source to determine if it's remote
+	src := tofupress.ClassifySource(source, "")
+
+	if src.Type == tofupress.SourceLocal {
+		// Local source - validate it exists and copy to temp
+		if _, statErr := os.Stat(source); os.IsNotExist(statErr) {
+			return "", nil, fmt.Errorf("directory does not exist: %s", source)
+		}
+		return prepareWorkDir(source)
+	}
+
+	// Remote source - download to temp
+	tempDir, err := os.MkdirTemp("", "tofupress-remote-*")
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to create temp directory: %w", err)
+	}
+
+	fetcher := tofupress.NewFetcher()
+	if err := fetcher.Fetch(context.Background(), tempDir, source); err != nil {
+		os.RemoveAll(tempDir) //nolint:errcheck,gosec // cleanup after error
+		return "", nil, fmt.Errorf("failed to fetch remote source: %w", err)
+	}
+
+	cleanup = func() {
+		os.RemoveAll(tempDir) //nolint:errcheck,gosec // cleanup failures are acceptable
+	}
+
+	return tempDir, cleanup, nil
+}
 
 // prepareWorkDir copies the source directory to a temp location for processing.
 // Returns the temp directory path and a cleanup function.

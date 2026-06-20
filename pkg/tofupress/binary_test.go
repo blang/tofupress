@@ -278,9 +278,9 @@ func TestBinary_BundleRemoteGitSource(t *testing.T) {
 	binary := buildBinary(t)
 	outputPath := filepath.Join(t.TempDir(), "bundle.zip")
 
-	// Bundle a remote git module directly — current implementation only accepts local dirs
+	// Bundle a remote git module directly — implementation accepts both local and remote sources
 	cmd := exec.Command(binary, "bundle", //nolint:gosec // G204: subprocess is intentional for testing binary
-		"git::https://github.com/blang/tftest-1.git",
+		"git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git?ref=master",
 		outputPath)
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "bundle remote git failed: %s", string(out))
@@ -304,7 +304,7 @@ func TestBinary_ResolveRemoteGitJSON(t *testing.T) {
 	binary := buildBinary(t)
 
 	cmd := exec.Command(binary, "resolve", "--json", //nolint:gosec // G204: subprocess is intentional for testing binary
-		"git::https://github.com/blang/tftest-1.git")
+		"git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git?ref=master")
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "resolve remote git failed: %s", string(out))
 

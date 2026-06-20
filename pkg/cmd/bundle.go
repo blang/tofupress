@@ -38,11 +38,6 @@ func runBundle(cmd *cobra.Command, args []string) error {
 	outputPath := args[1]
 	stdout := cmd.OutOrStdout()
 
-	// Validate directory exists
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		return fmt.Errorf("directory does not exist: %s", dir)
-	}
-
 	// Ensure output directory exists
 	outputDir := filepath.Dir(outputPath)
 	if outputDir != "" {
@@ -53,10 +48,10 @@ func runBundle(cmd *cobra.Command, args []string) error {
 
 	fmt.Fprintf(stdout, "Resolving modules in %s...\n", dir) //nolint:errcheck // stdout writes are best-effort
 
-	// Prepare temp directory (don't modify source)
-	workDir, cleanup, err := prepareWorkDir(dir)
+	// Resolve source (local or remote) to a working directory
+	workDir, cleanup, err := resolveSource(dir)
 	if err != nil {
-		return fmt.Errorf("failed to prepare work directory: %w", err)
+		return err
 	}
 	defer cleanup()
 

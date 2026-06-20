@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -30,15 +29,10 @@ func runResolve(cmd *cobra.Command, args []string) error {
 	dir := args[0]
 	stdout := cmd.OutOrStdout()
 
-	// Validate directory exists
-	if _, err := os.Stat(dir); os.IsNotExist(err) {
-		return fmt.Errorf("directory does not exist: %s", dir)
-	}
-
-	// Prepare temp directory (don't modify source)
-	workDir, cleanup, err := prepareWorkDir(dir)
+	// Resolve source (local or remote) to a working directory
+	workDir, cleanup, err := resolveSource(dir)
 	if err != nil {
-		return fmt.Errorf("failed to prepare work directory: %w", err)
+		return err
 	}
 	defer cleanup()
 

@@ -179,7 +179,7 @@ func TestBinary_BundleCreatesArchive(t *testing.T) {
 }
 
 // TestBinary_BundlePreservesSource verifies that bundling does NOT modify source files.
-// This is the RED phase test - it should FAIL until temp directory isolation is implemented.
+// This test was added in RED phase and now passes after implementing temp directory isolation.
 func TestBinary_BundlePreservesSource(t *testing.T) {
 	binary := buildBinary(t)
 	fixture := createSimpleFixture(t)
@@ -269,7 +269,7 @@ func TestBinary_BundleAutoDetectsFormat(t *testing.T) {
 
 // TestBinary_BundleRemoteGitSource verifies that bundle accepts a remote git source
 // directly as the root input (not just local directories).
-// This is the RED phase test - it should FAIL until remote source support is implemented.
+// This test was added in RED phase and now passes after implementing remote source support.
 func TestBinary_BundleRemoteGitSource(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test with network access")
@@ -295,7 +295,7 @@ func TestBinary_BundleRemoteGitSource(t *testing.T) {
 }
 
 // TestBinary_ResolveRemoteGitJSON verifies that resolve with --json works on a remote git source.
-// This is the RED phase test - it should FAIL until remote source support is implemented.
+// This test was added in RED phase and now passes after implementing remote source support.
 func TestBinary_ResolveRemoteGitJSON(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test with network access")

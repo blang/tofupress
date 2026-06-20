@@ -13,15 +13,19 @@ import (
 // resolveSource prepares a working directory from either a local path or remote source.
 // For remote sources, it downloads them to a temp directory using go-getter.
 // For local sources, it copies them to a temp directory.
+// The provided context is used for remote fetch operations.
 // Returns the temp directory path and a cleanup function.
-func resolveSource(source string) (workDir string, cleanup func(), err error) {
+func resolveSource(ctx context.Context, source string) (workDir string, cleanup func(), err error) {
 	// Classify the source to determine if it's remote
 	src := tofupress.ClassifySource(source, "")
 
 	if src.Type == tofupress.SourceLocal {
 		// Local source - validate it exists and copy to temp
-		if _, statErr := os.Stat(source); os.IsNotExist(statErr) {
-			return "", nil, fmt.Errorf("directory does not exist: %s", source)
+		if _, statErr := os.Stat(source); statErr != nil {
+			if os.IsNotExist(statErr) {
+				return "", nil, fmt.Errorf("directory does not exist: %s", source)
+			}
+			return "", nil, fmt.Errorf("cannot access %s: %w", source, statErr)
 		}
 		return prepareWorkDir(source)
 	}
@@ -33,7 +37,7 @@ func resolveSource(source string) (workDir string, cleanup func(), err error) {
 	}
 
 	fetcher := tofupress.NewFetcher()
-	if err := fetcher.Fetch(context.Background(), tempDir, source); err != nil {
+	if err := fetcher.Fetch(ctx, tempDir, source); err != nil {
 		os.RemoveAll(tempDir) //nolint:errcheck,gosec // cleanup after error
 		return "", nil, fmt.Errorf("failed to fetch remote source: %w", err)
 	}
@@ -91,6 +95,7 @@ func copyDir(src, dst string) error {
 	})
 }
 
+// copyFile copies a single file from src to dst, preserving content but not permissions.
 func copyFile(src, dst string) error {
 	srcFile, err := os.Open(src) //nolint:gosec // G304: path is from our own directory walk
 	if err != nil {

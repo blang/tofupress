@@ -34,7 +34,7 @@ func init() {
 }
 
 func runBundle(cmd *cobra.Command, args []string) error {
-	dir := args[0]
+	source := args[0]
 	outputPath := args[1]
 	stdout := cmd.OutOrStdout()
 
@@ -46,10 +46,10 @@ func runBundle(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Fprintf(stdout, "Resolving modules in %s...\n", dir) //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Resolving modules in %s...\n", source) //nolint:errcheck // stdout writes are best-effort
 
 	// Resolve source (local or remote) to a working directory
-	workDir, cleanup, err := resolveSource(dir)
+	workDir, cleanup, err := resolveSource(cmd.Context(), source)
 	if err != nil {
 		return err
 	}

@@ -213,7 +213,7 @@ func (b *Bundler) addDirectoryToTar(tw *tar.Writer, srcDir, prefix string) error
 			return err
 		}
 
-		if info.IsDir() && (info.Name() == ".terraform" || info.Name() == ".git") {
+		if info.IsDir() && (info.Name() == ".terraform" || info.Name() == ".git" || info.Name() == "sourcetree") {
 			return filepath.SkipDir
 		}
 
@@ -268,7 +268,7 @@ func (b *Bundler) addDirectoryToZip(zw *zip.Writer, srcDir, prefix string) error
 			return err
 		}
 
-		if info.IsDir() && (info.Name() == ".terraform" || info.Name() == ".git") {
+		if info.IsDir() && (info.Name() == ".terraform" || info.Name() == ".git" || info.Name() == "sourcetree") {
 			return filepath.SkipDir
 		}
 

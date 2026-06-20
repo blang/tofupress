@@ -294,6 +294,48 @@ func TestBinary_BundleRemoteGitSource(t *testing.T) {
 	require.NoError(t, err, "bundle should be a valid zip archive")
 }
 
+// TestBinary_BundleNoDuplicates verifies that bundling a project with remote modules
+// does not create duplicate entries in the archive.
+// This test was added in RED phase to catch the duplicate archive entries bug.
+func TestBinary_BundleNoDuplicates(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test with network access")
+	}
+
+	binary := buildBinary(t)
+	outputPath := filepath.Join(t.TempDir(), "bundle.zip")
+
+	// Bundle a remote git module that has submodules
+	cmd := exec.Command(binary, "bundle", //nolint:gosec // G204: subprocess is intentional for testing binary
+		"git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git?ref=master",
+		outputPath)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "bundle remote git failed: %s", string(out))
+
+	// Verify bundle was created
+	_, err = os.Stat(outputPath)
+	require.NoError(t, err, "bundle file should exist")
+
+	// Open the zip and check for duplicate entries
+	f, err := zip.OpenReader(outputPath)
+	require.NoError(t, err, "failed to open zip archive")
+	defer f.Close() //nolint:errcheck // best effort
+
+	// Count occurrences of each file path
+	entryCounts := make(map[string]int)
+	for _, file := range f.File {
+		entryCounts[file.Name]++
+	}
+
+	// Check that no entry appears more than once
+	for path, count := range entryCounts {
+		assert.Equal(t, 1, count, "archive entry %s appears %d times (should be 1) - duplicate detected!", path, count)
+	}
+
+	// Also verify we have at least some entries (sanity check)
+	assert.Greater(t, len(entryCounts), 0, "archive should contain at least one entry")
+}
+
 // TestBinary_ResolveRemoteGitJSON verifies that resolve with --json works on a remote git source.
 // This test was added in RED phase and now passes after implementing remote source support.
 func TestBinary_ResolveRemoteGitJSON(t *testing.T) {
@@ -312,4 +354,31 @@ func TestBinary_ResolveRemoteGitJSON(t *testing.T) {
 	var result map[string]any
 	require.NoError(t, json.Unmarshal(out, &result), "output should be valid JSON")
 	assert.Contains(t, result, "modules", "JSON output should contain 'modules' key")
+}
+
+// TestBinary_BundleWithSubpath verifies that bundle handles subpath sources correctly.
+// A subpath source like "git::https://github.com/user/repo.git//modules/vpc" should
+// bundle only the modules/vpc subdirectory as the root module.
+func TestBinary_BundleWithSubpath(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test with network access")
+	}
+
+	binary := buildBinary(t)
+	outputPath := filepath.Join(t.TempDir(), "bundle.zip")
+
+	// Bundle a subpath of a remote git module
+	cmd := exec.Command(binary, "bundle", //nolint:gosec // G204: subprocess is intentional for testing binary
+		"git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git//modules/vpc?ref=master",
+		outputPath)
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "bundle subpath source failed: %s", string(out))
+
+	// Verify bundle was created
+	_, err = os.Stat(outputPath)
+	require.NoError(t, err, "bundle file should exist")
+
+	// Verify it's a valid zip
+	err = validateZipFile(t, outputPath)
+	require.NoError(t, err, "bundle should be a valid zip archive")
 }

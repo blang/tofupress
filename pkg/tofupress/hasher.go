@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -13,6 +12,7 @@ import (
 // HashModule computes a SHA-256 hash of all .tf files in the given directory.
 // It only hashes files in the root directory (not subdirectories).
 // The hash is deterministic and order-independent.
+// Uses length-prefixed format to prevent collision vulnerabilities.
 func HashModule(dir string) (string, error) {
 	// Check if directory exists
 	info, err := os.Stat(dir)
@@ -46,28 +46,27 @@ func HashModule(dir string) (string, error) {
 	// Sort for deterministic ordering
 	sort.Strings(tfFiles)
 
-	// Compute hash
+	// Compute hash using length-prefixed format to prevent collisions
+	// Format: <filename_len>:<filename><content_len>:<content>
 	h := sha256.New()
 	for _, filename := range tfFiles {
 		filePath := filepath.Join(dir, filename)
-		f, err := os.Open(filePath)
+		
+		// Read file content
+		content, err := os.ReadFile(filePath)
 		if err != nil {
-			return "", fmt.Errorf("failed to open file %s: %w", filePath, err)
-		}
-
-		// Write filename to hash for order independence
-		h.Write([]byte(filename))
-		h.Write([]byte("\n"))
-
-		// Write file content to hash
-		if _, err := io.Copy(h, f); err != nil {
-			f.Close()
 			return "", fmt.Errorf("failed to read file %s: %w", filePath, err)
 		}
-		f.Close()
 
-		// Add separator between files
-		h.Write([]byte("\n"))
+		// Write filename with length prefix
+		filenameLen := fmt.Sprintf("%d:", len(filename))
+		h.Write([]byte(filenameLen))
+		h.Write([]byte(filename))
+
+		// Write content with length prefix
+		contentLen := fmt.Sprintf("%d:", len(content))
+		h.Write([]byte(contentLen))
+		h.Write(content)
 	}
 
 	return hex.EncodeToString(h.Sum(nil)), nil

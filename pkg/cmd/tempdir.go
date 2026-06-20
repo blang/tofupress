@@ -117,14 +117,18 @@ func copyFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer srcFile.Close() //nolint:errcheck // best effort
+	defer srcFile.Close() //nolint:errcheck // read-only close errors are acceptable
 
 	dstFile, err := os.Create(dst) //nolint:gosec // G304: path is constructed by us
 	if err != nil {
 		return err
 	}
-	defer dstFile.Close() //nolint:errcheck // best effort
 
 	_, err = io.Copy(dstFile, srcFile)
+	// Check close error for destination file - write operations can fail on close
+	// (e.g., filesystem full, network error). Only report close error if no prior error.
+	if closeErr := dstFile.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
 	return err
 }

@@ -43,7 +43,11 @@ func TestMain(m *testing.M) {
 	testBinaryPath = filepath.Join(testDir, binaryName)
 
 	// Get the project root directory (3 levels up from this test file)
-	_, filename, _, _ := runtime.Caller(0)
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		fmt.Fprintln(os.Stderr, "failed to determine test file location")
+		os.Exit(1)
+	}
 	projectRoot := filepath.Dir(filepath.Dir(filepath.Dir(filename)))
 
 	cmd := exec.Command("go", "build", "-o", testBinaryPath, "./cmd/tofupress") //nolint:gosec // G204: subprocess is intentional for building test binary
@@ -140,7 +144,7 @@ func validateZipContents(t *testing.T, path string, expectedFiles []string) (map
 	for _, expected := range expectedFiles {
 		found := false
 		for name := range contents {
-			if name == expected || filepath.Base(name) == expected {
+			if name == expected {
 				found = true
 				break
 			}
@@ -237,7 +241,7 @@ func validateTarGzContents(t *testing.T, path string, expectedFiles []string) (m
 	for _, expected := range expectedFiles {
 		found := false
 		for name := range contents {
-			if name == expected || filepath.Base(name) == expected {
+			if name == expected {
 				found = true
 				break
 			}

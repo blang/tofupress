@@ -402,19 +402,23 @@ func TestParseBundleFormat(t *testing.T) {
 		expected BundleFormat
 		wantErr  bool
 	}{
+		{"auto", BundleFormatAuto, false},
+		{"", BundleFormatAuto, false},
 		{"zip", BundleFormatZIP, false},
 		{"ZIP", BundleFormatZIP, false},
-		{"", BundleFormatZIP, false},
 		{"tar.gz", BundleFormatTarGZ, false},
 		{"tgz", BundleFormatTarGZ, false},
 		{"tar.xz", BundleFormatTarXZ, false},
 		{"txz", BundleFormatTarXZ, false},
 		{"rar", "", true},
-		{"", BundleFormatZIP, false},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.input, func(t *testing.T) {
+		name := tt.input
+		if name == "" {
+			name = "empty"
+		}
+		t.Run(name, func(t *testing.T) {
 			got, err := ParseBundleFormat(tt.input)
 			if tt.wantErr {
 				assert.Error(t, err)
@@ -422,6 +426,33 @@ func TestParseBundleFormat(t *testing.T) {
 				assert.NoError(t, err)
 				assert.Equal(t, tt.expected, got)
 			}
+		})
+	}
+}
+
+func TestDetectFormatFromPath(t *testing.T) {
+	tests := []struct {
+		path      string
+		expected  BundleFormat
+		detected  bool
+	}{
+		{"bundle.zip", BundleFormatZIP, true},
+		{"/path/to/bundle.ZIP", BundleFormatZIP, true},
+		{"output.tar.gz", BundleFormatTarGZ, true},
+		{"output.tgz", BundleFormatTarGZ, true},
+		{"output.TAR.GZ", BundleFormatTarGZ, true},
+		{"output.tar.xz", BundleFormatTarXZ, true},
+		{"output.txz", BundleFormatTarXZ, true},
+		{"bundle.tar", BundleFormatZIP, false},
+		{"bundle", BundleFormatZIP, false},
+		{"bundle.rar", BundleFormatZIP, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			got, ok := DetectFormatFromPath(tt.path)
+			assert.Equal(t, tt.detected, ok)
+			assert.Equal(t, tt.expected, got)
 		})
 	}
 }

@@ -19,6 +19,7 @@ type BundleFormat string
 
 // Bundle format constants define the supported archive output formats.
 const (
+	BundleFormatAuto  BundleFormat = "auto"   // Infer from output file extension
 	BundleFormatZIP   BundleFormat = "zip"    // OCI distribution
 	BundleFormatTarGZ BundleFormat = "tar.gz" // HTTP distribution
 	BundleFormatTarXZ BundleFormat = "tar.xz" // S3 distribution
@@ -27,7 +28,9 @@ const (
 // ParseBundleFormat parses a format string into a BundleFormat.
 func ParseBundleFormat(s string) (BundleFormat, error) {
 	switch strings.ToLower(s) {
-	case "zip", "":
+	case "auto", "":
+		return BundleFormatAuto, nil
+	case "zip":
 		return BundleFormatZIP, nil
 	case "tar.gz", "tgz":
 		return BundleFormatTarGZ, nil
@@ -35,6 +38,22 @@ func ParseBundleFormat(s string) (BundleFormat, error) {
 		return BundleFormatTarXZ, nil
 	default:
 		return "", fmt.Errorf("unsupported bundle format: %s (use zip, tar.gz, or tar.xz)", s)
+	}
+}
+
+// DetectFormatFromPath infers the bundle format from the output file extension.
+// Returns the detected format and true if recognized, or BundleFormatZIP and false if not.
+func DetectFormatFromPath(path string) (BundleFormat, bool) {
+	lower := strings.ToLower(path)
+	switch {
+	case strings.HasSuffix(lower, ".tar.xz"), strings.HasSuffix(lower, ".txz"):
+		return BundleFormatTarXZ, true
+	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"):
+		return BundleFormatTarGZ, true
+	case strings.HasSuffix(lower, ".zip"):
+		return BundleFormatZIP, true
+	default:
+		return BundleFormatZIP, false
 	}
 }
 

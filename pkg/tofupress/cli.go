@@ -59,7 +59,7 @@ Example:
 			return runBundle(cmd, args, stdout)
 		},
 	}
-	bundleCmd.Flags().String("format", "zip", "Bundle format: zip, tar.gz, tar.xz")
+	bundleCmd.Flags().String("format", "auto", "Bundle format: auto, zip, tar.gz, tar.xz (auto detects from output file extension)")
 
 	rootCmd.AddCommand(resolveCmd)
 	rootCmd.AddCommand(bundleCmd)
@@ -214,6 +214,18 @@ func runBundle(cmd *cobra.Command, args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+
+	// Auto-detect format from output file extension if not explicitly set
+	if format == BundleFormatAuto {
+		detected, ok := DetectFormatFromPath(outputPath)
+		if ok {
+			format = detected
+		} else {
+			fmt.Fprintf(os.Stderr, "Warning: could not infer format from output file '%s', defaulting to zip\n", outputPath) //nolint:errcheck // stderr is best-effort
+			format = BundleFormatZIP
+		}
+	}
+
 	bundler := NewBundler(format)
 	if bundleErr := bundler.Bundle(tree, outputPath); bundleErr != nil {
 		return fmt.Errorf("failed to create bundle: %w", bundleErr)

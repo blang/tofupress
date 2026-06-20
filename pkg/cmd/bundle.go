@@ -53,9 +53,16 @@ func runBundle(cmd *cobra.Command, args []string) error {
 
 	fmt.Fprintf(stdout, "Resolving modules in %s...\n", dir) //nolint:errcheck // stdout writes are best-effort
 
-	// Resolve modules
+	// Prepare temp directory (don't modify source)
+	workDir, cleanup, err := prepareWorkDir(dir)
+	if err != nil {
+		return fmt.Errorf("failed to prepare work directory: %w", err)
+	}
+	defer cleanup()
+
+	// Resolve modules in temp directory
 	resolver := tofupress.NewResolver()
-	tree, err := resolver.Resolve(context.Background(), dir)
+	tree, err := resolver.Resolve(context.Background(), workDir)
 	if err != nil {
 		return fmt.Errorf("failed to resolve modules: %w", err)
 	}

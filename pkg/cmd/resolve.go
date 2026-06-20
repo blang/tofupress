@@ -35,9 +35,16 @@ func runResolve(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("directory does not exist: %s", dir)
 	}
 
-	// Resolve modules
+	// Prepare temp directory (don't modify source)
+	workDir, cleanup, err := prepareWorkDir(dir)
+	if err != nil {
+		return fmt.Errorf("failed to prepare work directory: %w", err)
+	}
+	defer cleanup()
+
+	// Resolve modules in temp directory
 	resolver := tofupress.NewResolver()
-	tree, err := resolver.Resolve(context.Background(), dir)
+	tree, err := resolver.Resolve(context.Background(), workDir)
 	if err != nil {
 		return fmt.Errorf("failed to resolve modules: %w", err)
 	}
@@ -105,6 +112,7 @@ func outputJSON(stdout io.Writer, tree *tofupress.ResolvedTree) error {
 	return encoder.Encode(output)
 }
 
+//nolint:unparam // error return is part of the output function interface
 func outputText(stdout io.Writer, tree *tofupress.ResolvedTree) error {
 	// Output as human-readable text
 	fmt.Fprintln(stdout, "Module tree:") //nolint:errcheck // stdout writes are best-effort

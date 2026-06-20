@@ -112,18 +112,29 @@ func parseOCISource(raw string) ModuleSource {
 // parseRegistrySource parses a registry module source without making network calls.
 // The actual registry API query happens during resolution.
 func parseRegistrySource(raw string) ModuleSource {
+	// Extract version/ref from query parameters
+	ref := extractRef(raw)
+
+	// Strip query parameters before parsing namespace/name/provider
+	clean := raw
+	if idx := strings.Index(raw, "?"); idx > -1 {
+		clean = raw[:idx]
+	}
+
 	// Parse the registry module format: namespace/name/provider
-	parts := strings.Split(raw, "/")
+	parts := strings.Split(clean, "/")
 	if len(parts) != 3 {
 		return ModuleSource{
 			Raw:  raw,
 			Type: SourceRegistry,
+			Ref:  ref,
 		}
 	}
 
 	return ModuleSource{
 		Raw:               raw,
 		Type:              SourceRegistry,
+		Ref:               ref,
 		RegistryNamespace: parts[0],
 		RegistryName:      parts[1],
 		RegistryProvider:  parts[2],

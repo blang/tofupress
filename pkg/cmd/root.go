@@ -59,4 +59,8 @@ func setupLogger(lvl slog.Level) {
 
 func init() {
 	rootCmd.PersistentFlags().BoolP("debug", "", false, "Enable verbose logging")
+
+	// Register subcommands
+	rootCmd.AddCommand(resolveCmd)
+	rootCmd.AddCommand(bundleCmd)
 }

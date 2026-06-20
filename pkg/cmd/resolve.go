@@ -1,0 +1,148 @@
+package cmd
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+
+	"github.com/spf13/cobra"
+
+	"github.com/blang/tofupress/pkg/tofupress"
+)
+
+var resolveCmd = &cobra.Command{
+	Use:   "resolve <directory>",
+	Short: "Resolve all modules in a Terraform/OpenTofu configuration",
+	Long:  `Scans the given directory for Terraform/OpenTofu files and resolves all module dependencies.`,
+	Args:  cobra.ExactArgs(1),
+	RunE:  runResolve,
+}
+
+func init() {
+	resolveCmd.Flags().Bool("json", false, "Output in JSON format")
+}
+
+//nolint:gocognit // JSON and text output branching is straightforward
+func runResolve(cmd *cobra.Command, args []string) error {
+	dir := args[0]
+	stdout := cmd.OutOrStdout()
+
+	// Validate directory exists
+	if _, err := os.Stat(dir); os.IsNotExist(err) {
+		return fmt.Errorf("directory does not exist: %s", dir)
+	}
+
+	// Resolve modules
+	resolver := tofupress.NewResolver()
+	tree, err := resolver.Resolve(context.Background(), dir)
+	if err != nil {
+		return fmt.Errorf("failed to resolve modules: %w", err)
+	}
+
+	// Check if JSON output requested
+	jsonOutput, _ := cmd.Flags().GetBool("json")
+
+	if jsonOutput {
+		return outputJSON(stdout, tree)
+	}
+
+	return outputText(stdout, tree)
+}
+
+//nolint:gocognit // JSON marshaling with cycle detection is complex but clear
+func outputJSON(stdout io.Writer, tree *tofupress.ResolvedTree) error {
+	// Output as JSON - use a cycle-safe representation
+	type jsonModule struct {
+		Key        string   `json:"key"`
+		Name       string   `json:"name"`
+		Source     string   `json:"source"`
+		InstallDir string   `json:"install_dir"`
+		Children   []string `json:"children"`
+		IsLocal    bool     `json:"is_local"`
+		IsRemote   bool     `json:"is_remote"`
+	}
+
+	type jsonPackage struct {
+		PackageAddr string `json:"package_addr"`
+		LocalDir    string `json:"local_dir"`
+	}
+
+	modules := make([]jsonModule, 0, len(tree.AllModules))
+	for _, mod := range tree.AllModules {
+		childNames := make([]string, 0, len(mod.Children))
+		for _, child := range mod.Children {
+			childNames = append(childNames, child.Key)
+		}
+		modules = append(modules, jsonModule{
+			Key:        mod.Key,
+			Name:       mod.Name,
+			Source:     mod.Source.Raw,
+			IsLocal:    mod.IsLocal,
+			IsRemote:   mod.IsRemote,
+			InstallDir: mod.InstallDir,
+			Children:   childNames,
+		})
+	}
+
+	packages := make([]jsonPackage, 0, len(tree.Packages))
+	for _, pkg := range tree.Packages {
+		packages = append(packages, jsonPackage{
+			PackageAddr: pkg.PackageAddr,
+			LocalDir:    pkg.LocalDir,
+		})
+	}
+
+	output := map[string]any{
+		"root":     tree.Root.Key, //nolint:goconst // JSON key
+		"modules":  modules,
+		"packages": packages,
+	}
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(output)
+}
+
+func outputText(stdout io.Writer, tree *tofupress.ResolvedTree) error {
+	// Output as human-readable text
+	fmt.Fprintln(stdout, "Module tree:") //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintln(stdout, "============") //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintln(stdout)                 //nolint:errcheck // stdout writes are best-effort
+
+	// Print tree structure
+	printModuleTree(stdout, tree.Root, 0)
+
+	fmt.Fprintln(stdout)                                             //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Total modules: %d\n", len(tree.AllModules)) //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Total packages: %d\n", len(tree.Packages))  //nolint:errcheck // stdout writes are best-effort
+
+	return nil
+}
+
+func printModuleTree(w io.Writer, node *tofupress.ModuleNode, depth int) {
+	var indent strings.Builder
+	for range depth {
+		indent.WriteString("  ")
+	}
+
+	// Print module name and source
+	moduleType := "local" //nolint:goconst // short descriptive string, not a shared constant
+	if node.IsRemote {
+		moduleType = "remote"
+	}
+
+	fmt.Fprintf(w, "%s- %s (%s)\n", indent.String(), node.Name, moduleType) //nolint:errcheck // writer writes are best-effort
+	if node.Source.PackageAddr != "" {
+		fmt.Fprintf(w, "%s  Source: %s\n", indent.String(), node.Source.PackageAddr) //nolint:errcheck // writer writes are best-effort
+	}
+	if node.InstallDir != "" {
+		fmt.Fprintf(w, "%s  Path: %s\n", indent.String(), node.InstallDir) //nolint:errcheck // writer writes are best-effort
+	}
+
+	// Print children
+	for _, child := range node.Children {
+		printModuleTree(w, child, depth+1)
+	}
+}

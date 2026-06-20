@@ -19,11 +19,14 @@ const (
 
 // ModuleSource represents a parsed module source attribute.
 type ModuleSource struct {
-	Raw         string
-	PackageAddr string
-	SubDir      string
-	Ref         string
-	Type        SourceType
+	Raw               string
+	PackageAddr       string
+	SubDir            string
+	Ref               string
+	Type              SourceType
+	RegistryNamespace string // For registry modules: namespace
+	RegistryName      string // For registry modules: module name
+	RegistryProvider  string // For registry modules: provider
 }
 
 // ModuleNode represents a single module instance in the resolved tree.

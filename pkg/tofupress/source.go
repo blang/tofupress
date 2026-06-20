@@ -109,14 +109,24 @@ func parseOCISource(raw string) ModuleSource {
 	}
 }
 
-// parseRegistrySource parses a registry module source.
+// parseRegistrySource parses a registry module source without making network calls.
+// The actual registry API query happens during resolution.
 func parseRegistrySource(raw string) ModuleSource {
-	ref := extractRef(raw)
+	// Parse the registry module format: namespace/name/provider
+	parts := strings.Split(raw, "/")
+	if len(parts) != 3 {
+		return ModuleSource{
+			Raw:  raw,
+			Type: SourceRegistry,
+		}
+	}
 
 	return ModuleSource{
-		Raw:  raw,
-		Type: SourceRegistry,
-		Ref:  ref,
+		Raw:               raw,
+		Type:              SourceRegistry,
+		RegistryNamespace: parts[0],
+		RegistryName:      parts[1],
+		RegistryProvider:  parts[2],
 	}
 }
 

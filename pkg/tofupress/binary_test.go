@@ -596,3 +596,38 @@ module "remote" {
 	require.Contains(t, string(output), "sourcetree/", "second bundle should contain sourcetree/ directory")
 	require.Contains(t, string(output), "main.tf", "second bundle should contain main.tf")
 }
+
+// TestBinary_BundleRegistryModule verifies that registry-style module sources
+// (e.g., hashicorp/consul/aws) work correctly through go-getter.
+func TestBinary_BundleRegistryModule(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test with network access")
+	}
+
+	binary := buildBinary(t)
+
+	// Create a fixture with a registry module
+	fixtureDir := t.TempDir()
+	mainTf := filepath.Join(fixtureDir, "main.tf")
+	err := os.WriteFile(mainTf, []byte(`
+module "consul" {
+  source  = "hashicorp/consul/aws"
+  version = "0.11.0"
+}
+`), 0644)
+	require.NoError(t, err)
+
+	// Bundle the fixture
+	bundlePath := filepath.Join(t.TempDir(), "registry-bundle.zip")
+	cmd := exec.Command(binary, "bundle", fixtureDir, bundlePath) //nolint:gosec // G204: subprocess is intentional
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "registry bundle failed: %s", string(output))
+	require.FileExists(t, bundlePath)
+
+	// Verify the bundle contains sourcetree/ with the registry module
+	cmd = exec.Command("unzip", "-l", bundlePath)
+	output, err = cmd.CombinedOutput()
+	require.NoError(t, err, "unzip -l failed: %s", string(output))
+	require.Contains(t, string(output), "sourcetree/", "bundle should contain sourcetree/ directory")
+	require.Contains(t, string(output), "main.tf", "bundle should contain main.tf")
+}

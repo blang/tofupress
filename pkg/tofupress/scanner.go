@@ -13,8 +13,9 @@ import (
 
 // ModuleBlock represents a Terraform module block extracted from an HCL file.
 type ModuleBlock struct {
-	Name   string
-	Source string
+	Name    string
+	Source  string
+	Version string
 }
 
 // String returns a string representation of the module block.
@@ -121,9 +122,20 @@ func ExtractModuleBlocks(filePath string) ([]ModuleBlock, error) {
 		}
 
 		source := val.AsString()
+
+		// Extract version attribute if present
+		var version string
+		if versionAttr, exists := attrs["version"]; exists {
+			versionVal, versionDiags := versionAttr.Expr.Value(nil)
+			if !versionDiags.HasErrors() && versionVal.Type() == cty.String {
+				version = versionVal.AsString()
+			}
+		}
+
 		modules = append(modules, ModuleBlock{
-			Name:   moduleName,
-			Source: source,
+			Name:    moduleName,
+			Source:  source,
+			Version: version,
 		})
 	}
 

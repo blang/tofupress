@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -57,7 +56,7 @@ func runBundle(cmd *cobra.Command, args []string) error {
 
 	// Resolve modules in temp directory
 	resolver := tofupress.NewResolver()
-	tree, err := resolver.Resolve(context.Background(), workDir)
+	tree, err := resolver.Resolve(cmd.Context(), workDir)
 	if err != nil {
 		return fmt.Errorf("failed to resolve modules: %w", err)
 	}

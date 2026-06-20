@@ -10,6 +10,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestGenerateUniqueID_Length verifies that unique IDs are at least 16 hex characters (64 bits)
+// to avoid collision risk. 32-bit hashes have collision risk at ~65K modules.
+func TestGenerateUniqueID_Length(t *testing.T) {
+	id := generateUniqueID("git::https://github.com/example/module.git?ref=v1.0.0")
+
+	// Should be at least 16 hex characters (64 bits) to avoid birthday paradox collisions
+	assert.GreaterOrEqual(t, len(id), 16, "unique ID should be at least 16 hex characters (64 bits)")
+}
+
+// TestGenerateUniqueID_Deterministic verifies that the same input always produces the same output.
+func TestGenerateUniqueID_Deterministic(t *testing.T) {
+	input := "git::https://github.com/example/module.git?ref=v1.0.0"
+
+	id1 := generateUniqueID(input)
+	id2 := generateUniqueID(input)
+
+	assert.Equal(t, id1, id2, "same input should produce same output")
+}
+
+// TestGenerateUniqueID_Unique verifies that different inputs produce different outputs.
+func TestGenerateUniqueID_Unique(t *testing.T) {
+	id1 := generateUniqueID("git::https://github.com/example/module1.git?ref=v1.0.0")
+	id2 := generateUniqueID("git::https://github.com/example/module2.git?ref=v1.0.0")
+
+	assert.NotEqual(t, id1, id2, "different inputs should produce different outputs")
+}
+
 // writeTerraformFile is a test helper that writes content to a .tf file.
 func writeTerraformFile(t *testing.T, dir, filename, content string) {
 	t.Helper()

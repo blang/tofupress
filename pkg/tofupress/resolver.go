@@ -2,6 +2,8 @@ package tofupress
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -149,19 +151,8 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 }
 
 // generateUniqueID creates a unique identifier for a package address.
-// For now, we use a simple hash-based approach.
+// Uses SHA-256 truncated to 16 hex characters (64 bits) to avoid collision risk.
 func generateUniqueID(packageAddr string) string {
-	// Simple hash based on package address
-	// In production, you might want to use a proper hash function
-	return fmt.Sprintf("%x", hashString(packageAddr))
-}
-
-// hashString is a simple hash function for generating unique IDs.
-func hashString(s string) uint32 {
-	var h uint32 = 2166136261
-	for i := 0; i < len(s); i++ {
-		h ^= uint32(s[i])
-		h *= 16777619
-	}
-	return h
+	hash := sha256.Sum256([]byte(packageAddr))
+	return hex.EncodeToString(hash[:8]) // First 8 bytes = 16 hex chars = 64 bits
 }

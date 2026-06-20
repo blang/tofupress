@@ -55,6 +55,19 @@ func runBundle(cmd *cobra.Command, args []string) error {
 	// Resolve modules in temp directory
 	resolver := tofupress.NewResolver()
 	resolver.PackageRoot = packageRoot // Set package boundary for local path enforcement
+	resolver.Progress = func(event *tofupress.ProgressEvent) {
+		if event == nil {
+			return
+		}
+		switch event.Type {
+		case "resolving":
+			fmt.Fprintf(os.Stderr, "  Resolving module: %s\n", event.ModuleName)
+		case "downloading":
+			fmt.Fprintf(os.Stderr, "  ⬇ Downloading: %s from %s\n", event.ModuleName, event.Source)
+		case "downloaded":
+			fmt.Fprintf(os.Stderr, "  ✓ Downloaded: %s\n", event.ModuleName)
+		}
+	}
 	tree, err := resolver.Resolve(cmd.Context(), workDir)
 	if err != nil {
 		return fmt.Errorf("failed to resolve modules: %w", err)

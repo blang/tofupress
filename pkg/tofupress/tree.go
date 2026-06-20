@@ -43,6 +43,7 @@ type ModuleNode struct {
 type DownloadedPackage struct {
 	PackageAddr string // Normalized package address (dedup key)
 	LocalDir    string // Where it was downloaded to
+	ContentHash string // SHA-256 hash of module content for deduplication
 }
 
 // ResolvedTree is the complete resolved module dependency tree.

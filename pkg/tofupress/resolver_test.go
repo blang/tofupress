@@ -302,3 +302,78 @@ func TestNewResolver(t *testing.T) {
 	assert.NotNil(t, resolver)
 	assert.NotNil(t, resolver.fetcher)
 }
+
+func TestResolver_ContentHashIsComputed(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode")
+	}
+
+	// Create a root module with a remote module
+	tmpDir := t.TempDir()
+
+	writeTerraformFile(t, tmpDir, "main.tf", `
+module "vpc" {
+  source = "git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git?ref=v5.0.0"
+  name   = "test-vpc"
+}
+`)
+
+	// Resolve
+	resolver := NewResolver()
+	tree, err := resolver.Resolve(context.Background(), tmpDir)
+	require.NoError(t, err)
+	require.NotNil(t, tree)
+
+	// Verify ContentHash is computed for the downloaded package
+	assert.Len(t, tree.Packages, 1)
+	for _, pkg := range tree.Packages {
+		assert.NotEmpty(t, pkg.ContentHash, "ContentHash should be computed for downloaded modules")
+		assert.Len(t, pkg.ContentHash, 64, "ContentHash should be 64-character SHA-256 hex string")
+	}
+}
+
+func TestResolver_ContentBasedDeduplication(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping test in short mode")
+	}
+
+	// This test verifies that modules with identical content from different URLs
+	// are deduplicated based on content hash, not just URL.
+	// We'll use two different git refs that point to the same commit.
+	tmpDir := t.TempDir()
+
+	writeTerraformFile(t, tmpDir, "main.tf", `
+module "vpc_by_tag" {
+  source = "git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git?ref=v5.0.0"
+  name   = "vpc-by-tag"
+}
+
+module "vpc_by_sha" {
+  source = "git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git?ref=26c38a66f12e7c6c93b6a2ba127ad68981a48671"
+  name   = "vpc-by-sha"
+}
+`)
+
+	// Resolve
+	resolver := NewResolver()
+	tree, err := resolver.Resolve(context.Background(), tmpDir)
+	require.NoError(t, err)
+	require.NotNil(t, tree)
+
+	// Both modules should be resolved
+	vpcByTag := tree.Find("vpc_by_tag")
+	vpcBySha := tree.Find("vpc_by_sha")
+	require.NotNil(t, vpcByTag)
+	require.NotNil(t, vpcBySha)
+
+	// With content-based deduplication, both should point to the same local directory
+	// because they have identical content (same git commit)
+	assert.Equal(t, vpcByTag.InstallDir, vpcBySha.InstallDir,
+		"Modules with identical content should share the same local directory")
+
+	// Should only have 1 unique package (deduplicated by content hash)
+	// Note: Currently this will be 2 because content-based dedup is not implemented yet
+	// This test will fail in RED phase, then pass after GREEN implementation
+	assert.Len(t, tree.Packages, 1,
+		"Identical content from different refs should be deduplicated into 1 package")
+}

@@ -44,6 +44,7 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 
 	// Track downloaded packages for deduplication
 	downloadedPackages := make(map[string]string) // packageAddr -> localPath
+	contentHashes := make(map[string]string)      // contentHash -> localPath
 
 	// BFS queue: each item is a module to process
 	type queueItem struct {
@@ -116,9 +117,28 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 
 						// Record the download
 						downloadedPackages[source.PackageAddr] = localPath
-						tree.Packages[uniqueID] = &DownloadedPackage{
-							PackageAddr: source.PackageAddr,
-							LocalDir:    localPath,
+
+						// Compute content hash for content-based deduplication
+						contentHash, hashErr := HashModule(localPath)
+						if hashErr != nil {
+							return nil, fmt.Errorf("failed to compute content hash for module %s: %w", mod.Name, hashErr)
+						}
+
+						// Check for content-based deduplication
+						existingPath, contentExists := contentHashes[contentHash]
+						if contentExists {
+							// Duplicate content - remove the download and reuse existing path
+							os.RemoveAll(localPath) //nolint:errcheck // best-effort cleanup
+							localPath = existingPath
+							downloadedPackages[source.PackageAddr] = localPath
+						} else {
+							// New content - record it
+							contentHashes[contentHash] = localPath
+							tree.Packages[uniqueID] = &DownloadedPackage{
+								PackageAddr: source.PackageAddr,
+								LocalDir:    localPath,
+								ContentHash: contentHash,
+							}
 						}
 					}
 

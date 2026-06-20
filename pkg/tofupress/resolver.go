@@ -49,6 +49,7 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 	// Track downloaded packages for deduplication
 	downloadedPackages := make(map[string]string) // packageAddr -> localPath
 	contentHashes := make(map[string]string)      // contentHash -> localPath
+	visitedPaths := make(map[string]bool)         // Track visited local paths to prevent cycles
 
 	// BFS queue: each item is a module to process
 	type queueItem struct {
@@ -58,6 +59,7 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 
 	queue := []queueItem{{node: tree.Root, dir: rootDir}}
 	tree.AllModules = append(tree.AllModules, tree.Root)
+	visitedPaths[rootDir] = true
 
 	// Process modules in BFS order
 	for len(queue) > 0 {
@@ -100,6 +102,15 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 					child.InstallDir = localPath
 					child.IsLocal = true
 					child.IsRemote = false
+
+					// Cycle detection: skip if already visited
+					if visitedPaths[localPath] {
+						// Add child to parent and tree but don't process again
+						item.node.Children = append(item.node.Children, child)
+						tree.AllModules = append(tree.AllModules, child)
+						continue
+					}
+					visitedPaths[localPath] = true
 
 					// Add to queue for processing
 					queue = append(queue, queueItem{node: child, dir: localPath})
@@ -154,24 +165,27 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 								ContentHash: contentHash,
 							}
 						}
+
+						// Set install directory
+						child.InstallDir = localPath
+
+						// Rewrite the source in the .tf file to point to local path
+						relPath, err := filepath.Rel(item.dir, localPath)
+						if err != nil {
+							return nil, fmt.Errorf("failed to compute relative path: %w", err)
+						}
+						newSource := "./" + relPath
+
+						if err := RewriteModuleSource(tfFile, mod.Name, newSource); err != nil {
+							return nil, fmt.Errorf("failed to rewrite source for module %s: %w", mod.Name, err)
+						}
+
+						// Add to queue for processing (only for new downloads)
+						queue = append(queue, queueItem{node: child, dir: localPath})
+					} else {
+						// Already downloaded - just set install directory, don't reprocess
+						child.InstallDir = localPath
 					}
-
-					// Set install directory
-					child.InstallDir = localPath
-
-					// Rewrite the source in the .tf file to point to local path
-					relPath, err := filepath.Rel(item.dir, localPath)
-					if err != nil {
-						return nil, fmt.Errorf("failed to compute relative path: %w", err)
-					}
-					newSource := "./" + relPath
-
-					if err := RewriteModuleSource(tfFile, mod.Name, newSource); err != nil {
-						return nil, fmt.Errorf("failed to rewrite source for module %s: %w", mod.Name, err)
-					}
-
-					// Add to queue for processing
-					queue = append(queue, queueItem{node: child, dir: localPath})
 				} else {
 					// Remote module: download if not already downloaded
 					child.IsLocal = false
@@ -213,24 +227,27 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 								ContentHash: contentHash,
 							}
 						}
+
+						// Set install directory
+						child.InstallDir = localPath
+
+						// Rewrite the source in the .tf file to point to local path
+						relPath, err := filepath.Rel(item.dir, localPath)
+						if err != nil {
+							return nil, fmt.Errorf("failed to compute relative path: %w", err)
+						}
+						newSource := "./" + relPath
+
+						if err := RewriteModuleSource(tfFile, mod.Name, newSource); err != nil {
+							return nil, fmt.Errorf("failed to rewrite source for module %s: %w", mod.Name, err)
+						}
+
+						// Add to queue for processing (only for new downloads)
+						queue = append(queue, queueItem{node: child, dir: localPath})
+					} else {
+						// Already downloaded - just set install directory, don't reprocess
+						child.InstallDir = localPath
 					}
-
-					// Set install directory
-					child.InstallDir = localPath
-
-					// Rewrite the source in the .tf file to point to local path
-					relPath, err := filepath.Rel(item.dir, localPath)
-					if err != nil {
-						return nil, fmt.Errorf("failed to compute relative path: %w", err)
-					}
-					newSource := "./" + relPath
-
-					if err := RewriteModuleSource(tfFile, mod.Name, newSource); err != nil {
-						return nil, fmt.Errorf("failed to rewrite source for module %s: %w", mod.Name, err)
-					}
-
-					// Add to queue for processing (remote modules may have their own dependencies)
-					queue = append(queue, queueItem{node: child, dir: localPath})
 				}
 
 				// Add child to parent and tree

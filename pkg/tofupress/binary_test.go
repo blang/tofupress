@@ -3,6 +3,12 @@
 package tofupress
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"compress/gzip"
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -31,7 +37,7 @@ func buildBinary(t *testing.T) string {
 	projectRoot := filepath.Dir(filepath.Dir(filepath.Dir(filename)))
 
 	// Build the binary from project root
-	cmd := exec.Command("go", "build", "-o", binaryPath, "./cmd/tofupress")
+	cmd := exec.Command("go", "build", "-o", binaryPath, "./cmd/tofupress") //nolint:gosec // G204: subprocess is intentional for building test binary
 	cmd.Dir = projectRoot
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, "failed to build binary: %s", string(output))
@@ -60,28 +66,133 @@ module "child" {
 
 	// Write child module
 	childDir := filepath.Join(fixtureDir, "child")
-	require.NoError(t, os.MkdirAll(childDir, 0755))
+	require.NoError(t, os.MkdirAll(childDir, 0o755)) //nolint:gosec // G301: 0755 is fine for test directories
 	writeTerraformFile(t, childDir, "main.tf", `# child module`)
 
 	return fixtureDir
 }
 
+// validateZipFile opens a zip archive and verifies it has at least one entry.
+func validateZipFile(t *testing.T, path string) error {
+	t.Helper()
+
+	f, err := zip.OpenReader(path)
+	if err != nil {
+		return fmt.Errorf("failed to open zip: %w", err)
+	}
+	defer f.Close() //nolint:errcheck // best effort
+
+	if len(f.File) == 0 {
+		return fmt.Errorf("zip archive is empty")
+	}
+
+	return nil
+}
+
+// validateTarGzFile opens a tar.gz archive and verifies it has at least one entry.
+func validateTarGzFile(t *testing.T, path string) error {
+	t.Helper()
+
+	f, err := os.Open(path) //nolint:gosec // G304: path comes from test
+	if err != nil {
+		return fmt.Errorf("failed to open file: %w", err)
+	}
+	defer f.Close() //nolint:errcheck // best effort
+
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("failed to create gzip reader: %w", err)
+	}
+	defer gz.Close() //nolint:errcheck // best effort
+
+	tr := tar.NewReader(gz)
+
+	// Try to read at least one entry
+	_, err = tr.Next()
+	if errors.Is(err, io.EOF) {
+		return fmt.Errorf("tar.gz archive is empty")
+	}
+	if err != nil {
+		return fmt.Errorf("failed to read tar entry: %w", err)
+	}
+
+	return nil
+}
+
 // TestBinary_HelpShowsCommands verifies that the CLI binary shows resolve and bundle commands in help.
-// This is a RED phase test - it should FAIL because commands are not wired up yet.
 func TestBinary_HelpShowsCommands(t *testing.T) {
 	binary := buildBinary(t)
 
 	// Run the binary with --help flag
-	cmd := exec.Command(binary, "--help")
+	cmd := exec.Command(binary, "--help") //nolint:gosec // G204: subprocess is intentional for testing binary
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, "binary --help should succeed: %s", string(output))
 
 	outputStr := string(output)
 
-	// These assertions should FAIL because resolve and bundle commands are not registered yet.
-	// We check for "Available Commands" which only appears when subcommands exist,
-	// and the exact indented command names (cobra uses "  name" format in the commands section).
+	// Verify help output contains the expected commands
 	assert.Contains(t, outputStr, "Available Commands", "help output should have an Available Commands section")
 	assert.Contains(t, outputStr, "  resolve", "help output should list 'resolve' as a command")
 	assert.Contains(t, outputStr, "  bundle", "help output should list 'bundle' as a command")
+}
+
+// TestBinary_ResolveLocalDir verifies that the resolve command works on a local directory.
+func TestBinary_ResolveLocalDir(t *testing.T) {
+	binary := buildBinary(t)
+	fixture := createSimpleFixture(t)
+
+	// Run the binary with resolve command
+	cmd := exec.Command(binary, "resolve", fixture) //nolint:gosec // G204: subprocess is intentional for testing binary
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "binary resolve should succeed: %s", string(output))
+
+	outputStr := string(output)
+
+	// Verify output contains expected sections
+	assert.Contains(t, outputStr, "Module tree:", "output should contain 'Module tree:' header")
+	assert.Contains(t, outputStr, "root", "output should contain 'root' module")
+	assert.Contains(t, outputStr, "child", "output should contain 'child' module")
+	assert.Contains(t, outputStr, "Total modules:", "output should contain module count")
+}
+
+// TestBinary_BundleCreatesArchive verifies that the bundle command creates a valid zip archive.
+func TestBinary_BundleCreatesArchive(t *testing.T) {
+	binary := buildBinary(t)
+	fixture := createSimpleFixture(t)
+	outputPath := filepath.Join(t.TempDir(), "bundle.zip")
+
+	// Run the binary with bundle command
+	cmd := exec.Command(binary, "bundle", fixture, outputPath) //nolint:gosec // G204: subprocess is intentional for testing binary
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "binary bundle should succeed: %s", string(output))
+
+	// Verify archive exists
+	info, err := os.Stat(outputPath)
+	require.NoError(t, err, "bundle file should exist")
+	assert.Greater(t, info.Size(), int64(0), "bundle file should not be empty")
+
+	// Verify it's a valid zip with entries
+	err = validateZipFile(t, outputPath)
+	require.NoError(t, err, "bundle should be a valid zip archive")
+}
+
+// TestBinary_BundleAutoDetectsFormat verifies that bundle auto-detects format from file extension.
+func TestBinary_BundleAutoDetectsFormat(t *testing.T) {
+	binary := buildBinary(t)
+	fixture := createSimpleFixture(t)
+	outputPath := filepath.Join(t.TempDir(), "bundle.tar.gz")
+
+	// Run the binary with bundle command (no --format flag)
+	cmd := exec.Command(binary, "bundle", fixture, outputPath) //nolint:gosec // G204: subprocess is intentional for testing binary
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "binary bundle should succeed: %s", string(output))
+
+	// Verify archive exists
+	info, err := os.Stat(outputPath)
+	require.NoError(t, err, "bundle file should exist")
+	assert.Greater(t, info.Size(), int64(0), "bundle file should not be empty")
+
+	// Verify it's a valid tar.gz (not zip)
+	err = validateTarGzFile(t, outputPath)
+	require.NoError(t, err, "bundle should be a valid tar.gz archive (auto-detected from .tar.gz extension)")
 }

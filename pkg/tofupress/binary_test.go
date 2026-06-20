@@ -107,6 +107,61 @@ func validateZipFile(t *testing.T, path string) error {
 	return nil
 }
 
+// validateZipContents opens a zip archive and verifies it contains all expected file paths.
+// Returns a map of file path -> content for further validation.
+func validateZipContents(t *testing.T, path string, expectedFiles []string) (map[string]string, error) {
+	t.Helper()
+
+	f, err := zip.OpenReader(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open zip: %w", err)
+	}
+	defer f.Close() //nolint:errcheck // best effort
+
+	// Build map of all file paths and their contents
+	contents := make(map[string]string)
+	for _, file := range f.File {
+		if file.FileInfo().IsDir() {
+			continue
+		}
+		rc, readErr := file.Open()
+		if readErr != nil {
+			return nil, fmt.Errorf("failed to read zip entry %s: %w", file.Name, readErr)
+		}
+		data, readErr := io.ReadAll(rc)
+		rc.Close() //nolint:errcheck // best effort
+		if readErr != nil {
+			return nil, fmt.Errorf("failed to read zip entry content %s: %w", file.Name, readErr)
+		}
+		contents[file.Name] = string(data)
+	}
+
+	// Check all expected files are present
+	for _, expected := range expectedFiles {
+		found := false
+		for name := range contents {
+			if name == expected || filepath.Base(name) == expected {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return contents, fmt.Errorf("expected file %q not found in archive. Files present: %v", expected, zipFileNames(f.File))
+		}
+	}
+
+	return contents, nil
+}
+
+// zipFileNames returns a slice of file names from zip entries.
+func zipFileNames(files []*zip.File) []string {
+	names := make([]string, len(files))
+	for i, f := range files {
+		names[i] = f.Name
+	}
+	return names
+}
+
 // validateTarGzFile opens a tar.gz archive and verifies it has at least one entry.
 func validateTarGzFile(t *testing.T, path string) error {
 	t.Helper()
@@ -135,6 +190,64 @@ func validateTarGzFile(t *testing.T, path string) error {
 	}
 
 	return nil
+}
+
+// validateTarGzContents opens a tar.gz archive and verifies it contains all expected file paths.
+// Returns a map of file path -> content for further validation.
+func validateTarGzContents(t *testing.T, path string, expectedFiles []string) (map[string]string, error) {
+	t.Helper()
+
+	f, err := os.Open(path) //nolint:gosec // G304: path comes from test
+	if err != nil {
+		return nil, fmt.Errorf("failed to open file: %w", err)
+	}
+	defer f.Close() //nolint:errcheck // best effort
+
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gzip reader: %w", err)
+	}
+	defer gz.Close() //nolint:errcheck // best effort
+
+	tr := tar.NewReader(gz)
+
+	// Build map of all file paths and their contents
+	contents := make(map[string]string)
+	var fileNames []string
+	for {
+		header, readErr := tr.Next()
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return nil, fmt.Errorf("failed to read tar entry: %w", readErr)
+		}
+		if header.Typeflag != tar.TypeReg {
+			continue
+		}
+		data, readErr := io.ReadAll(tr)
+		if readErr != nil {
+			return nil, fmt.Errorf("failed to read tar entry content %s: %w", header.Name, readErr)
+		}
+		contents[header.Name] = string(data)
+		fileNames = append(fileNames, header.Name)
+	}
+
+	// Check all expected files are present
+	for _, expected := range expectedFiles {
+		found := false
+		for name := range contents {
+			if name == expected || filepath.Base(name) == expected {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return contents, fmt.Errorf("expected file %q not found in archive. Files present: %v", expected, fileNames)
+		}
+	}
+
+	return contents, nil
 }
 
 // TestBinary_HelpShowsCommands verifies that the CLI binary shows resolve and bundle commands in help.
@@ -192,6 +305,19 @@ func TestBinary_BundleCreatesArchive(t *testing.T) {
 	// Verify it's a valid zip with entries
 	err = validateZipFile(t, outputPath)
 	require.NoError(t, err, "bundle should be a valid zip archive")
+
+	// Deep validation: verify specific files are present
+	contents, err := validateZipContents(t, outputPath, []string{"main.tf", "child/main.tf"})
+	require.NoError(t, err, "bundle should contain expected files")
+
+	// Verify main.tf contains the module reference
+	mainContent := contents["main.tf"]
+	assert.Contains(t, mainContent, "module \"child\"", "main.tf should contain child module reference")
+	assert.Contains(t, mainContent, "source = \"./child\"", "main.tf should reference child module")
+
+	// Verify child/main.tf exists and has content
+	childContent := contents["child/main.tf"]
+	assert.Contains(t, childContent, "# child module", "child/main.tf should contain child module content")
 }
 
 // TestBinary_BundlePreservesSource verifies that bundling does NOT modify source files.
@@ -281,6 +407,14 @@ func TestBinary_BundleAutoDetectsFormat(t *testing.T) {
 	// Verify it's a valid tar.gz (not zip)
 	err = validateTarGzFile(t, outputPath)
 	require.NoError(t, err, "bundle should be a valid tar.gz archive (auto-detected from .tar.gz extension)")
+
+	// Deep validation: verify specific files are present in tar.gz
+	contents, err := validateTarGzContents(t, outputPath, []string{"main.tf", "child/main.tf"})
+	require.NoError(t, err, "tar.gz bundle should contain expected files")
+
+	// Verify main.tf contains the module reference
+	mainContent := contents["main.tf"]
+	assert.Contains(t, mainContent, "module \"child\"", "main.tf should contain child module reference")
 }
 
 // TestBinary_BundleRemoteGitSource verifies that bundle accepts a remote git source

@@ -11,12 +11,14 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
 // Resolver orchestrates the BFS module resolution algorithm.
 type Resolver struct {
-	fetcher *Fetcher
+	fetcher     *Fetcher
+	PackageRoot string // Package boundary - local paths cannot escape this root
 }
 
 // NewResolver creates a new Resolver with default configuration.
@@ -100,6 +102,19 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 				if source.Type == SourceLocal {
 					// Local module: resolve path relative to parent
 					localPath := filepath.Join(item.dir, source.Raw)
+					
+					// Check package boundary
+					if r.PackageRoot != "" {
+						relPath, err := filepath.Rel(r.PackageRoot, localPath)
+						if err != nil {
+							return nil, fmt.Errorf("failed to check package boundary for module %s: %w", mod.Name, err)
+						}
+						if strings.HasPrefix(relPath, "..") {
+							return nil, fmt.Errorf("module %s at %s escapes package boundary: source %s resolves to %s, which is outside package root %s",
+								mod.Name, item.dir, source.Raw, localPath, r.PackageRoot)
+						}
+					}
+					
 					child.InstallDir = localPath
 					child.IsLocal = true
 					child.IsRemote = false

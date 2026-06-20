@@ -6,86 +6,124 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"strings"
 
-	"github.com/blang/tofupress/pkg/tofupress"
+	"github.com/hashicorp/go-getter"
 )
 
-// resolveSource prepares a working directory from either a local path or remote source.
-// For remote sources, it downloads them to a temp directory using go-getter.
-// For local sources, it copies them to a temp directory.
-// The provided context is used for remote fetch operations.
-// Returns the temp directory path and a cleanup function.
-func resolveSource(ctx context.Context, source string) (workDir string, cleanup func(), err error) {
-	// Classify the source to determine if it's remote
-	src := tofupress.ClassifySource(source, "")
-
-	if src.Type == tofupress.SourceLocal {
-		// Local source - validate it exists and copy to temp
-		if _, statErr := os.Stat(source); statErr != nil {
-			if os.IsNotExist(statErr) {
-				return "", nil, fmt.Errorf("directory does not exist: %s", source)
-			}
-			return "", nil, fmt.Errorf("cannot access %s: %w", source, statErr)
-		}
-		return prepareWorkDir(source)
-	}
-
-	// Remote source - download to temp
-	tempDir, err := os.MkdirTemp("", "tofupress-remote-*")
+// resolveSource prepares a working directory from a go-getter compatible source.
+// It uses go-getter to handle ALL source types uniformly (local, git, http, s3, etc.).
+// The // separator defines the package boundary: everything before is the package,
+// everything after is the subdirectory within the package.
+// Returns the work directory, package root (for boundary enforcement), and cleanup function.
+func resolveSource(ctx context.Context, source string) (workDir, packageRoot string, cleanup func(), err error) {
+	// Get current working directory for relative path resolution
+	pwd, err := os.Getwd()
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to create temp directory: %w", err)
+		return "", "", nil, fmt.Errorf("failed to get working directory: %w", err)
 	}
 
-	// Use PackageAddr for fetching (base URL without subpath)
-	fetchSource := src.PackageAddr
-	if fetchSource == "" {
-		fetchSource = source
+	// Split package address from subdirectory using // separator FIRST
+	// This must happen before detection, as go-getter doesn't understand //
+	packageAddr, subDir := splitPackageSubdir(source)
+
+	// Detect and normalize the package source using go-getter
+	// pwd is required for resolving relative paths
+	detected, err := getter.Detect(packageAddr, pwd, getter.Detectors)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("failed to detect source type: %w", err)
 	}
 
-	fetcher := tofupress.NewFetcher()
-	if err := fetcher.Fetch(ctx, tempDir, fetchSource); err != nil {
-		os.RemoveAll(tempDir) //nolint:errcheck,gosec // cleanup after error
-		return "", nil, fmt.Errorf("failed to fetch remote source: %w", err)
-	}
-
-	// Navigate to SubDir if specified
-	workDir = tempDir
-	if src.SubDir != "" {
-		workDir = filepath.Join(tempDir, src.SubDir)
-		if _, err := os.Stat(workDir); err != nil {
-			os.RemoveAll(tempDir) //nolint:errcheck,gosec // cleanup after error
-			return "", nil, fmt.Errorf("subpath %s does not exist in fetched repository: %w", src.SubDir, err)
-		}
-	}
-
-	cleanup = func() {
-		os.RemoveAll(tempDir) //nolint:errcheck,gosec // cleanup failures are acceptable
-	}
-
-	return workDir, cleanup, nil
-}
-
-// prepareWorkDir copies the source directory to a temp location for processing.
-// Returns the temp directory path and a cleanup function.
-func prepareWorkDir(sourceDir string) (workDir string, cleanup func(), err error) {
-	// Create temp directory
+	// Create temp directory for the package
 	tempDir, err := os.MkdirTemp("", "tofupress-*")
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to create temp directory: %w", err)
-	}
-
-	// Copy source to temp
-	if err := copyDir(sourceDir, tempDir); err != nil {
-		os.RemoveAll(tempDir) //nolint:errcheck,gosec // cleanup after error
-		return "", nil, fmt.Errorf("failed to copy source to temp: %w", err)
+		return "", "", nil, fmt.Errorf("failed to create temp directory: %w", err)
 	}
 
 	cleanup = func() {
 		os.RemoveAll(tempDir) //nolint:errcheck,gosec // cleanup failures are acceptable
 	}
 
-	return tempDir, cleanup, nil
+	// Create a subdirectory for the actual download
+	// go-getter expects the destination to not exist
+	packageDir := filepath.Join(tempDir, "package")
+
+	// Download/copy the package using go-getter
+	client := &getter.Client{
+		Ctx:       ctx,
+		Src:       detected,
+		Dst:       packageDir,
+		Pwd:       pwd,
+		Mode:      getter.ClientModeDir,
+		Detectors: getter.Detectors,
+		Getters:   getter.Getters,
+	}
+
+	if err := client.Get(); err != nil {
+		cleanup()
+		return "", "", nil, fmt.Errorf("failed to fetch source: %w", err)
+	}
+
+	// Remove .git directory if present (clean up VCS metadata)
+	gitDir := filepath.Join(packageDir, ".git")
+	if _, err := os.Stat(gitDir); err == nil {
+		os.RemoveAll(gitDir) //nolint:errcheck,gosec // best effort cleanup
+	}
+
+	// Package root is the package directory (everything downloaded is within this boundary)
+	packageRoot = packageDir
+
+	// Navigate to subdirectory if specified
+	workDir = packageDir
+	if subDir != "" {
+		workDir = filepath.Join(packageDir, subDir)
+		if _, err := os.Stat(workDir); err != nil {
+			cleanup()
+			return "", "", nil, fmt.Errorf("subdirectory %s does not exist in package: %w", subDir, err)
+		}
+	}
+
+	return workDir, packageRoot, cleanup, nil
+}
+
+
+// splitPackageSubdir detects whether the given address string has a subdirectory
+// portion (marked by //), and if so returns a non-empty subDir string along with
+// the trimmed package address.
+// This is adapted from OpenTofu's implementation.
+func splitPackageSubdir(src string) (packageAddr, subDir string) {
+	// URL might contain another URL in query parameters
+	stop := len(src)
+	if idx := strings.Index(src, "?"); idx > -1 {
+		stop = idx
+	}
+
+	// Calculate an offset to avoid accidentally marking the scheme as the dir
+	var offset int
+	if idx := strings.Index(src[:stop], "://"); idx > -1 {
+		offset = idx + 3
+	}
+
+	// Check for explicit subdir marker
+	idx := strings.Index(src[offset:stop], "//")
+	if idx == -1 {
+		return src, ""
+	}
+
+	idx += offset
+	subdir := src[idx+2:]
+	src = src[:idx]
+
+	// Reattach query parameters to package address
+	if qIdx := strings.Index(subdir, "?"); qIdx > -1 {
+		query := subdir[qIdx:]
+		subdir = subdir[:qIdx]
+		src += query
+	}
+
+	return src, path.Clean(subdir)
 }
 
 // copyDir recursively copies a directory from src to dst.

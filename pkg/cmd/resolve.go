@@ -29,7 +29,7 @@ func runResolve(cmd *cobra.Command, args []string) error {
 	stdout := cmd.OutOrStdout()
 
 	// Resolve source (local or remote) to a working directory
-	workDir, cleanup, err := resolveSource(cmd.Context(), dir)
+	workDir, _, cleanup, err := resolveSource(cmd.Context(), dir)
 	if err != nil {
 		return err
 	}

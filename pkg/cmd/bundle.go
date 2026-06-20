@@ -46,7 +46,7 @@ func runBundle(cmd *cobra.Command, args []string) error {
 	fmt.Fprintf(stdout, "Resolving modules in %s...\n", source) //nolint:errcheck // stdout writes are best-effort
 
 	// Resolve source (local or remote) to a working directory
-	workDir, cleanup, err := resolveSource(cmd.Context(), source)
+	workDir, packageRoot, cleanup, err := resolveSource(cmd.Context(), source)
 	if err != nil {
 		return err
 	}
@@ -54,6 +54,7 @@ func runBundle(cmd *cobra.Command, args []string) error {
 
 	// Resolve modules in temp directory
 	resolver := tofupress.NewResolver()
+	resolver.PackageRoot = packageRoot // Set package boundary for local path enforcement
 	tree, err := resolver.Resolve(cmd.Context(), workDir)
 	if err != nil {
 		return fmt.Errorf("failed to resolve modules: %w", err)

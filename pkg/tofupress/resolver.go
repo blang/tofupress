@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"time"
@@ -120,7 +121,7 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 					child.IsRemote = true
 
 					// Query the registry API to get the download URL
-					registryURL, err := queryRegistryAPI(source.RegistryNamespace, source.RegistryName, source.RegistryProvider, mod.Version)
+					registryURL, err := queryRegistryAPI(ctx, source.RegistryNamespace, source.RegistryName, source.RegistryProvider, mod.Version)
 					if err != nil {
 						return nil, fmt.Errorf("failed to resolve registry module %s: %w", mod.Name, err)
 					}
@@ -274,16 +275,25 @@ type registryResponse struct {
 	Tag     string `json:"tag"`
 }
 
+// maxRegistryResponseSize is the maximum size of a registry API response (1MB).
+const maxRegistryResponseSize = 1 << 20 // 1MB
+
 // queryRegistryAPI queries the Terraform Registry API to get the download URL for a module.
-func queryRegistryAPI(namespace, name, provider, version string) (string, error) {
-	// Construct the registry API URL
+func queryRegistryAPI(ctx context.Context, namespace, name, provider, version string) (string, error) {
+	// Construct the registry API URL with proper URL encoding
 	// Format: https://registry.terraform.io/v1/modules/{namespace}/{name}/{provider}
 	apiURL := fmt.Sprintf("https://registry.terraform.io/v1/modules/%s/%s/%s",
-		namespace, name, provider)
+		url.PathEscape(namespace), url.PathEscape(name), url.PathEscape(provider))
 
 	// Add version if specified
 	if version != "" {
-		apiURL = fmt.Sprintf("%s/%s", apiURL, version)
+		apiURL = fmt.Sprintf("%s/%s", apiURL, url.PathEscape(version))
+	}
+
+	// Create HTTP request with context for cancellation support
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create registry API request: %w", err)
 	}
 
 	// Create HTTP client with timeout
@@ -292,7 +302,7 @@ func queryRegistryAPI(namespace, name, provider, version string) (string, error)
 	}
 
 	// Make the request
-	resp, err := client.Get(apiURL) //nolint:gosec // G107: URL is constructed from validated parts
+	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to query registry API: %w", err)
 	}
@@ -302,8 +312,8 @@ func queryRegistryAPI(namespace, name, provider, version string) (string, error)
 		return "", fmt.Errorf("registry API returned status %d for %s", resp.StatusCode, apiURL)
 	}
 
-	// Read the response body
-	body, err := io.ReadAll(resp.Body)
+	// Read the response body with size limit to prevent OOM
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRegistryResponseSize))
 	if err != nil {
 		return "", fmt.Errorf("failed to read registry API response: %w", err)
 	}

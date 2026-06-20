@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -88,8 +89,9 @@ func prepareWorkDir(sourceDir string) (workDir string, cleanup func(), err error
 }
 
 // copyDir recursively copies a directory from src to dst.
+// It preserves file permissions and skips symlinks to avoid infinite loops.
 func copyDir(src, dst string) error {
-	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -102,24 +104,35 @@ func copyDir(src, dst string) error {
 
 		dstPath := filepath.Join(dst, relPath)
 
+		// Skip symlinks to avoid infinite loops and broken references
+		if d.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+
+		// Get full file info for directories and regular files
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+
 		if info.IsDir() {
 			return os.MkdirAll(dstPath, info.Mode())
 		}
 
-		// Copy file
-		return copyFile(path, dstPath)
+		// Copy file with permissions
+		return copyFile(path, dstPath, info.Mode())
 	})
 }
 
-// copyFile copies a single file from src to dst, preserving content but not permissions.
-func copyFile(src, dst string) error {
+// copyFile copies a single file from src to dst, preserving permissions.
+func copyFile(src, dst string, mode fs.FileMode) error {
 	srcFile, err := os.Open(src) //nolint:gosec // G304: path is from our own directory walk
 	if err != nil {
 		return err
 	}
 	defer srcFile.Close() //nolint:errcheck // read-only close errors are acceptable
 
-	dstFile, err := os.Create(dst) //nolint:gosec // G304: path is constructed by us
+	dstFile, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, mode) //nolint:gosec // G304: path is constructed by us
 	if err != nil {
 		return err
 	}

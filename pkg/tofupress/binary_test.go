@@ -303,14 +303,21 @@ func TestBinary_BundleNoDuplicates(t *testing.T) {
 	}
 
 	binary := buildBinary(t)
+
+	// Create a local fixture with a remote module reference
+	fixtureDir := t.TempDir()
+	writeTerraformFile(t, fixtureDir, "main.tf", `
+module "vpc" {
+  source = "git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git?ref=master"
+}
+`)
+
 	outputPath := filepath.Join(t.TempDir(), "bundle.zip")
 
-	// Bundle a remote git module that has submodules
-	cmd := exec.Command(binary, "bundle", //nolint:gosec // G204: subprocess is intentional for testing binary
-		"git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git?ref=master",
-		outputPath)
+	// Bundle the local fixture (which will download the remote module)
+	cmd := exec.Command(binary, "bundle", fixtureDir, outputPath) //nolint:gosec // G204: subprocess is intentional for testing binary
 	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, "bundle remote git failed: %s", string(out))
+	require.NoError(t, err, "bundle should succeed: %s", string(out))
 
 	// Verify bundle was created
 	_, err = os.Stat(outputPath)
@@ -369,7 +376,7 @@ func TestBinary_BundleWithSubpath(t *testing.T) {
 
 	// Bundle a subpath of a remote git module
 	cmd := exec.Command(binary, "bundle", //nolint:gosec // G204: subprocess is intentional for testing binary
-		"git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git//modules/vpc?ref=master",
+		"git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git//examples?ref=master", //nolint:lll // long URL
 		outputPath)
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "bundle subpath source failed: %s", string(out))

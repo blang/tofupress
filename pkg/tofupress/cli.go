@@ -42,13 +42,24 @@ configuration and bundles them into a self-contained artifact.`,
 	// Add bundle command
 	bundleCmd := &cobra.Command{
 		Use:   "bundle <directory> <output>",
-		Short: "Resolve modules and create a tar.gz bundle",
-		Long:  `Resolves all module dependencies and creates a self-contained tar.gz bundle.`,
-		Args:  cobra.ExactArgs(2),
+		Short: "Resolve modules and create a bundle",
+		Long: `Resolves all module dependencies and creates a self-contained bundle.
+
+Supported formats:
+  zip     - For OCI registry distribution (default)
+  tar.gz  - For HTTP server distribution
+  tar.xz  - For S3/object storage distribution
+
+Example:
+  tofupress bundle ./infra bundle.zip
+  oras push --artifact-type=application/vnd.opentofu.modulepkg \
+    registry.example.com/module:latest bundle.zip:archive/zip`,
+		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runBundle(cmd, args, stdout, stderr)
+			return runBundle(cmd, args, stdout)
 		},
 	}
+	bundleCmd.Flags().String("format", "zip", "Bundle format: zip, tar.gz, tar.xz")
 
 	rootCmd.AddCommand(resolveCmd)
 	rootCmd.AddCommand(bundleCmd)
@@ -168,7 +179,7 @@ func printModuleTree(w io.Writer, node *ModuleNode, depth int) {
 	}
 }
 
-func runBundle(_ *cobra.Command, args []string, stdout, _ io.Writer) error {
+func runBundle(cmd *cobra.Command, args []string, stdout io.Writer) error {
 	dir := args[0]
 	outputPath := args[1]
 
@@ -198,7 +209,12 @@ func runBundle(_ *cobra.Command, args []string, stdout, _ io.Writer) error {
 	fmt.Fprintf(stdout, "Creating bundle at %s...\n", outputPath)                                       //nolint:errcheck // stdout writes are best-effort
 
 	// Create bundle
-	bundler := NewBundler()
+	formatStr, _ := cmd.Flags().GetString("format")
+	format, err := ParseBundleFormat(formatStr)
+	if err != nil {
+		return err
+	}
+	bundler := NewBundler(format)
 	if bundleErr := bundler.Bundle(tree, outputPath); bundleErr != nil {
 		return fmt.Errorf("failed to create bundle: %w", bundleErr)
 	}

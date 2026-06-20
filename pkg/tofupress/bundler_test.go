@@ -2,6 +2,7 @@ package tofupress
 
 import (
 	"archive/tar"
+	"archive/zip"
 	"compress/gzip"
 	"context"
 	"io"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/ulikunitz/xz"
 )
 
 func TestBundler_BundleLocalModulesOnly(t *testing.T) {
@@ -33,7 +35,7 @@ module "local" {
 	require.NoError(t, err)
 
 	// Bundle
-	bundler := NewBundler()
+	bundler := NewBundler(BundleFormatTarGZ)
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
 	err = bundler.Bundle(tree, archivePath)
 	require.NoError(t, err)
@@ -76,7 +78,7 @@ module "vpc" {
 	require.NoError(t, err)
 
 	// Bundle
-	bundler := NewBundler()
+	bundler := NewBundler(BundleFormatTarGZ)
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
 	err = bundler.Bundle(tree, archivePath)
 	require.NoError(t, err)
@@ -136,7 +138,7 @@ echo "test"`)
 	}
 
 	// Bundle
-	bundler := NewBundler()
+	bundler := NewBundler(BundleFormatTarGZ)
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
 	err := bundler.Bundle(tree, archivePath)
 	require.NoError(t, err)
@@ -174,7 +176,7 @@ func TestBundler_BundleEmptyModule(t *testing.T) {
 	}
 
 	// Bundle
-	bundler := NewBundler()
+	bundler := NewBundler(BundleFormatTarGZ)
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
 	err := bundler.Bundle(tree, archivePath)
 	require.NoError(t, err)
@@ -184,7 +186,7 @@ func TestBundler_BundleEmptyModule(t *testing.T) {
 }
 
 func TestBundler_BundleInvalidTree(t *testing.T) {
-	bundler := NewBundler()
+	bundler := NewBundler(BundleFormatTarGZ)
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
 
 	// Bundle with nil tree
@@ -211,7 +213,7 @@ func TestBundler_BundleToInvalidPath(t *testing.T) {
 		Packages: make(map[string]*DownloadedPackage),
 	}
 
-	bundler := NewBundler()
+	bundler := NewBundler(BundleFormatTarGZ)
 
 	// Try to bundle to a non-existent directory
 	err := bundler.Bundle(tree, "/nonexistent/path/bundle.tar.gz")
@@ -244,7 +246,7 @@ module "vpc2" {
 	require.NoError(t, err)
 
 	// Bundle
-	bundler := NewBundler()
+	bundler := NewBundler(BundleFormatTarGZ)
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
 	err = bundler.Bundle(tree, archivePath)
 	require.NoError(t, err)
@@ -289,7 +291,7 @@ module "remote" {
 	require.NoError(t, err)
 
 	// Bundle
-	bundler := NewBundler()
+	bundler := NewBundler(BundleFormatTarGZ)
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
 	err = bundler.Bundle(tree, archivePath)
 	require.NoError(t, err)
@@ -308,8 +310,120 @@ module "remote" {
 }
 
 func TestNewBundler(t *testing.T) {
-	bundler := NewBundler()
+	bundler := NewBundler(BundleFormatTarGZ)
 	assert.NotNil(t, bundler)
+}
+
+func TestBundler_BundleZIP(t *testing.T) {
+	// Create a simple module structure
+	tmpDir := t.TempDir()
+
+	writeTerraformFile(t, tmpDir, "main.tf", `
+module "local" {
+  source = "./modules/local"
+}
+`)
+
+	localDir := filepath.Join(tmpDir, "modules", "local")
+	require.NoError(t, os.MkdirAll(localDir, 0755))
+	writeTerraformFile(t, localDir, "main.tf", `# local module`)
+
+	// Resolve
+	resolver := NewResolver()
+	tree, err := resolver.Resolve(context.Background(), tmpDir)
+	require.NoError(t, err)
+
+	// Bundle as ZIP
+	bundler := NewBundler(BundleFormatZIP)
+	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
+	err = bundler.Bundle(tree, archivePath)
+	require.NoError(t, err)
+
+	// Verify archive exists
+	assert.FileExists(t, archivePath)
+
+	// Extract and verify contents
+	extractDir := t.TempDir()
+	extractZip(t, archivePath, extractDir)
+
+	// Verify main.tf exists
+	mainFile := filepath.Join(extractDir, "main.tf")
+	assert.FileExists(t, mainFile)
+
+	// Verify local module exists
+	localFile := filepath.Join(extractDir, "modules", "local", "main.tf")
+	assert.FileExists(t, localFile)
+}
+
+func TestBundler_BundleTarXZ(t *testing.T) {
+	// Create a simple module structure
+	tmpDir := t.TempDir()
+
+	writeTerraformFile(t, tmpDir, "main.tf", `
+module "local" {
+  source = "./modules/local"
+}
+`)
+
+	localDir := filepath.Join(tmpDir, "modules", "local")
+	require.NoError(t, os.MkdirAll(localDir, 0755))
+	writeTerraformFile(t, localDir, "main.tf", `# local module`)
+
+	// Resolve
+	resolver := NewResolver()
+	tree, err := resolver.Resolve(context.Background(), tmpDir)
+	require.NoError(t, err)
+
+	// Bundle as tar.xz
+	bundler := NewBundler(BundleFormatTarXZ)
+	archivePath := filepath.Join(t.TempDir(), "bundle.tar.xz")
+	err = bundler.Bundle(tree, archivePath)
+	require.NoError(t, err)
+
+	// Verify archive exists
+	assert.FileExists(t, archivePath)
+
+	// Extract and verify contents
+	extractDir := t.TempDir()
+	extractTarXZ(t, archivePath, extractDir)
+
+	// Verify main.tf exists
+	mainFile := filepath.Join(extractDir, "main.tf")
+	assert.FileExists(t, mainFile)
+
+	// Verify local module exists
+	localFile := filepath.Join(extractDir, "modules", "local", "main.tf")
+	assert.FileExists(t, localFile)
+}
+
+func TestParseBundleFormat(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected BundleFormat
+		wantErr  bool
+	}{
+		{"zip", BundleFormatZIP, false},
+		{"ZIP", BundleFormatZIP, false},
+		{"", BundleFormatZIP, false},
+		{"tar.gz", BundleFormatTarGZ, false},
+		{"tgz", BundleFormatTarGZ, false},
+		{"tar.xz", BundleFormatTarXZ, false},
+		{"txz", BundleFormatTarXZ, false},
+		{"rar", "", true},
+		{"", BundleFormatZIP, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got, err := ParseBundleFormat(tt.input)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.expected, got)
+			}
+		})
+	}
 }
 
 // extractTarGz is a test helper that extracts a tar.gz archive.
@@ -346,5 +460,72 @@ func extractTarGz(t *testing.T, archivePath, destDir string) {
 			outFile.Close()
 			require.NoError(t, err)
 		}
+	}
+}
+
+// extractTarXZ is a test helper that extracts a tar.xz archive.
+func extractTarXZ(t *testing.T, archivePath, destDir string) {
+	t.Helper()
+
+	file, err := os.Open(archivePath)
+	require.NoError(t, err)
+	defer file.Close()
+
+	xzReader, err := xz.NewReader(file)
+	require.NoError(t, err)
+
+	tarReader := tar.NewReader(xzReader)
+
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		require.NoError(t, err)
+
+		targetPath := filepath.Join(destDir, header.Name)
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			require.NoError(t, os.MkdirAll(targetPath, os.FileMode(header.Mode)))
+		case tar.TypeReg:
+			require.NoError(t, os.MkdirAll(filepath.Dir(targetPath), 0755))
+			outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY, os.FileMode(header.Mode))
+			require.NoError(t, err)
+			_, err = io.Copy(outFile, tarReader)
+			outFile.Close()
+			require.NoError(t, err)
+		}
+	}
+}
+
+// extractZip is a test helper that extracts a ZIP archive.
+func extractZip(t *testing.T, archivePath, destDir string) {
+	t.Helper()
+
+	zipReader, err := zip.OpenReader(archivePath)
+	require.NoError(t, err)
+	defer zipReader.Close()
+
+	for _, file := range zipReader.File {
+		targetPath := filepath.Join(destDir, file.Name)
+
+		if file.FileInfo().IsDir() {
+			require.NoError(t, os.MkdirAll(targetPath, file.Mode()))
+			continue
+		}
+
+		require.NoError(t, os.MkdirAll(filepath.Dir(targetPath), 0755))
+
+		outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY, file.Mode())
+		require.NoError(t, err)
+
+		inFile, err := file.Open()
+		require.NoError(t, err)
+
+		_, err = io.Copy(outFile, inFile)
+		inFile.Close()
+		outFile.Close()
+		require.NoError(t, err)
 	}
 }

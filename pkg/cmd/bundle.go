@@ -30,6 +30,7 @@ Example:
 
 func init() {
 	bundleCmd.Flags().String("format", "auto", "Bundle format: auto, zip, tar.gz, tar.xz (auto detects from output file extension)")
+	bundleCmd.Flags().Bool("oci-compliant", false, "Generate OCI-compliant bundle (no sourcetree metadata, inlined modules)")
 }
 
 func runBundle(cmd *cobra.Command, args []string) error {
@@ -95,6 +96,13 @@ func runBundle(cmd *cobra.Command, args []string) error {
 	}
 
 	bundler := tofupress.NewBundler(format)
+	ociCompliant, _ := cmd.Flags().GetBool("oci-compliant")
+	if ociCompliant {
+		if format != tofupress.BundleFormatZIP {
+			return fmt.Errorf("--oci-compliant requires zip format (got %s)", format)
+		}
+		bundler.OCICompliant = true
+	}
 	if bundleErr := bundler.Bundle(tree, outputPath); bundleErr != nil {
 		return fmt.Errorf("failed to create bundle: %w", bundleErr)
 	}

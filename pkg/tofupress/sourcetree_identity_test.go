@@ -114,3 +114,52 @@ func TestSnapshotDirectoryWithStripUsesIncludedFinalContent(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEqual(t, unstripped.Hash, snapshot.Hash)
 }
+
+func TestApplySourcetreeIdentityPlanMaterializesCanonicalDirectoryAndRewritesSources(t *testing.T) {
+	root := t.TempDir()
+	writeTerraformFile(t, root, "main.tf", `
+module "a" { source = "./sourcetree/old-a" }
+module "b" { source = "./sourcetree/old-b" }
+`)
+	pkgA := filepath.Join(root, "sourcetree", "old-a")
+	pkgB := filepath.Join(root, "sourcetree", "old-b")
+	require.NoError(t, os.MkdirAll(pkgA, 0o755))
+	require.NoError(t, os.MkdirAll(pkgB, 0o755))
+	writeTerraformFile(t, pkgA, "main.tf", `output "id" { value = "same" }`)
+	writeTerraformFile(t, pkgB, "main.tf", `output "id" { value = "same" }`)
+
+	modA := &ModuleNode{Key: "root.a", Name: "a", PackageRoot: pkgA, InstallDir: pkgA, Source: ModuleSource{PackageAddr: "git::file:///repo-a", SubDir: ""}, IsRemote: true}
+	modB := &ModuleNode{Key: "root.b", Name: "b", PackageRoot: pkgB, InstallDir: pkgB, Source: ModuleSource{PackageAddr: "git::file:///repo-b", SubDir: ""}, IsRemote: true}
+	tree := &ResolvedTree{
+		Root:       &ModuleNode{Key: "root", Name: "root", InstallDir: root, PackageRoot: root, Children: []*ModuleNode{modA, modB}},
+		Packages:   map[string]*DownloadedPackage{"old-a": {PackageAddr: "git::file:///repo-a", LocalDir: pkgA}, "old-b": {PackageAddr: "git::file:///repo-b", LocalDir: pkgB}},
+		AllModules: []*ModuleNode{modA, modB},
+	}
+	modA.Parent = tree.Root
+	modB.Parent = tree.Root
+	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+	plan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	require.NoError(t, err)
+	require.Len(t, plan.ByFinalID, 1)
+
+	err = ApplySourcetreeIdentityPlan(tree, plan)
+	require.NoError(t, err)
+
+	var finalID string
+	for id := range plan.ByFinalID {
+		finalID = id
+	}
+	assert.DirExists(t, filepath.Join(root, "sourcetree", finalID))
+	assert.NoDirExists(t, filepath.Join(root, "sourcetree", "old-b"))
+	assert.Len(t, tree.Packages, 1)
+	assert.Contains(t, tree.Packages, finalID)
+	assert.Equal(t, filepath.Join(root, "sourcetree", finalID), modA.PackageRoot)
+	assert.Equal(t, filepath.Join(root, "sourcetree", finalID), modB.PackageRoot)
+
+	mainContent, err := os.ReadFile(filepath.Join(root, "main.tf"))
+	require.NoError(t, err)
+	assert.Contains(t, string(mainContent), `source = "./sourcetree/`+finalID+`"`)
+	assert.NotContains(t, string(mainContent), "old-a")
+	assert.NotContains(t, string(mainContent), "old-b")
+}

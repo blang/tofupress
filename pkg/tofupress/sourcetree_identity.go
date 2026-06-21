@@ -245,6 +245,144 @@ func buildDedupGroups(canonical map[string]*PackageIdentity) []DedupGroup {
 	return groups
 }
 
+// ApplySourcetreeIdentityPlan materializes canonical sourcetree directories, updates
+// tree module pointers, rewrites module sources to final IDs, and removes superseded
+// package directories.
+func ApplySourcetreeIdentityPlan(tree *ResolvedTree, plan *SourcetreeIdentityPlan) error {
+	if tree == nil || tree.Root == nil {
+		return fmt.Errorf("cannot apply sourcetree identity plan to empty tree")
+	}
+	if plan == nil {
+		return nil
+	}
+	if err := os.MkdirAll(plan.RootSourcetreeDir, 0o755); err != nil { //nolint:gosec // G301: standard directory permissions
+		return fmt.Errorf("failed to create sourcetree directory: %w", err)
+	}
+	if err := materializeCanonicalPackages(plan); err != nil {
+		return err
+	}
+	updateTreePackagePointers(tree, plan)
+	if err := rewriteModuleSourcesToFinalIDs(tree); err != nil {
+		return err
+	}
+	if err := removeSupersededPackageDirs(plan); err != nil {
+		return err
+	}
+	return nil
+}
+
+// materializeCanonicalPackages copies canonical packages to their final sourcetree locations.
+func materializeCanonicalPackages(plan *SourcetreeIdentityPlan) error {
+	ids := make([]string, 0, len(plan.ByFinalID))
+	for id := range plan.ByFinalID {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		identity := plan.ByFinalID[id]
+		if filepath.Clean(identity.OldLocalDir) == filepath.Clean(identity.FinalLocalDir) {
+			continue
+		}
+		if err := os.RemoveAll(identity.FinalLocalDir); err != nil {
+			return fmt.Errorf("failed to clear final package directory %s: %w", identity.FinalLocalDir, err)
+		}
+		if err := copyDirOCI(identity.OldLocalDir, identity.FinalLocalDir, nil); err != nil {
+			return fmt.Errorf("failed to materialize final package %s: %w", identity.FinalID, err)
+		}
+	}
+	return nil
+}
+
+// updateTreePackagePointers updates module PackageRoot and InstallDir fields to point to
+// the final sourcetree directories, and rebuilds tree.Packages with final identities.
+func updateTreePackagePointers(tree *ResolvedTree, plan *SourcetreeIdentityPlan) {
+	oldRootToIdentity := make(map[string]*PackageIdentity)
+	for _, identity := range plan.Packages {
+		oldRootToIdentity[filepath.Clean(identity.OldLocalDir)] = identity
+	}
+	for _, module := range tree.AllModules {
+		if module == nil {
+			continue
+		}
+		identity := oldRootToIdentity[filepath.Clean(module.PackageRoot)]
+		if identity == nil {
+			continue
+		}
+		rel, err := filepath.Rel(identity.OldLocalDir, module.InstallDir)
+		if err != nil || rel == "." {
+			rel = ""
+		}
+		module.PackageRoot = identity.FinalLocalDir
+		module.InstallDir = filepath.Join(identity.FinalLocalDir, rel)
+	}
+
+	finalPackages := make(map[string]*DownloadedPackage, len(plan.ByFinalID))
+	for id, identity := range plan.ByFinalID {
+		finalPackages[id] = &DownloadedPackage{
+			PackageAddr:          identity.CanonicalPackageAddr,
+			LocalDir:             identity.FinalLocalDir,
+			ContentHash:          treePackageContentHash(tree, identity),
+			SourcetreeID:         identity.FinalID,
+			FinalHash:            identity.FinalHash,
+			CanonicalPackageAddr: identity.CanonicalPackageAddr,
+			PackageAddrs:         append([]string(nil), identity.PackageAddrs...),
+			ModuleKeys:           append([]string(nil), identity.ModuleKeys...),
+			Deduplicated:         identity.Deduplicated,
+		}
+	}
+	tree.Packages = finalPackages
+}
+
+// treePackageContentHash looks up the original download hash for an identity.
+func treePackageContentHash(tree *ResolvedTree, identity *PackageIdentity) string {
+	if tree == nil || identity == nil {
+		return ""
+	}
+	if pkg := tree.Packages[identity.OldID]; pkg != nil {
+		return pkg.ContentHash
+	}
+	return ""
+}
+
+// rewriteModuleSourcesToFinalIDs rewrites all module source references in parent modules
+// to point to the final sourcetree IDs.
+func rewriteModuleSourcesToFinalIDs(tree *ResolvedTree) error {
+	for _, module := range tree.AllModules {
+		if module == nil || module.Parent == nil || module.Parent.InstallDir == "" || module.PackageRoot == "" {
+			continue
+		}
+		relPath, err := filepath.Rel(module.Parent.InstallDir, module.PackageRoot)
+		if err != nil {
+			return fmt.Errorf("failed to compute final source for module %s: %w", module.Key, err)
+		}
+		newSource := moduleSourcePath(relPath, module.Source.SubDir)
+		tfFiles, err := FindTerraformFiles(module.Parent.InstallDir)
+		if err != nil {
+			return fmt.Errorf("failed to scan parent module %s for source rewrite: %w", module.Parent.Key, err)
+		}
+		for _, tfFile := range tfFiles {
+			if err := RewriteModuleSource(tfFile, module.Name, newSource); err != nil {
+				return fmt.Errorf("failed to rewrite module %s source to final sourcetree ID: %w", module.Key, err)
+			}
+		}
+	}
+	return nil
+}
+
+// removeSupersededPackageDirs removes old package directories that have been replaced by
+// canonical sourcetree directories.
+func removeSupersededPackageDirs(plan *SourcetreeIdentityPlan) error {
+	for _, identity := range plan.Packages {
+		if filepath.Clean(identity.OldLocalDir) == filepath.Clean(identity.FinalLocalDir) {
+			continue
+		}
+		if err := os.RemoveAll(identity.OldLocalDir); err != nil {
+			return fmt.Errorf("failed to remove superseded package directory %s: %w", identity.OldLocalDir, err)
+		}
+	}
+	return nil
+}
+
 // hashEntries computes a deterministic SHA-256 hash from sorted file entries.
 func hashEntries(entries []hashEntry, totalBytes int64) DirectorySnapshot {
 	h := sha256.New()

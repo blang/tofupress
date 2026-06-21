@@ -156,6 +156,29 @@ func TestBundlerOCICompliantAppliesStripPlan(t *testing.T) {
 	assert.NotContains(t, names, "README.md")
 }
 
+func TestBundlerOCICompliantOmitsSourcetreeLayoutMetadata(t *testing.T) {
+	root := t.TempDir()
+	writeTerraformFile(t, root, "main.tf", `module "child" { source = "./modules/child" }`)
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "modules", "child"), 0o755))
+	writeTerraformFile(t, filepath.Join(root, "modules", "child"), "main.tf", `output "x" { value = "child" }`)
+	rootModule := &ModuleNode{Key: "root", Name: "root", InstallDir: root, PackageRoot: root}
+	tree := &ResolvedTree{Root: rootModule, AllModules: []*ModuleNode{rootModule}, Packages: map[string]*DownloadedPackage{}}
+	metadata := &ArtifactMetadata{SchemaVersion: MetadataSchemaVersion, CreatedAt: "2026-06-21T12:00:00Z"}
+
+	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
+	bundler := NewBundler(BundleFormatZIP)
+	bundler.OCICompliant = true
+	bundler.Metadata = metadata
+	require.NoError(t, bundler.Bundle(tree, archivePath))
+
+	for _, name := range zipFileNames(t, archivePath) {
+		assert.NotContains(t, name, "sourcetree/")
+	}
+	readBack, err := ReadMetadataFromArtifact(archivePath)
+	require.NoError(t, err)
+	assert.Empty(t, readBack.DedupGroups)
+}
+
 func TestBundler_OCICompliantEmbedsMetadataAtRoot(t *testing.T) {
 	tmpDir := t.TempDir()
 	writeTerraformFile(t, tmpDir, "main.tf", `output "name" { value = "root" }`)

@@ -221,46 +221,52 @@ func TestBundler_BundleToInvalidPath(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestBundler_BundleDeduplication(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
-	// Create a module that references the same remote module twice
-	tmpDir := t.TempDir()
-
-	writeTerraformFile(t, tmpDir, "main.tf", `
-module "vpc1" {
-  source = "git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git?ref=v5.0.0"
-  name   = "vpc1"
-}
-
-module "vpc2" {
-  source = "git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git?ref=v5.0.0"
-  name   = "vpc2"
-}
+func TestBundlerArchiveUsesFinalContentSourcetreeIDAndDeduplicates(t *testing.T) {
+	root := t.TempDir()
+	writeTerraformFile(t, root, "main.tf", `
+module "a" { source = "./sourcetree/old-a" }
+module "b" { source = "./sourcetree/old-b" }
 `)
+	pkgA := filepath.Join(root, "sourcetree", "old-a")
+	pkgB := filepath.Join(root, "sourcetree", "old-b")
+	require.NoError(t, os.MkdirAll(pkgA, 0o755))
+	require.NoError(t, os.MkdirAll(pkgB, 0o755))
+	writeTerraformFile(t, pkgA, "main.tf", `output "id" { value = "same" }`)
+	writeTerraformFile(t, pkgB, "main.tf", `output "id" { value = "same" }`)
+	writeTestFile(t, filepath.Join(pkgA, "README.md"), "stripped a")
+	writeTestFile(t, filepath.Join(pkgB, "README.md"), "stripped b")
 
-	// Resolve
-	resolver := NewResolver()
-	tree, err := resolver.Resolve(context.Background(), tmpDir)
+	modA := &ModuleNode{Key: "root.a", Name: "a", PackageRoot: pkgA, InstallDir: pkgA, Source: ModuleSource{PackageAddr: "git::file:///repo-a"}, IsRemote: true}
+	modB := &ModuleNode{Key: "root.b", Name: "b", PackageRoot: pkgB, InstallDir: pkgB, Source: ModuleSource{PackageAddr: "git::file:///repo-b"}, IsRemote: true}
+	tree := &ResolvedTree{
+		Root:       &ModuleNode{Key: "root", Name: "root", InstallDir: root, PackageRoot: root, Children: []*ModuleNode{modA, modB}},
+		Packages:   map[string]*DownloadedPackage{"old-a": {PackageAddr: "git::file:///repo-a", LocalDir: pkgA}, "old-b": {PackageAddr: "git::file:///repo-b", LocalDir: pkgB}},
+		AllModules: []*ModuleNode{modA, modB},
+	}
+	modA.Parent = tree.Root
+	modB.Parent = tree.Root
+	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+	identityPlan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	require.NoError(t, err)
+	require.NoError(t, ApplySourcetreeIdentityPlan(tree, identityPlan))
+	stripPlan, err = PlanStripping(tree, StripModeModuleDir)
 	require.NoError(t, err)
 
-	// Bundle
-	bundler := NewBundler(BundleFormatTarGZ)
-	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
-	err = bundler.Bundle(tree, archivePath)
-	require.NoError(t, err)
+	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
+	bundler := NewBundler(BundleFormatZIP)
+	bundler.StripPlan = stripPlan
+	require.NoError(t, bundler.Bundle(tree, archivePath))
 
-	// Extract and verify
-	extractDir := t.TempDir()
-	extractTarGz(t, archivePath, extractDir)
-
-	// Verify sourcetree has only one package (deduplicated)
-	sourcetreeDir := filepath.Join(extractDir, "sourcetree")
-	entries, err := os.ReadDir(sourcetreeDir)
-	require.NoError(t, err)
-	assert.Equal(t, 1, len(entries), "sourcetree should contain exactly one deduplicated package")
+	names := zipFileNames(t, archivePath)
+	var finalID string
+	for id := range identityPlan.ByFinalID {
+		finalID = id
+	}
+	assert.Contains(t, names, "sourcetree/"+finalID+"/main.tf")
+	assert.NotContains(t, names, "sourcetree/old-a/main.tf")
+	assert.NotContains(t, names, "sourcetree/old-b/main.tf")
+	assert.NotContains(t, names, "sourcetree/"+finalID+"/README.md")
 }
 
 func TestBundler_BundleNestedModules(t *testing.T) {

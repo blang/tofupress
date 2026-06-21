@@ -39,6 +39,7 @@ type MetadataRequest struct {
 	RootSource string
 	OutputPath string
 	CreatedAt  time.Time
+	StripPlan  *StripPlan // Optional strip plan for stats and filesystem function reporting
 }
 
 // MetadataCommand records the CLI command used to create the artifact.
@@ -96,15 +97,17 @@ type BundleStats struct {
 
 // ArtifactMetadata is the top-level metadata structure embedded in every bundle.
 type ArtifactMetadata struct {
-	SchemaVersion string            `json:"schema_version"`
-	CreatedAt     string            `json:"created_at"`
-	TofuPress     BuildInfo         `json:"tofupress"`
-	Command       MetadataCommand   `json:"command"`
-	Artifact      MetadataArtifact  `json:"artifact"`
-	Root          ModuleMetadata    `json:"root"`
-	Modules       []ModuleMetadata  `json:"modules"`
-	Packages      []PackageMetadata `json:"packages"`
-	Stats         BundleStats       `json:"stats"`
+	SchemaVersion       string                  `json:"schema_version"`
+	CreatedAt           string                  `json:"created_at"`
+	TofuPress           BuildInfo               `json:"tofupress"`
+	Command             MetadataCommand         `json:"command"`
+	Artifact            MetadataArtifact        `json:"artifact"`
+	Root                ModuleMetadata          `json:"root"`
+	Modules             []ModuleMetadata        `json:"modules"`
+	Packages            []PackageMetadata       `json:"packages"`
+	Stats               BundleStats             `json:"stats"`
+	FilesystemFunctions []FilesystemFunctionRef `json:"filesystem_functions,omitempty"`
+	StripWarnings       []StripWarning          `json:"strip_warnings,omitempty"`
 }
 
 // BuildArtifactMetadata constructs artifact metadata from a resolved module tree.
@@ -141,7 +144,15 @@ func BuildArtifactMetadata(tree *ResolvedTree, req *MetadataRequest) (*ArtifactM
 		StrippedFiles:    0,
 	}
 
-	return &ArtifactMetadata{
+	// Apply strip plan stats if available
+	if req.StripPlan != nil {
+		stats.OriginalBytes = req.StripPlan.OriginalBytes
+		stats.FinalBytes = req.StripPlan.FinalBytes
+		stats.StrippedBytes = req.StripPlan.StrippedBytes
+		stats.StrippedFiles = req.StripPlan.StrippedFiles
+	}
+
+	artifact := &ArtifactMetadata{
 		SchemaVersion: MetadataSchemaVersion,
 		CreatedAt:     createdAt.UTC().Format(time.RFC3339),
 		TofuPress:     req.Build,
@@ -160,7 +171,14 @@ func BuildArtifactMetadata(tree *ResolvedTree, req *MetadataRequest) (*ArtifactM
 		Modules:  modules,
 		Packages: packages,
 		Stats:    stats,
-	}, nil
+	}
+
+	if req.StripPlan != nil {
+		artifact.FilesystemFunctions = req.StripPlan.FilesystemFunctions
+		artifact.StripWarnings = req.StripPlan.Warnings
+	}
+
+	return artifact, nil
 }
 
 func buildModuleMetadata(nodes []*ModuleNode) []ModuleMetadata {

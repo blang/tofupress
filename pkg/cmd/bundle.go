@@ -32,6 +32,7 @@ func init() {
 	bundleCmd.Flags().String("format", "auto", "Bundle format: auto, zip, tar.gz, tar.xz (auto detects from output file extension)")
 	bundleCmd.Flags().Bool("oci-compliant", false, "Generate OCI-compliant bundle (no sourcetree metadata, inlined modules)")
 	bundleCmd.Flags().String("metadata-out", "", "Write bundle metadata JSON to a separate path")
+	bundleCmd.Flags().String("strip", "module-dir", "Strip mode: none, module-dir (safe default), or config-only")
 }
 
 //
@@ -105,6 +106,23 @@ func runBundle(cmd *cobra.Command, args []string) error {
 		bundler.OCICompliant = true
 	}
 
+	// Parse and plan stripping
+	stripStr, _ := cmd.Flags().GetString("strip")
+	stripMode, err := tofupress.ParseStripMode(stripStr)
+	if err != nil {
+		return err
+	}
+	stripPlan, err := tofupress.PlanStripping(tree, stripMode)
+	if err != nil {
+		return fmt.Errorf("failed to plan stripping: %w", err)
+	}
+	bundler.StripPlan = stripPlan
+
+	// Print strip warnings
+	for _, warning := range stripPlan.Warnings {
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning.Message)
+	}
+
 	metadata, err := tofupress.BuildArtifactMetadata(tree, &tofupress.MetadataRequest{
 		Build: tofupress.BuildInfo{
 			Version: BuildVersion,
@@ -113,9 +131,10 @@ func runBundle(cmd *cobra.Command, args []string) error {
 		},
 		Command:    "bundle",
 		Args:       []string{source, outputPath},
-		Options:    tofupress.BundleOptions{Format: string(format), OCICompliant: ociCompliant, StripMode: "none"},
+		Options:    tofupress.BundleOptions{Format: string(format), OCICompliant: ociCompliant, StripMode: string(stripMode)},
 		RootSource: source,
 		OutputPath: outputPath,
+		StripPlan:  stripPlan,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to build metadata: %w", err)

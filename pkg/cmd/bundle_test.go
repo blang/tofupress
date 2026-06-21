@@ -17,6 +17,7 @@ func TestRunBundleErrorsOnUnknownExtensionWhenFormatAuto(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().String("format", "auto", "")
 	cmd.Flags().Bool("oci-compliant", false, "")
+	cmd.Flags().String("strip", "module-dir", "")
 
 	err := runBundle(cmd, []string{tmpDir, filepath.Join(tmpDir, "bundle.unknown")})
 	require.Error(t, err)
@@ -36,6 +37,7 @@ func TestRunBundleWritesMetadataOutAndPrintsStats(t *testing.T) {
 	cmd.Flags().String("format", "zip", "")
 	cmd.Flags().Bool("oci-compliant", false, "")
 	cmd.Flags().String("metadata-out", metadataPath, "")
+	cmd.Flags().String("strip", "module-dir", "")
 
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
@@ -52,4 +54,5 @@ func TestRunBundleWritesMetadataOutAndPrintsStats(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(data), `"schema_version": "1"`)
 	assert.Contains(t, string(data), `"format": "zip"`)
+	assert.Contains(t, string(data), `"strip_mode": "module-dir"`)
 }

@@ -78,6 +78,36 @@ func TestBuildArtifactMetadataFromResolvedTree(t *testing.T) {
 	assert.Equal(t, int64(0), metadata.Stats.StrippedBytes)
 }
 
+func TestBuildArtifactMetadataIncludesStripPlanStatsAndFilesystemFunctions(t *testing.T) {
+	rootDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(rootDir, "main.tf"), []byte(`locals { rendered = file("templates/userdata.tftpl") }`), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(rootDir, "templates"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(rootDir, "templates", "userdata.tftpl"), []byte("hello"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(rootDir, "README.md"), []byte("strip"), 0o644))
+
+	tree := &ResolvedTree{Root: &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}, Packages: map[string]*DownloadedPackage{}}
+	tree.AllModules = []*ModuleNode{tree.Root}
+	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+
+	metadata, err := BuildArtifactMetadata(tree, &MetadataRequest{
+		Build:      BuildInfo{Version: "test"},
+		Command:    "bundle",
+		Options:    BundleOptions{Format: "zip", StripMode: string(StripModeModuleDir)},
+		OutputPath: "bundle.zip",
+		StripPlan:  stripPlan,
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, string(StripModeModuleDir), metadata.Command.Options.StripMode)
+	assert.Equal(t, stripPlan.FinalBytes, metadata.Stats.FinalBytes)
+	assert.Equal(t, stripPlan.StrippedBytes, metadata.Stats.StrippedBytes)
+	assert.Equal(t, stripPlan.StrippedFiles, metadata.Stats.StrippedFiles)
+	require.Len(t, metadata.FilesystemFunctions, 1)
+	assert.Equal(t, "file", metadata.FilesystemFunctions[0].Function)
+	assert.Equal(t, "static-include", metadata.FilesystemFunctions[0].Handling)
+}
+
 func TestWriteMetadataFileWritesIndentedJSON(t *testing.T) {
 	metadata := &ArtifactMetadata{
 		SchemaVersion: MetadataSchemaVersion,

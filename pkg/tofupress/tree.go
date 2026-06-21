@@ -9,6 +9,7 @@ type SourceType int
 // Source type constants identify the protocol or mechanism used to fetch a module.
 const (
 	SourceLocal    SourceType = iota // ./modules/foo, ../shared
+	SourceAbsolute                   // /absolute/path/to/module, rejected by default
 	SourceGit                        // git::https://...
 	SourceHTTP                       // https://...archive.tar.gz
 	SourceRegistry                   // hashicorp/consul/aws
@@ -93,6 +94,8 @@ func (s SourceType) String() string {
 	switch s {
 	case SourceLocal:
 		return SourceDisplayLocal
+	case SourceAbsolute:
+		return "absolute"
 	case SourceGit:
 		return "git"
 	case SourceHTTP:
@@ -112,7 +115,7 @@ func (s SourceType) String() string {
 
 // IsRemote returns true if the source type requires downloading.
 func (s SourceType) IsRemote() bool {
-	return s != SourceLocal && s != SourceRegistry // Registry might be local or remote
+	return s != SourceLocal && s != SourceAbsolute && s != SourceRegistry // Registry might be local or remote
 }
 
 // String returns a human-readable representation of the module source.

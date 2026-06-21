@@ -53,6 +53,31 @@ func TestClassifySource_Local(t *testing.T) {
 	}
 }
 
+func TestClassifySource_LocalWithSubdir(t *testing.T) {
+	got := ClassifySource("./package//modules/moduleA", "/root")
+
+	assert.Equal(t, SourceLocal, got.Type)
+	assert.Equal(t, "./package//modules/moduleA", got.Raw)
+	assert.Equal(t, "./package", got.PackageAddr)
+	assert.Equal(t, "modules/moduleA", got.SubDir)
+}
+
+func TestClassifySource_AbsolutePath(t *testing.T) {
+	got := ClassifySource("/opt/modules/network", "/root")
+
+	assert.Equal(t, SourceAbsolute, got.Type)
+	assert.Equal(t, "/opt/modules/network", got.Raw)
+	assert.Equal(t, "/opt/modules/network", got.PackageAddr)
+	assert.Empty(t, got.SubDir)
+}
+
+func TestIsAbsoluteSource(t *testing.T) {
+	assert.True(t, IsAbsoluteSource("/opt/modules/network"))
+	assert.False(t, IsAbsoluteSource("./modules/network"))
+	assert.False(t, IsAbsoluteSource("../modules/network"))
+	assert.False(t, IsAbsoluteSource("git::https://github.com/example/repo.git"))
+}
+
 func TestClassifySource_Git(t *testing.T) {
 	tests := []struct {
 		name string
@@ -443,6 +468,7 @@ func TestSourceType_String(t *testing.T) {
 		want       string
 	}{
 		{SourceLocal, "local"},
+		{SourceAbsolute, "absolute"},
 		{SourceGit, "git"},
 		{SourceHTTP, "http"},
 		{SourceRegistry, "registry"},

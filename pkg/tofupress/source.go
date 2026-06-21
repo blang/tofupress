@@ -3,20 +3,33 @@ package tofupress
 import (
 	"net/url"
 	"path"
+	"path/filepath"
 	"strings"
 )
 
 // ClassifySource classifies a module source string into a typed ModuleSource.
 // The pwd parameter is the directory containing the .tf file (for resolving relative paths).
 func ClassifySource(raw, pwd string) ModuleSource {
-	src := ModuleSource{
-		Raw: raw,
+	// 0. Absolute paths (rejected by default, but classified)
+	if IsAbsoluteSource(raw) {
+		pkgAddr, subDir := SplitPackageSubdir(raw)
+		return ModuleSource{
+			Raw:         raw,
+			Type:        SourceAbsolute,
+			PackageAddr: pkgAddr,
+			SubDir:      subDir,
+		}
 	}
 
 	// 1. Local paths (highest priority)
 	if IsLocalSource(raw) {
-		src.Type = SourceLocal
-		return src
+		pkgAddr, subDir := SplitPackageSubdir(raw)
+		return ModuleSource{
+			Raw:         raw,
+			Type:        SourceLocal,
+			PackageAddr: pkgAddr,
+			SubDir:      subDir,
+		}
 	}
 
 	// 2. Explicit prefixed sources
@@ -44,7 +57,9 @@ func ClassifySource(raw, pwd string) ModuleSource {
 	}
 
 	// 5. Unknown
-	return src
+	return ModuleSource{
+		Raw: raw,
+	}
 }
 
 // parseGitSource parses a git:: prefixed source.
@@ -181,6 +196,11 @@ func SplitPackageSubdir(src string) (packageAddr, subDir string) {
 	}
 
 	return src, path.Clean(subdir)
+}
+
+// IsAbsoluteSource returns true if the source is an absolute filesystem path.
+func IsAbsoluteSource(raw string) bool {
+	return filepath.IsAbs(raw)
 }
 
 // IsLocalSource returns true if the source is a local path (starts with ./ or ../).

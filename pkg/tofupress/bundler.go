@@ -776,8 +776,12 @@ func (b *Bundler) aggregatePressedModules(tree *ResolvedTree) error {
 
 			// Rewrite source in the pressed module
 			oldSource := "./" + dirNameSourceTree + "/" + packageID
-			// Calculate relative path from pressed module to root sourcetree
-			relPath, err := filepath.Rel(module.InstallDir, targetPkgPath)
+			// Calculate relative path based on bundle structure, not filesystem
+			// In the bundle, the pressed module is at <module.Key>/ and the package is at sourcetree/<packageID>/
+			// So we need to go up from the module to the root, then into sourcetree
+			moduleBundlePath := module.Key
+			packageBundlePath := filepath.Join(dirNameSourceTree, packageID)
+			relPath, err := filepath.Rel(moduleBundlePath, packageBundlePath)
 			if err != nil {
 				return fmt.Errorf("failed to calculate relative path: %w", err)
 			}
@@ -792,6 +796,13 @@ func (b *Bundler) aggregatePressedModules(tree *ResolvedTree) error {
 				if err := RewriteModuleSourceByOldSource(tfFile, oldSource, newSource); err != nil {
 					// Ignore errors - source might not be in this file
 					continue
+				}
+			}
+
+			// Update tree.AllModules to reflect the new location
+			for i, m := range tree.AllModules {
+				if m.InstallDir == sourcePkgPath {
+					tree.AllModules[i].InstallDir = targetPkgPath
 				}
 			}
 		}

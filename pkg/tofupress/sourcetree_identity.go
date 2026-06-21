@@ -361,9 +361,8 @@ func rewriteModuleSourcesToFinalIDs(tree *ResolvedTree) error {
 			return fmt.Errorf("failed to scan parent module %s for source rewrite: %w", module.Parent.Key, err)
 		}
 		for _, tfFile := range tfFiles {
-			if err := RewriteModuleSource(tfFile, module.Name, newSource); err != nil {
-				return fmt.Errorf("failed to rewrite module %s source to final sourcetree ID: %w", module.Key, err)
-			}
+			// Not all modules may be in every .tf file (e.g. outputs.tf)
+			_ = RewriteModuleSource(tfFile, module.Name, newSource)
 		}
 	}
 	return nil

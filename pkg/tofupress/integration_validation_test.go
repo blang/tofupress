@@ -97,7 +97,7 @@ output "runtime" {
 	validateArchiveWithAllTools(t, serveArtifact(t, artifact))
 }
 
-func TestIntegrationConfigOnlyDynamicFilesystemReadWarns(t *testing.T) {
+func TestIntegrationConfigOnlyDynamicFilesystemReadWarnsAndPlanFails(t *testing.T) {
 	bin := buildTofuPressBinary(t)
 	sourceDir := t.TempDir()
 	writeIntegrationFile(t, sourceDir, "main.tf", `
@@ -126,12 +126,11 @@ output "runtime" {
 	assert.Greater(t, metadata.Stats.StrippedFiles, 0)
 	assert.NotEmpty(t, metadata.StripWarnings)
 
-	// Dynamic reads are detected but config-only mode does not apply the fallback
 	require.Len(t, metadata.FilesystemFunctions, 1)
 	assert.False(t, metadata.FilesystemFunctions[0].Static)
+	assert.Equal(t, "dynamic-package-fallback", metadata.FilesystemFunctions[0].Handling)
 
-	// Init succeeds because the archive has valid .tf files and no providers
-	validateArchiveWithAllTools(t, serveArtifact(t, artifact))
+	expectArchivePlanFailsWithAllTools(t, serveArtifact(t, artifact))
 }
 
 func TestIntegrationOpenTofuSameBasenameTofuPriorityValidates(t *testing.T) {

@@ -172,3 +172,20 @@ func validateArchiveWithTool(t *testing.T, tool iacTool, sourceURL string) {
 	runIACTool(t, tool, consumerDir, "init", "-backend=false", "-input=false", "-no-color")
 	runIACTool(t, tool, consumerDir, "validate", "-no-color")
 }
+
+func expectArchivePlanFailsWithAllTools(t *testing.T, sourceURL string) {
+	t.Helper()
+	for _, tool := range requireAllIACTools(t) {
+		expectArchivePlanFailsWithTool(t, tool, sourceURL)
+	}
+}
+
+func expectArchivePlanFailsWithTool(t *testing.T, tool iacTool, sourceURL string) {
+	t.Helper()
+	consumerDir := t.TempDir()
+	writeConsumerModule(t, consumerDir, sourceURL)
+	runIACTool(t, tool, consumerDir, "init", "-backend=false", "-input=false", "-no-color")
+	output := runIACToolError(t, tool, consumerDir, "plan", "-refresh=false", "-input=false", "-no-color")
+	assert.Contains(t, output, "Invalid function argument")
+	assert.Contains(t, output, "no file exists")
+}

@@ -666,3 +666,57 @@ func TestBundlerTarGZAppliesModuleDirStripPlan(t *testing.T) {
 	assert.Contains(t, names, "templates/userdata.tftpl")
 	assert.NotContains(t, names, "README.md")
 }
+
+func TestBundlerDefaultModuleDirStrippingPreservesStaticAndDynamicRuntimeFiles(t *testing.T) {
+	rootDir := t.TempDir()
+	writeTerraformFile(t, rootDir, "main.tf", `variable "dynamic" { type = string }
+locals {
+  static_template = templatefile("templates/static.tftpl", {})
+  dynamic_file    = file("templates/${var.dynamic}.txt")
+}`)
+	require.NoError(t, os.WriteFile(filepath.Join(rootDir, "README.md"), []byte("kept because dynamic fallback keeps package"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(rootDir, "templates"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(rootDir, "templates", "static.tftpl"), []byte("static"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(rootDir, "templates", "runtime.txt"), []byte("dynamic"), 0o644))
+
+	root := &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}
+	tree := &ResolvedTree{Root: root, AllModules: []*ModuleNode{root}, Packages: map[string]*DownloadedPackage{}}
+	plan, err := PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+
+	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
+	bundler := NewBundler(BundleFormatZIP)
+	bundler.StripPlan = plan
+	require.NoError(t, bundler.Bundle(tree, archivePath))
+
+	names := zipFileNames(t, archivePath)
+	assert.Contains(t, names, "main.tf")
+	assert.Contains(t, names, "README.md")
+	assert.Contains(t, names, "templates/static.tftpl")
+	assert.Contains(t, names, "templates/runtime.txt")
+}
+
+func TestBundlerDefaultModuleDirStrippingDropsIrrelevantPackageFilesWhenReadsAreStatic(t *testing.T) {
+	rootDir := t.TempDir()
+	writeTerraformFile(t, rootDir, "main.tf", `locals { rendered = templatefile("templates/userdata.tftpl", {}) }`)
+	require.NoError(t, os.MkdirAll(filepath.Join(rootDir, "templates"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(rootDir, "templates", "userdata.tftpl"), []byte("keep"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(rootDir, "templates", "unused.tftpl"), []byte("strip"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(rootDir, "README.md"), []byte("strip"), 0o644))
+
+	tree := &ResolvedTree{Root: &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}, Packages: map[string]*DownloadedPackage{}}
+	tree.AllModules = []*ModuleNode{tree.Root}
+	plan, err := PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+
+	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
+	bundler := NewBundler(BundleFormatZIP)
+	bundler.StripPlan = plan
+	require.NoError(t, bundler.Bundle(tree, archivePath))
+
+	names := zipFileNames(t, archivePath)
+	assert.Contains(t, names, "main.tf")
+	assert.Contains(t, names, "templates/userdata.tftpl")
+	assert.NotContains(t, names, "templates/unused.tftpl")
+	assert.NotContains(t, names, "README.md")
+}

@@ -1,0 +1,109 @@
+package tofupress
+
+import (
+	"archive/tar"
+	"archive/zip"
+	"compress/gzip"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+
+	"github.com/ulikunitz/xz"
+)
+
+// ReadMetadataFromArtifact reads metadata from a supported archive format.
+func ReadMetadataFromArtifact(path string) (*ArtifactMetadata, error) {
+	format, ok := DetectFormatFromPath(path)
+	if !ok {
+		return nil, fmt.Errorf("could not infer artifact format from %q", path)
+	}
+
+	switch format {
+	case BundleFormatZIP:
+		return readMetadataFromZip(path)
+	case BundleFormatTarGZ:
+		return readMetadataFromTarGZ(path)
+	case BundleFormatTarXZ:
+		return readMetadataFromTarXZ(path)
+	default:
+		return nil, fmt.Errorf("unsupported artifact format: %s", format)
+	}
+}
+
+func readMetadataFromZip(path string) (*ArtifactMetadata, error) {
+	reader, err := zip.OpenReader(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open zip artifact: %w", err)
+	}
+	defer func() { _ = reader.Close() }()
+
+	for _, file := range reader.File {
+		if file.Name != MetadataFileName {
+			continue
+		}
+		entry, err := file.Open()
+		if err != nil {
+			return nil, fmt.Errorf("failed to open metadata entry: %w", err)
+		}
+		metadata, decErr := decodeMetadata(entry)
+		_ = entry.Close()
+		return metadata, decErr
+	}
+	return nil, fmt.Errorf("metadata file %s not found in artifact", MetadataFileName)
+}
+
+func readMetadataFromTarGZ(path string) (*ArtifactMetadata, error) {
+	file, err := os.Open(path) //nolint:gosec // path is provided by user
+	if err != nil {
+		return nil, fmt.Errorf("failed to open tar.gz artifact: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	gzReader, err := gzip.NewReader(file)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gzip reader: %w", err)
+	}
+	defer func() { _ = gzReader.Close() }()
+
+	return readMetadataFromTarReader(tar.NewReader(gzReader))
+}
+
+func readMetadataFromTarXZ(path string) (*ArtifactMetadata, error) {
+	file, err := os.Open(path) //nolint:gosec // path is provided by user
+	if err != nil {
+		return nil, fmt.Errorf("failed to open tar.xz artifact: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	xzReader, err := xz.NewReader(file)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create xz reader: %w", err)
+	}
+
+	return readMetadataFromTarReader(tar.NewReader(xzReader))
+}
+
+func readMetadataFromTarReader(reader *tar.Reader) (*ArtifactMetadata, error) {
+	for {
+		header, err := reader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to read tar entry: %w", err)
+		}
+		if header.Name == MetadataFileName {
+			return decodeMetadata(reader)
+		}
+	}
+	return nil, fmt.Errorf("metadata file %s not found in artifact", MetadataFileName)
+}
+
+func decodeMetadata(reader io.Reader) (*ArtifactMetadata, error) {
+	var metadata ArtifactMetadata
+	if err := json.NewDecoder(reader).Decode(&metadata); err != nil {
+		return nil, fmt.Errorf("failed to decode metadata: %w", err)
+	}
+	return &metadata, nil
+}

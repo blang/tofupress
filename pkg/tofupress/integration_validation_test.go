@@ -4,6 +4,7 @@
 package tofupress
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -190,4 +191,38 @@ output "value" { value = var.value }
 
 	artifactSource := serveArtifact(t, artifact) + "//modules/app"
 	validateArchiveWithAllTools(t, artifactSource)
+}
+
+func TestIntegrationDeduplicatedSourcetreeArchiveValidates(t *testing.T) {
+	// Create two git repos with identical module content but different extraneous files
+	repoA := createLocalGitModuleRepo(t, "remote-a", map[string]string{
+		"main.tf":   `output "value" { value = "same" }`,
+		"README.md": "stripped a",
+	})
+	repoB := createLocalGitModuleRepo(t, "remote-b", map[string]string{
+		"main.tf":   `output "value" { value = "same" }`,
+		"README.md": "stripped b",
+	})
+
+	bin := buildTofuPressBinary(t)
+	sourceDir := t.TempDir()
+	writeIntegrationFile(t, sourceDir, "main.tf", fmt.Sprintf(`
+module "a" {
+  source = %q
+}
+
+module "b" {
+  source = %q
+}
+`, gitFileSource(repoA), gitFileSource(repoB)))
+
+	artifact := filepath.Join(t.TempDir(), "dedup.zip")
+	stdout, _ := runTofuPressBundle(t, bin, sourceDir, artifact, "--format=zip")
+	assert.Contains(t, stdout, "Deduplicated packages:")
+
+	metadata := metadataFromArtifact(t, artifact)
+	assert.GreaterOrEqual(t, metadata.Stats.DeduplicatedPackages, 1)
+	assert.NotEmpty(t, metadata.DedupGroups)
+
+	validateArchiveWithAllTools(t, serveArtifact(t, artifact))
 }

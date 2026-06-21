@@ -51,9 +51,9 @@ func HashModule(dir string) (string, error) {
 	h := sha256.New()
 	for _, filename := range tfFiles {
 		filePath := filepath.Join(dir, filename)
-		
+
 		// Read file content
-		content, err := os.ReadFile(filePath)
+		content, err := os.ReadFile(filePath) //nolint:gosec // G304: path is from our own directory walk
 		if err != nil {
 			return "", fmt.Errorf("failed to read file %s: %w", filePath, err)
 		}

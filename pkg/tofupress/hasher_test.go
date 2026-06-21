@@ -1,3 +1,4 @@
+//nolint:gosec // test files use standard permissions and safe paths
 package tofupress
 
 import (

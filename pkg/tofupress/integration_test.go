@@ -1,3 +1,4 @@
+//nolint:gosec // test files use standard permissions and safe paths
 package tofupress
 
 import (
@@ -21,7 +22,7 @@ func cloneRepo(t *testing.T, repoURL, dest string) {
 	require.NoError(t, err, "git clone failed: %s", string(output))
 }
 
-func TestIntegration_FullResolutionWithRealRepo(t *testing.T) {
+func TestIntegration_FullResolutionWithRealRepo(t *testing.T) { //nolint:gocognit // complex integration test with multiple verification steps
 	if testing.Short() {
 		t.Skip("skipping integration test in short mode")
 	}
@@ -49,7 +50,7 @@ module "remote_ec2" {
 
 	// Create local module
 	localDir := filepath.Join(tmpDir, "modules", "local")
-	require.NoError(t, os.MkdirAll(localDir, 0755))
+	require.NoError(t, os.MkdirAll(localDir, 0o755))
 	writeTerraformFile(t, localDir, "main.tf", `
 variable "test" {
   type = string
@@ -79,25 +80,27 @@ variable "test" {
 
 	// Verify all module sources were rewritten to local paths
 	for _, mod := range tree.AllModules {
-		if mod.IsRemote {
-			parentDir := mod.Parent.InstallDir
-			if parentDir == "" {
-				parentDir = tmpDir
-			}
+		if !mod.IsRemote {
+			continue
+		}
 
-			tfFiles, err := FindTerraformFiles(parentDir)
+		parentDir := mod.Parent.InstallDir
+		if parentDir == "" {
+			parentDir = tmpDir
+		}
+
+		tfFiles, err := FindTerraformFiles(parentDir)
+		require.NoError(t, err)
+
+		for _, tfFile := range tfFiles {
+			modules, err := ExtractModuleBlocks(tfFile)
 			require.NoError(t, err)
 
-			for _, tfFile := range tfFiles {
-				modules, err := ExtractModuleBlocks(tfFile)
-				require.NoError(t, err)
-
-				for _, m := range modules {
-					if m.Name == mod.Name {
-						assert.True(t, IsLocalSource(m.Source),
-							"module %s source should be rewritten to local path, got: %s",
-							mod.Key, m.Source)
-					}
+			for _, m := range modules {
+				if m.Name == mod.Name {
+					assert.True(t, IsLocalSource(m.Source),
+						"module %s source should be rewritten to local path, got: %s",
+						mod.Key, m.Source)
 				}
 			}
 		}
@@ -185,7 +188,7 @@ module "level1" {
 `)
 
 	level1Dir := filepath.Join(tmpDir, "level1")
-	require.NoError(t, os.MkdirAll(level1Dir, 0755))
+	require.NoError(t, os.MkdirAll(level1Dir, 0o755))
 	writeTerraformFile(t, level1Dir, "main.tf", `
 module "level2" {
   source = "./level2"
@@ -193,7 +196,7 @@ module "level2" {
 `)
 
 	level2Dir := filepath.Join(level1Dir, "level2")
-	require.NoError(t, os.MkdirAll(level2Dir, 0755))
+	require.NoError(t, os.MkdirAll(level2Dir, 0o755))
 	writeTerraformFile(t, level2Dir, "main.tf", `
 module "remote" {
   source = "git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git?ref=v5.0.0"
@@ -246,7 +249,7 @@ module "remote_vpc" {
 
 	// Create local module
 	localVpcDir := filepath.Join(tmpDir, "modules", "vpc")
-	require.NoError(t, os.MkdirAll(localVpcDir, 0755))
+	require.NoError(t, os.MkdirAll(localVpcDir, 0o755))
 	writeTerraformFile(t, localVpcDir, "main.tf", `
 variable "cidr" {
   type = string
@@ -296,7 +299,7 @@ module "b" {
 `)
 
 	modADir := filepath.Join(tmpDir, "modules", "a")
-	require.NoError(t, os.MkdirAll(modADir, 0755))
+	require.NoError(t, os.MkdirAll(modADir, 0o755))
 	writeTerraformFile(t, modADir, "main.tf", `
 module "c" {
   source = "./c"
@@ -304,11 +307,11 @@ module "c" {
 `)
 
 	modCDir := filepath.Join(modADir, "c")
-	require.NoError(t, os.MkdirAll(modCDir, 0755))
+	require.NoError(t, os.MkdirAll(modCDir, 0o755))
 	writeTerraformFile(t, modCDir, "main.tf", `# leaf module`)
 
 	modBDir := filepath.Join(tmpDir, "modules", "b")
-	require.NoError(t, os.MkdirAll(modBDir, 0755))
+	require.NoError(t, os.MkdirAll(modBDir, 0o755))
 	writeTerraformFile(t, modBDir, "main.tf", `# leaf module`)
 
 	// Resolve
@@ -366,7 +369,7 @@ module "remote2" {
 `)
 
 	local1Dir := filepath.Join(tmpDir, "modules", "local1")
-	require.NoError(t, os.MkdirAll(local1Dir, 0755))
+	require.NoError(t, os.MkdirAll(local1Dir, 0o755))
 	writeTerraformFile(t, local1Dir, "main.tf", `# local`)
 
 	// Resolve

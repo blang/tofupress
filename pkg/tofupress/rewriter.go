@@ -24,7 +24,7 @@ func RewriteModuleSource(filePath, moduleName, newSource string) error {
 
 	var targetBlock *hclwrite.Block
 	for _, block := range file.Body().Blocks() {
-		if block.Type() == "module" { //nolint:goconst // "module" is the HCL block type
+		if block.Type() == hclBlockTypeModule {
 			labels := block.Labels()
 			if len(labels) > 0 && labels[0] == moduleName {
 				targetBlock = block

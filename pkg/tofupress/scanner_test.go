@@ -1,3 +1,4 @@
+//nolint:gosec // test files use standard permissions and safe paths
 package tofupress
 
 import (
@@ -14,23 +15,23 @@ func TestFindTerraformFiles(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Create .tf files
-	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "main.tf"), []byte("# main"), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "variables.tf"), []byte("# vars"), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "outputs.tf"), []byte("# outputs"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "main.tf"), []byte("# main"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "variables.tf"), []byte("# vars"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "outputs.tf"), []byte("# outputs"), 0o644))
 
 	// Create non-.tf files
-	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("# readme"), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "data.json"), []byte("{}"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("# readme"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "data.json"), []byte("{}"), 0o644))
 
 	// Create hidden directory (should be skipped)
 	hiddenDir := filepath.Join(tmpDir, ".terraform")
-	require.NoError(t, os.MkdirAll(hiddenDir, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(hiddenDir, "hidden.tf"), []byte("# hidden"), 0644))
+	require.NoError(t, os.MkdirAll(hiddenDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(hiddenDir, "hidden.tf"), []byte("# hidden"), 0o644))
 
 	// Create subdirectory (should be skipped by FindTerraformFiles)
 	subDir := filepath.Join(tmpDir, "modules")
-	require.NoError(t, os.MkdirAll(subDir, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(subDir, "sub.tf"), []byte("# sub"), 0644))
+	require.NoError(t, os.MkdirAll(subDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(subDir, "sub.tf"), []byte("# sub"), 0o644))
 
 	files, err := FindTerraformFiles(tmpDir)
 	require.NoError(t, err)
@@ -87,7 +88,7 @@ resource "aws_instance" "example" {
   instance_type = "t2.micro"
 }
 `
-	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0644))
+	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0o644))
 
 	modules, err := ExtractModuleBlocks(tfFile)
 	require.NoError(t, err)
@@ -117,7 +118,7 @@ variable "name" {
   type = string
 }
 `
-	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0644))
+	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0o644))
 
 	modules, err := ExtractModuleBlocks(tfFile)
 	require.NoError(t, err)
@@ -141,7 +142,7 @@ module "remote" {
   source = "git::https://github.com/example/repo.git"
 }
 `
-	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0644))
+	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0o644))
 
 	modules, err := ExtractModuleBlocks(tfFile)
 	require.NoError(t, err)
@@ -174,7 +175,7 @@ module "s3" {
   source = "s3::https://s3-eu-west-1.amazonaws.com/bucket/terraform-modules/module.zip"
 }
 `
-	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0644))
+	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0o644))
 
 	modules, err := ExtractModuleBlocks(tfFile)
 	require.NoError(t, err)
@@ -190,7 +191,7 @@ func TestExtractModuleBlocks_EmptyFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	tfFile := filepath.Join(tmpDir, "empty.tf")
 
-	require.NoError(t, os.WriteFile(tfFile, []byte(""), 0644))
+	require.NoError(t, os.WriteFile(tfFile, []byte(""), 0o644))
 
 	modules, err := ExtractModuleBlocks(tfFile)
 	require.NoError(t, err)
@@ -206,7 +207,7 @@ module "broken" {
   source = "incomplete
 }
 `
-	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0644))
+	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0o644))
 
 	modules, err := ExtractModuleBlocks(tfFile)
 	assert.Error(t, err)
@@ -222,7 +223,7 @@ module "no_source" {
   version = "1.0.0"
 }
 `
-	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0644))
+	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0o644))
 
 	modules, err := ExtractModuleBlocks(tfFile)
 	require.NoError(t, err)
@@ -242,7 +243,7 @@ module "dynamic" {
   source = var.module_source
 }
 `
-	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0644))
+	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0o644))
 
 	modules, err := ExtractModuleBlocks(tfFile)
 	require.NoError(t, err)

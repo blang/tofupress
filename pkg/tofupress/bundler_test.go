@@ -1,3 +1,4 @@
+//nolint:gosec // test files use standard permissions and safe paths
 package tofupress
 
 import (
@@ -26,7 +27,7 @@ module "local" {
 `)
 
 	localDir := filepath.Join(tmpDir, "modules", "local")
-	require.NoError(t, os.MkdirAll(localDir, 0755))
+	require.NoError(t, os.MkdirAll(localDir, 0o755)) //nolint:gosec // G301: test needs standard directory permissions
 	writeTerraformFile(t, localDir, "main.tf", `# local module`)
 
 	// Resolve
@@ -118,7 +119,7 @@ echo "test"`)
 
 	// Make script executable
 	scriptPath := filepath.Join(tmpDir, "script.sh")
-	require.NoError(t, os.Chmod(scriptPath, 0755))
+	require.NoError(t, os.Chmod(scriptPath, 0o755)) //nolint:gosec // G302: test needs executable permissions
 
 	// Create tree manually (no modules to resolve)
 	tree := &ResolvedTree{
@@ -152,7 +153,7 @@ echo "test"`)
 
 	info, err := os.Stat(scriptFile)
 	require.NoError(t, err)
-	assert.True(t, info.Mode()&0111 != 0, "script should be executable")
+	assert.True(t, info.Mode()&0o111 != 0, "script should be executable")
 }
 
 func TestBundler_BundleEmptyModule(t *testing.T) {
@@ -277,7 +278,7 @@ module "level1" {
 `)
 
 	level1Dir := filepath.Join(tmpDir, "level1")
-	require.NoError(t, os.MkdirAll(level1Dir, 0755))
+	require.NoError(t, os.MkdirAll(level1Dir, 0o755)) //nolint:gosec // G301: test needs standard directory permissions
 	writeTerraformFile(t, level1Dir, "main.tf", `
 module "remote" {
   source = "git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git?ref=v5.0.0"
@@ -325,7 +326,7 @@ module "local" {
 `)
 
 	localDir := filepath.Join(tmpDir, "modules", "local")
-	require.NoError(t, os.MkdirAll(localDir, 0755))
+	require.NoError(t, os.MkdirAll(localDir, 0o755)) //nolint:gosec // G301: test needs standard directory permissions
 	writeTerraformFile(t, localDir, "main.tf", `# local module`)
 
 	// Resolve
@@ -366,7 +367,7 @@ module "local" {
 `)
 
 	localDir := filepath.Join(tmpDir, "modules", "local")
-	require.NoError(t, os.MkdirAll(localDir, 0755))
+	require.NoError(t, os.MkdirAll(localDir, 0o755)) //nolint:gosec // G301: test needs standard directory permissions
 	writeTerraformFile(t, localDir, "main.tf", `# local module`)
 
 	// Resolve
@@ -432,9 +433,9 @@ func TestParseBundleFormat(t *testing.T) {
 
 func TestDetectFormatFromPath(t *testing.T) {
 	tests := []struct {
-		path      string
-		expected  BundleFormat
-		detected  bool
+		path     string
+		expected BundleFormat
+		detected bool
 	}{
 		{"bundle.zip", BundleFormatZIP, true},
 		{"/path/to/bundle.ZIP", BundleFormatZIP, true},
@@ -461,13 +462,13 @@ func TestDetectFormatFromPath(t *testing.T) {
 func extractTarGz(t *testing.T, archivePath, destDir string) {
 	t.Helper()
 
-	file, err := os.Open(archivePath)
+	file, err := os.Open(archivePath) //nolint:gosec // G304: test file path is safe
 	require.NoError(t, err)
-	defer file.Close()
+	defer file.Close() //nolint:errcheck // test cleanup
 
 	gzReader, err := gzip.NewReader(file)
 	require.NoError(t, err)
-	defer gzReader.Close()
+	defer gzReader.Close() //nolint:errcheck // test cleanup
 
 	tarReader := tar.NewReader(gzReader)
 
@@ -484,11 +485,11 @@ func extractTarGz(t *testing.T, archivePath, destDir string) {
 		case tar.TypeDir:
 			require.NoError(t, os.MkdirAll(targetPath, os.FileMode(header.Mode)))
 		case tar.TypeReg:
-			require.NoError(t, os.MkdirAll(filepath.Dir(targetPath), 0755))
-			outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY, os.FileMode(header.Mode))
+			require.NoError(t, os.MkdirAll(filepath.Dir(targetPath), 0o755))                           //nolint:gosec // G301: test needs standard directory permissions
+			outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY, os.FileMode(header.Mode)) //nolint:gosec // G304: test file path is safe
 			require.NoError(t, err)
-			_, err = io.Copy(outFile, tarReader)
-			outFile.Close()
+			_, err = io.Copy(outFile, tarReader) //nolint:gosec // G110: test doesn't need size limits
+			outFile.Close()                      //nolint:errcheck // test cleanup
 			require.NoError(t, err)
 		}
 	}
@@ -498,9 +499,9 @@ func extractTarGz(t *testing.T, archivePath, destDir string) {
 func extractTarXZ(t *testing.T, archivePath, destDir string) {
 	t.Helper()
 
-	file, err := os.Open(archivePath)
+	file, err := os.Open(archivePath) //nolint:gosec // G304: test file path is safe
 	require.NoError(t, err)
-	defer file.Close()
+	defer file.Close() //nolint:errcheck // test cleanup
 
 	xzReader, err := xz.NewReader(file)
 	require.NoError(t, err)
@@ -520,11 +521,11 @@ func extractTarXZ(t *testing.T, archivePath, destDir string) {
 		case tar.TypeDir:
 			require.NoError(t, os.MkdirAll(targetPath, os.FileMode(header.Mode)))
 		case tar.TypeReg:
-			require.NoError(t, os.MkdirAll(filepath.Dir(targetPath), 0755))
-			outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY, os.FileMode(header.Mode))
+			require.NoError(t, os.MkdirAll(filepath.Dir(targetPath), 0o755))                           //nolint:gosec // G301: test needs standard directory permissions
+			outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY, os.FileMode(header.Mode)) //nolint:gosec // G304: test file path is safe
 			require.NoError(t, err)
-			_, err = io.Copy(outFile, tarReader)
-			outFile.Close()
+			_, err = io.Copy(outFile, tarReader) //nolint:gosec // G110: test doesn't need size limits
+			outFile.Close()                      //nolint:errcheck // test cleanup
 			require.NoError(t, err)
 		}
 	}
@@ -534,9 +535,9 @@ func extractTarXZ(t *testing.T, archivePath, destDir string) {
 func extractZip(t *testing.T, archivePath, destDir string) {
 	t.Helper()
 
-	zipReader, err := zip.OpenReader(archivePath)
+	zipReader, err := zip.OpenReader(archivePath) //nolint:gosec // G304: test file path is safe
 	require.NoError(t, err)
-	defer zipReader.Close()
+	defer zipReader.Close() //nolint:errcheck // test cleanup
 
 	for _, file := range zipReader.File {
 		targetPath := filepath.Join(destDir, file.Name)
@@ -546,17 +547,17 @@ func extractZip(t *testing.T, archivePath, destDir string) {
 			continue
 		}
 
-		require.NoError(t, os.MkdirAll(filepath.Dir(targetPath), 0755))
+		require.NoError(t, os.MkdirAll(filepath.Dir(targetPath), 0o755)) //nolint:gosec // G301: test needs standard directory permissions
 
-		outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY, file.Mode())
+		outFile, err := os.OpenFile(targetPath, os.O_CREATE|os.O_WRONLY, file.Mode()) //nolint:gosec // G304: test file path is safe
 		require.NoError(t, err)
 
 		inFile, err := file.Open()
 		require.NoError(t, err)
 
-		_, err = io.Copy(outFile, inFile)
-		inFile.Close()
-		outFile.Close()
+		_, err = io.Copy(outFile, inFile) //nolint:gosec // G110: test doesn't need size limits
+		inFile.Close()                    //nolint:errcheck // test cleanup
+		outFile.Close()                   //nolint:errcheck // test cleanup
 		require.NoError(t, err)
 	}
 }

@@ -1,3 +1,4 @@
+//nolint:govet // test structs prioritize readability over memory layout
 package tofupress
 
 import (

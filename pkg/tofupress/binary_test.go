@@ -88,7 +88,7 @@ module "child" {
 
 	// Write child module
 	childDir := filepath.Join(fixtureDir, "child")
-	require.NoError(t, os.MkdirAll(childDir, 0o755)) //nolint:gosec // G301: 0755 is fine for test directories
+	require.NoError(t, os.MkdirAll(childDir, 0o755)) //nolint:gosec // G301: 0o755 is fine for test directories
 	writeTerraformFile(t, childDir, "main.tf", `# child module`)
 
 	return fixtureDir
@@ -562,7 +562,7 @@ module "remote" {
   source = "git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git?ref=v5.0.0"
   name   = "test"
 }
-`), 0644)
+`), 0o644)
 	require.NoError(t, err)
 
 	// First bundle
@@ -614,7 +614,7 @@ module "consul" {
   source  = "hashicorp/consul/aws"
   version = "0.11.0"
 }
-`), 0644)
+`), 0o644)
 	require.NoError(t, err)
 
 	// Bundle the fixture

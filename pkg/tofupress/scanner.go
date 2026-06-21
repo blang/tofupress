@@ -58,6 +58,8 @@ func FindTerraformFiles(dir string) ([]string, error) {
 // ExtractModuleBlocks parses an HCL file and extracts all module blocks.
 // Returns a slice of ModuleBlock structs containing the module name and source.
 // Modules with variable sources (non-string literals) are skipped.
+//
+//nolint:gocognit // HCL parsing with multiple conditional paths is inherently complex
 func ExtractModuleBlocks(filePath string) ([]ModuleBlock, error) {
 	data, err := os.ReadFile(filePath) //nolint:gosec // G304: path is provided by caller
 	if err != nil {
@@ -72,7 +74,7 @@ func ExtractModuleBlocks(filePath string) ([]ModuleBlock, error) {
 
 	content, _, diags := file.Body.PartialContent(&hcl.BodySchema{
 		Blocks: []hcl.BlockHeaderSchema{
-			{Type: "module", LabelNames: []string{"name"}}, //nolint:goconst // "module" is the HCL block type
+			{Type: hclBlockTypeModule, LabelNames: []string{"name"}},
 		},
 	})
 	if diags.HasErrors() {

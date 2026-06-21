@@ -23,11 +23,19 @@ type ModuleSource struct {
 	PackageAddr       string
 	SubDir            string
 	Ref               string
-	Type              SourceType
 	RegistryNamespace string // For registry modules: namespace
 	RegistryName      string // For registry modules: module name
 	RegistryProvider  string // For registry modules: provider
+	Type              SourceType
 }
+
+// String constants for display and comparison
+const (
+	SourceDisplayLocal    = "local"
+	SourceDisplayRegistry = "registry"
+	SourceDisplayRoot     = "root"
+	hclBlockTypeModule    = "module"
+)
 
 // ModuleNode represents a single module instance in the resolved tree.
 // The same package can appear multiple times in the tree with different keys.
@@ -84,13 +92,13 @@ func (n *ModuleNode) FindByKey(key string) *ModuleNode {
 func (s SourceType) String() string {
 	switch s {
 	case SourceLocal:
-		return "local" //nolint:goconst // source type display name
+		return SourceDisplayLocal
 	case SourceGit:
 		return "git"
 	case SourceHTTP:
 		return "http"
 	case SourceRegistry:
-		return "registry" //nolint:goconst // source type display name
+		return SourceDisplayRegistry
 	case SourceS3:
 		return "s3"
 	case SourceGCS:
@@ -291,7 +299,7 @@ func (t *ResolvedTree) printNode(node *ModuleNode, prefix string, lines *[]strin
 	// Format: [key] name (source_type) -> install_dir
 	line := prefix
 	if node.IsRoot() {
-		line += "root" //nolint:goconst // display label for root node
+		line += SourceDisplayRoot
 	} else {
 		line += node.Key + " " + node.Name
 	}

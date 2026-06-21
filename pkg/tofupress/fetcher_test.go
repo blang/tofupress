@@ -1,3 +1,4 @@
+//nolint:gosec // test files use standard permissions and safe paths
 package tofupress
 
 import (
@@ -22,16 +23,16 @@ func TestFetcher_FetchHTTPArchive(t *testing.T) {
 
 		// Create a tar.gz archive on the fly
 		gw := gzip.NewWriter(w)
-		defer gw.Close()
+		defer gw.Close() //nolint:errcheck // test cleanup
 
 		tw := tar.NewWriter(gw)
-		defer tw.Close()
+		defer tw.Close() //nolint:errcheck // test cleanup
 
 		// Add a file to the archive
 		content := []byte("# Test module\n")
 		hdr := &tar.Header{
 			Name: "main.tf",
-			Mode: 0644,
+			Mode: 0o644,
 			Size: int64(len(content)),
 		}
 		if err := tw.WriteHeader(hdr); err != nil {
@@ -56,7 +57,7 @@ func TestFetcher_FetchHTTPArchive(t *testing.T) {
 	assert.FileExists(t, mainTF)
 
 	// Verify content
-	data, err := os.ReadFile(mainTF)
+	data, err := os.ReadFile(mainTF) //nolint:gosec // G304: test file path is safe
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "Test module")
 }
@@ -83,8 +84,8 @@ func TestFetcher_FetchGitRepo(t *testing.T) {
 func TestFetcher_FetchLocalPath(t *testing.T) {
 	// Create a source directory with files
 	srcDir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "main.tf"), []byte("# local"), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "variables.tf"), []byte("# vars"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "main.tf"), []byte("# local"), 0o644))     //nolint:gosec // G306: test needs standard file permissions
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "variables.tf"), []byte("# vars"), 0o644)) //nolint:gosec // G306: test needs standard file permissions
 
 	// Create destination directory - use a subdirectory to avoid "exists" error
 	parentDir := t.TempDir()
@@ -105,15 +106,15 @@ func TestFetcher_FetchWithSubdir(t *testing.T) {
 		w.Header().Set("Content-Type", "application/gzip")
 
 		gw := gzip.NewWriter(w)
-		defer gw.Close()
+		defer gw.Close() //nolint:errcheck // test cleanup
 
 		tw := tar.NewWriter(gw)
-		defer tw.Close()
+		defer tw.Close() //nolint:errcheck // test cleanup
 
 		// Add a directory
 		dirHdr := &tar.Header{
 			Name:     "modules/vpc/",
-			Mode:     0755,
+			Mode:     0o755,
 			Typeflag: tar.TypeDir,
 		}
 		if err := tw.WriteHeader(dirHdr); err != nil {
@@ -124,7 +125,7 @@ func TestFetcher_FetchWithSubdir(t *testing.T) {
 		content := []byte("# VPC module\n")
 		fileHdr := &tar.Header{
 			Name: "modules/vpc/main.tf",
-			Mode: 0644,
+			Mode: 0o644,
 			Size: int64(len(content)),
 		}
 		if err := tw.WriteHeader(fileHdr); err != nil {
@@ -148,7 +149,7 @@ func TestFetcher_FetchWithSubdir(t *testing.T) {
 	mainTF := filepath.Join(tmpDir, "main.tf")
 	assert.FileExists(t, mainTF)
 
-	data, err := os.ReadFile(mainTF)
+	data, err := os.ReadFile(mainTF) //nolint:gosec // G304: test file path is safe
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "VPC module")
 }
@@ -177,10 +178,7 @@ func TestFetcher_FetchNonExistentHTTP(t *testing.T) {
 func TestFetcher_FetchContextCanceled(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Simulate slow response
-		select {
-		case <-r.Context().Done():
-			return
-		}
+		<-r.Context().Done()
 	}))
 	defer server.Close()
 
@@ -200,17 +198,17 @@ func TestFetcher_FetchPreservesDirectoryStructure(t *testing.T) {
 		w.Header().Set("Content-Type", "application/gzip")
 
 		gw := gzip.NewWriter(w)
-		defer gw.Close()
+		defer gw.Close() //nolint:errcheck // test cleanup
 
 		tw := tar.NewWriter(gw)
-		defer tw.Close()
+		defer tw.Close() //nolint:errcheck // test cleanup
 
 		// Add nested directories
 		dirs := []string{"level1/", "level1/level2/", "level1/level2/level3/"}
 		for _, dir := range dirs {
 			hdr := &tar.Header{
 				Name:     dir,
-				Mode:     0755,
+				Mode:     0o755,
 				Typeflag: tar.TypeDir,
 			}
 			if err := tw.WriteHeader(hdr); err != nil {
@@ -222,7 +220,7 @@ func TestFetcher_FetchPreservesDirectoryStructure(t *testing.T) {
 		content := []byte("# deep\n")
 		hdr := &tar.Header{
 			Name: "level1/level2/level3/deep.tf",
-			Mode: 0644,
+			Mode: 0o644,
 			Size: int64(len(content)),
 		}
 		if err := tw.WriteHeader(hdr); err != nil {
@@ -252,10 +250,10 @@ func TestFetcher_FetchEmptyArchive(t *testing.T) {
 		w.Header().Set("Content-Type", "application/gzip")
 
 		gw := gzip.NewWriter(w)
-		defer gw.Close()
+		defer gw.Close() //nolint:errcheck // test cleanup
 
 		tw := tar.NewWriter(gw)
-		defer tw.Close()
+		defer tw.Close() //nolint:errcheck // test cleanup
 	}))
 	defer server.Close()
 
@@ -283,15 +281,15 @@ func TestFetcher_FetchWithQueryParams(t *testing.T) {
 		w.Header().Set("Content-Type", "application/gzip")
 
 		gw := gzip.NewWriter(w)
-		defer gw.Close()
+		defer gw.Close() //nolint:errcheck // test cleanup
 		tw := tar.NewWriter(gw)
-		defer tw.Close()
+		defer tw.Close() //nolint:errcheck // test cleanup
 
 		// Add at least one file to make it a valid archive
 		content := []byte("# test\n")
 		hdr := &tar.Header{
 			Name: "main.tf",
-			Mode: 0644,
+			Mode: 0o644,
 			Size: int64(len(content)),
 		}
 		if err := tw.WriteHeader(hdr); err != nil {

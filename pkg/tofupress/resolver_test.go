@@ -1,3 +1,4 @@
+//nolint:gosec // test files use standard permissions and safe paths
 package tofupress
 
 import (
@@ -40,7 +41,7 @@ func TestGenerateUniqueID_Unique(t *testing.T) {
 // writeTerraformFile is a test helper that writes content to a .tf file.
 func writeTerraformFile(t *testing.T, dir, filename, content string) {
 	t.Helper()
-	err := os.WriteFile(filepath.Join(dir, filename), []byte(content), 0644)
+	err := os.WriteFile(filepath.Join(dir, filename), []byte(content), 0o644)
 	require.NoError(t, err)
 }
 
@@ -61,7 +62,7 @@ module "eks" {
 
 	// Create local modules
 	vpcDir := filepath.Join(tmpDir, "modules", "vpc")
-	require.NoError(t, os.MkdirAll(vpcDir, 0755))
+	require.NoError(t, os.MkdirAll(vpcDir, 0o755))
 	writeTerraformFile(t, vpcDir, "main.tf", `
 variable "cidr" {
   type = string
@@ -69,7 +70,7 @@ variable "cidr" {
 `)
 
 	eksDir := filepath.Join(tmpDir, "modules", "eks")
-	require.NoError(t, os.MkdirAll(eksDir, 0755))
+	require.NoError(t, os.MkdirAll(eksDir, 0o755))
 	writeTerraformFile(t, eksDir, "main.tf", `
 variable "cluster_name" {
   type = string
@@ -200,7 +201,7 @@ module "infra" {
 
 	// Create infra module that references a remote module
 	infraDir := filepath.Join(tmpDir, "modules", "infra")
-	require.NoError(t, os.MkdirAll(infraDir, 0755))
+	require.NoError(t, os.MkdirAll(infraDir, 0o755))
 	writeTerraformFile(t, infraDir, "main.tf", `
 module "vpc" {
   source = "git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git?ref=v5.0.0"
@@ -263,11 +264,11 @@ module "eks" {
 
 	// Create local modules
 	vpcDir := filepath.Join(tmpDir, "modules", "vpc")
-	require.NoError(t, os.MkdirAll(vpcDir, 0755))
+	require.NoError(t, os.MkdirAll(vpcDir, 0o755))
 	writeTerraformFile(t, vpcDir, "main.tf", `# vpc`)
 
 	eksDir := filepath.Join(tmpDir, "modules", "eks")
-	require.NoError(t, os.MkdirAll(eksDir, 0755))
+	require.NoError(t, os.MkdirAll(eksDir, 0o755))
 	writeTerraformFile(t, eksDir, "main.tf", `# eks`)
 
 	// Resolve

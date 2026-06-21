@@ -13,21 +13,21 @@ func TestCopyDirPreservesPermissions(t *testing.T) {
 
 	// Create a file with 0755 permissions (executable)
 	execFile := filepath.Join(srcDir, "script.sh")
-	err := os.WriteFile(execFile, []byte("#!/bin/bash\necho hello"), 0755)
+	err := os.WriteFile(execFile, []byte("#!/bin/bash\necho hello"), 0o755) //nolint:gosec // G306: test needs executable permissions
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Create a file with 0644 permissions (regular file)
 	regFile := filepath.Join(srcDir, "data.txt")
-	err = os.WriteFile(regFile, []byte("some data"), 0644)
+	err = os.WriteFile(regFile, []byte("some data"), 0o644) //nolint:gosec // G306: test needs standard file permissions
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Create a subdirectory with specific permissions
 	subDir := filepath.Join(srcDir, "subdir")
-	err = os.Mkdir(subDir, 0700)
+	err = os.Mkdir(subDir, 0o700)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,8 +46,8 @@ func TestCopyDirPreservesPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if execInfo.Mode().Perm() != 0755 {
-		t.Errorf("executable file permissions: got %o, want %o", execInfo.Mode().Perm(), 0755)
+	if execInfo.Mode().Perm() != 0o755 {
+		t.Errorf("executable file permissions: got %o, want %o", execInfo.Mode().Perm(), 0o755)
 	}
 
 	// Verify regular file permissions
@@ -55,8 +55,8 @@ func TestCopyDirPreservesPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if regInfo.Mode().Perm() != 0644 {
-		t.Errorf("regular file permissions: got %o, want %o", regInfo.Mode().Perm(), 0644)
+	if regInfo.Mode().Perm() != 0o644 {
+		t.Errorf("regular file permissions: got %o, want %o", regInfo.Mode().Perm(), 0o644)
 	}
 
 	// Verify subdirectory permissions
@@ -64,8 +64,8 @@ func TestCopyDirPreservesPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if subInfo.Mode().Perm() != 0700 {
-		t.Errorf("subdirectory permissions: got %o, want %o", subInfo.Mode().Perm(), 0700)
+	if subInfo.Mode().Perm() != 0o700 {
+		t.Errorf("subdirectory permissions: got %o, want %o", subInfo.Mode().Perm(), 0o700)
 	}
 }
 
@@ -75,7 +75,7 @@ func TestCopyDirHandlesSymlinks(t *testing.T) {
 
 	// Create a regular file
 	targetFile := filepath.Join(srcDir, "target.txt")
-	err := os.WriteFile(targetFile, []byte("target content"), 0644)
+	err := os.WriteFile(targetFile, []byte("target content"), 0o644) //nolint:gosec // G306: test needs standard file permissions
 	if err != nil {
 		t.Fatal(err)
 	}

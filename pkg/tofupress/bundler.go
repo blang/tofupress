@@ -302,7 +302,7 @@ func (b *Bundler) bundleZIP(tree *ResolvedTree, outputPath string) error {
 
 // addDirectoryToTar recursively adds a directory to a tar archive.
 //
-//nolint:gocognit // complex but straightforward file walking logic
+//nolint:gocyclo,gocognit // tar/zip walking with many conditionals is inherently complex
 func (b *Bundler) addDirectoryToTar(tw *tar.Writer, srcDir, prefix string, packages map[string]*DownloadedPackage) error {
 	return filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -363,7 +363,7 @@ func (b *Bundler) addDirectoryToTar(tw *tar.Writer, srcDir, prefix string, packa
 
 // addDirectoryToZip recursively adds a directory to a ZIP archive.
 //
-//nolint:gocognit // complex but straightforward file walking logic
+//nolint:gocyclo,gocognit // zip walking with many conditionals is inherently complex
 func (b *Bundler) addDirectoryToZip(zw *zip.Writer, srcDir, prefix string, packages map[string]*DownloadedPackage) error {
 	err := filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {

@@ -96,9 +96,9 @@ func outputJSON(stdout io.Writer, tree *tofupress.ResolvedTree) error {
 	}
 
 	output := map[string]any{
-		"root":     tree.Root.Key, //nolint:goconst // JSON key
-		"modules":  modules,
-		"packages": packages,
+		tofupress.SourceDisplayRoot: tree.Root.Key,
+		"modules":                   modules,
+		"packages":                  packages,
 	}
 	encoder := json.NewEncoder(stdout)
 	encoder.SetIndent("", "  ")
@@ -129,7 +129,7 @@ func printModuleTree(w io.Writer, node *tofupress.ModuleNode, depth int) {
 	}
 
 	// Print module name and source
-	moduleType := "local" //nolint:goconst // short descriptive string, not a shared constant
+	moduleType := tofupress.SourceDisplayLocal
 	if node.IsRemote {
 		moduleType = "remote"
 	}

@@ -1,3 +1,4 @@
+//nolint:gosec // test files use standard permissions and safe paths
 package tofupress
 
 import (
@@ -24,7 +25,7 @@ module "eks" {
   cluster_name = "my-cluster"
 }
 `
-	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0644))
+	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0o644))
 
 	// Rewrite vpc module source
 	err := RewriteModuleSource(tfFile, "vpc", "./vendor/vpc")
@@ -58,7 +59,7 @@ module "vpc" {
   cidr = "10.0.0.0/16"
 }
 `
-	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0644))
+	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0o644))
 
 	err := RewriteModuleSource(tfFile, "vpc", "./vendor/vpc")
 	require.NoError(t, err)
@@ -91,7 +92,7 @@ module "vpc" {
   source = "terraform-aws-modules/vpc/aws"
 }
 `
-	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0644))
+	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0o644))
 
 	err := RewriteModuleSource(tfFile, "nonexistent", "./vendor/something")
 	assert.Error(t, err)
@@ -107,7 +108,7 @@ resource "aws_instance" "example" {
   ami = "ami-12345678"
 }
 `
-	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0644))
+	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0o644))
 
 	err := RewriteModuleSource(tfFile, "vpc", "./vendor/vpc")
 	assert.Error(t, err)
@@ -118,7 +119,7 @@ func TestRewriteModuleSource_EmptyFile(t *testing.T) {
 	tmpDir := t.TempDir()
 	tfFile := filepath.Join(tmpDir, "empty.tf")
 
-	require.NoError(t, os.WriteFile(tfFile, []byte(""), 0644))
+	require.NoError(t, os.WriteFile(tfFile, []byte(""), 0o644))
 
 	err := RewriteModuleSource(tfFile, "vpc", "./vendor/vpc")
 	assert.Error(t, err)
@@ -141,7 +142,7 @@ module "rds" {
   source = "terraform-aws-modules/rds/aws"
 }
 `
-	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0644))
+	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0o644))
 
 	// Rewrite all three modules
 	require.NoError(t, RewriteModuleSource(tfFile, "vpc", "./vendor/vpc"))
@@ -167,7 +168,7 @@ module "local" {
   source = "./modules/local"
 }
 `
-	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0644))
+	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0o644))
 
 	// Rewrite local to remote path
 	err := RewriteModuleSource(tfFile, "local", "./sourcetree/abc123/modules/local")
@@ -189,7 +190,7 @@ module "nested" {
   source = "git::https://github.com/user/repo.git//modules/nested?ref=v1.0.0"
 }
 `
-	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0644))
+	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0o644))
 
 	err := RewriteModuleSource(tfFile, "nested", "./sourcetree/def456/modules/nested")
 	require.NoError(t, err)
@@ -210,7 +211,7 @@ module "broken" {
   source = "incomplete
 }
 `
-	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0644))
+	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0o644))
 
 	err := RewriteModuleSource(tfFile, "broken", "./vendor/broken")
 	assert.Error(t, err)
@@ -244,7 +245,7 @@ output "vpc_id" {
   value = module.vpc.vpc_id
 }
 `
-	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0644))
+	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0o644))
 
 	err := RewriteModuleSource(tfFile, "vpc", "./vendor/vpc")
 	require.NoError(t, err)

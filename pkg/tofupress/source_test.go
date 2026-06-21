@@ -1,3 +1,4 @@
+//nolint:govet,gosec // test structs prioritize readability over memory layout; test paths are not credentials
 package tofupress
 
 import (
@@ -35,7 +36,7 @@ func TestClassifySource_Local(t *testing.T) {
 		{
 			name: "deep relative path",
 			raw:  "../../common/modules/vpc",
-			pwd:  "/root/a/b/c",
+			pwd:  "/root/a/b/c", //nolint:gosec // test path, not credential
 			want: ModuleSource{
 				Raw:  "../../common/modules/vpc",
 				Type: SourceLocal,

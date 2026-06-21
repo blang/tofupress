@@ -46,10 +46,10 @@ type ProgressEvent struct {
 
 // Resolver orchestrates the BFS module resolution algorithm.
 type Resolver struct {
-	fetcher     *Fetcher
-	PackageRoot string // Package boundary - local paths cannot escape this root
-	Progress    ProgressCallback
-	Concurrency int // Number of parallel downloads (default: 4)
+	Progress    ProgressCallback // 16 bytes (data ptr + type ptr)
+	fetcher     *Fetcher         // 8 bytes (ptr)
+	PackageRoot string           // 16 bytes (data ptr + length)
+	Concurrency int              // 8 bytes
 }
 
 // NewResolver creates a new Resolver with default configuration.
@@ -431,7 +431,7 @@ func queryRegistryAPI(ctx context.Context, namespace, name, provider, version st
 	}
 
 	// Create HTTP request with context for cancellation support
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, http.NoBody)
 	if err != nil {
 		return "", fmt.Errorf("failed to create registry API request: %w", err)
 	}

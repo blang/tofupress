@@ -117,8 +117,8 @@ func parseRegistrySource(raw string) ModuleSource {
 
 	// Strip query parameters before parsing namespace/name/provider
 	clean := raw
-	if idx := strings.Index(raw, "?"); idx > -1 {
-		clean = raw[:idx]
+	if before, _, found := strings.Cut(raw, "?"); found {
+		clean = before
 	}
 
 	// Parse the registry module format: namespace/name/provider

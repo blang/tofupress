@@ -1,6 +1,9 @@
+//nolint:gosec // test files use standard permissions
 package tofupress
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,4 +41,111 @@ func TestParseStripModeRejectsUnknown(t *testing.T) {
 	assert.Contains(t, err.Error(), "none")
 	assert.Contains(t, err.Error(), "module-dir")
 	assert.Contains(t, err.Error(), "config-only")
+}
+
+func TestPlanStrippingNoneIncludesPackageContent(t *testing.T) {
+	rootDir := t.TempDir()
+	writeFile(t, rootDir, "main.tf", `output "name" { value = "root" }`)
+	writeFile(t, rootDir, "README.md", `docs`)
+	writeFile(t, rootDir, "examples/example.tf", `output "example" { value = true }`)
+	writeFile(t, rootDir, ".terraform/modules/ignored/main.tf", `ignored`)
+
+	tree := testTree(rootDir)
+	plan, err := PlanStripping(tree, StripModeNone)
+	require.NoError(t, err)
+
+	assert.True(t, plan.IncludePath(filepath.Join(rootDir, "main.tf"), false))
+	assert.True(t, plan.IncludePath(filepath.Join(rootDir, "README.md"), false))
+	assert.True(t, plan.IncludePath(filepath.Join(rootDir, "examples", "example.tf"), false))
+	assert.False(t, plan.IncludePath(filepath.Join(rootDir, ".terraform", "modules", "ignored", "main.tf"), false))
+	assert.Equal(t, StripModeNone, plan.Mode)
+	assert.Zero(t, plan.StrippedBytes)
+}
+
+func TestPlanStrippingModuleDirIncludesOnlyResolvedModuleDirsAndStaticReads(t *testing.T) {
+	packageRoot := t.TempDir()
+	writeFile(t, packageRoot, "modules/app/main.tf", `locals { rendered = templatefile("../../shared/templates/app.tftpl", {}) }`)
+	writeFile(t, packageRoot, "modules/app/variables.tf", `variable "name" { type = string }`)
+	writeFile(t, packageRoot, "modules/worker/main.tf", `output "worker" { value = true }`)
+	writeFile(t, packageRoot, "shared/templates/app.tftpl", `hello`)
+	writeFile(t, packageRoot, "README.md", `strip me`)
+	writeFile(t, packageRoot, "examples/example.tf", `strip me`)
+
+	root := &ModuleNode{Key: "", Name: "root", InstallDir: filepath.Join(packageRoot, "modules", "app"), PackageRoot: packageRoot, IsLocal: true}
+	worker := &ModuleNode{Parent: root, Key: "worker", Name: "worker", InstallDir: filepath.Join(packageRoot, "modules", "worker"), PackageRoot: packageRoot, IsLocal: true, Source: ModuleSource{Raw: "../worker", Type: SourceLocal, PackageAddr: "../worker"}}
+	root.Children = []*ModuleNode{worker}
+	tree := &ResolvedTree{Root: root, AllModules: []*ModuleNode{root, worker}, Packages: map[string]*DownloadedPackage{}}
+
+	plan, err := PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+
+	assert.True(t, plan.IncludePath(filepath.Join(packageRoot, "modules", "app", "main.tf"), false))
+	assert.True(t, plan.IncludePath(filepath.Join(packageRoot, "modules", "worker", "main.tf"), false))
+	assert.True(t, plan.IncludePath(filepath.Join(packageRoot, "shared", "templates", "app.tftpl"), false))
+	assert.False(t, plan.IncludePath(filepath.Join(packageRoot, "README.md"), false))
+	assert.False(t, plan.IncludePath(filepath.Join(packageRoot, "examples", "example.tf"), false))
+	assert.Greater(t, plan.StrippedFiles, 0)
+	assert.Greater(t, plan.StrippedBytes, int64(0))
+}
+
+func TestPlanStrippingModuleDirFallsBackToWholePackageForDynamicRead(t *testing.T) {
+	packageRoot := t.TempDir()
+	writeFile(t, packageRoot, "modules/app/main.tf", `variable "name" { type = string }
+locals { rendered = file("../shared/${var.name}.txt") }`)
+	writeFile(t, packageRoot, "shared/a.txt", `a`)
+	writeFile(t, packageRoot, "README.md", `kept by fallback`)
+
+	root := &ModuleNode{Key: "", Name: "root", InstallDir: filepath.Join(packageRoot, "modules", "app"), PackageRoot: packageRoot, IsLocal: true}
+	tree := &ResolvedTree{Root: root, AllModules: []*ModuleNode{root}, Packages: map[string]*DownloadedPackage{}}
+
+	plan, err := PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+
+	assert.True(t, plan.IncludePath(filepath.Join(packageRoot, "README.md"), false), "dynamic read should keep whole legal package scope")
+	assert.Len(t, plan.FilesystemFunctions, 1)
+	assert.Equal(t, "dynamic-package-fallback", plan.FilesystemFunctions[0].Handling)
+}
+
+func TestPlanStrippingConfigOnlyWarnsAndDoesNotFallbackForDynamicRead(t *testing.T) {
+	packageRoot := t.TempDir()
+	writeFile(t, packageRoot, "modules/app/main.tf", `variable "name" { type = string }
+locals { rendered = file("../shared/${var.name}.txt") }`)
+	writeFile(t, packageRoot, "shared/a.txt", `strip in aggressive mode`)
+
+	root := &ModuleNode{Key: "", Name: "root", InstallDir: filepath.Join(packageRoot, "modules", "app"), PackageRoot: packageRoot, IsLocal: true}
+	tree := &ResolvedTree{Root: root, AllModules: []*ModuleNode{root}, Packages: map[string]*DownloadedPackage{}}
+
+	plan, err := PlanStripping(tree, StripModeConfigOnly)
+	require.NoError(t, err)
+
+	assert.True(t, plan.IncludePath(filepath.Join(packageRoot, "modules", "app", "main.tf"), false))
+	assert.False(t, plan.IncludePath(filepath.Join(packageRoot, "shared", "a.txt"), false))
+	require.NotEmpty(t, plan.Warnings)
+	assert.Contains(t, plan.Warnings[0].Message, "filesystem reads were detected")
+}
+
+func TestPlanStrippingModuleDirKeepsFilesetMatches(t *testing.T) {
+	rootDir := t.TempDir()
+	writeFile(t, rootDir, "main.tf", `locals { policies = fileset("policies", "*.json") }`)
+	writeFile(t, rootDir, "policies/keep.json", `{}`)
+	writeFile(t, rootDir, "policies/drop.txt", `drop`)
+
+	tree := testTree(rootDir)
+	plan, err := PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+
+	assert.True(t, plan.IncludePath(filepath.Join(rootDir, "policies", "keep.json"), false))
+	assert.False(t, plan.IncludePath(filepath.Join(rootDir, "policies", "drop.txt"), false))
+}
+
+func writeFile(t *testing.T, root, rel, content string) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+}
+
+func testTree(rootDir string) *ResolvedTree {
+	root := &ModuleNode{Key: "", Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}
+	return &ResolvedTree{Root: root, AllModules: []*ModuleNode{root}, Packages: map[string]*DownloadedPackage{}}
 }

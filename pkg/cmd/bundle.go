@@ -120,7 +120,7 @@ func runBundle(cmd *cobra.Command, args []string) error {
 
 	// Print strip warnings
 	for _, warning := range stripPlan.Warnings {
-		fmt.Fprintf(os.Stderr, "Warning: %s\n", warning.Message)
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", warning.Message) //nolint:errcheck // stderr writes are best-effort
 	}
 
 	metadata, err := tofupress.BuildArtifactMetadata(tree, &tofupress.MetadataRequest{

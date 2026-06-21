@@ -54,9 +54,15 @@ type ModuleNode struct {
 
 // DownloadedPackage tracks a unique remote package that was downloaded.
 type DownloadedPackage struct {
-	PackageAddr string // Normalized package address (dedup key)
-	LocalDir    string // Where it was downloaded to
-	ContentHash string // SHA-256 hash of module content for deduplication
+	PackageAddr          string   // Normalized package address from the first/canonical source
+	LocalDir             string   // Final canonical sourcetree directory after identity planning
+	ContentHash          string   // SHA-256 hash observed immediately after download/fetch/copy
+	SourcetreeID         string   // Stable content-addressed sourcetree directory ID
+	FinalHash            string   // SHA-256 hash of final archive-visible package content
+	CanonicalPackageAddr string   // Source address chosen as canonical representative for this package
+	PackageAddrs         []string // All source addresses represented by this final package
+	ModuleKeys           []string // All module keys using this final package
+	Deduplicated         bool     // True when more than one source/module maps to this package
 }
 
 // ResolvedTree is the complete resolved module dependency tree.

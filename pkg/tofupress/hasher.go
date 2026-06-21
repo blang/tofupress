@@ -1,8 +1,6 @@
 package tofupress
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"os"
@@ -89,22 +87,7 @@ func SnapshotDirectory(dir string) (DirectorySnapshot, error) {
 		return entries[i].relPath < entries[j].relPath
 	})
 
-	h := sha256.New()
-	for _, entry := range entries {
-		pathRecord := fmt.Sprintf("path:%d:%s", len(entry.relPath), entry.relPath)
-		modeRecord := fmt.Sprintf("mode:%04o", entry.mode)
-		contentRecord := fmt.Sprintf("content:%d:", len(entry.content))
-		h.Write([]byte(pathRecord))
-		h.Write([]byte(modeRecord))
-		h.Write([]byte(contentRecord))
-		h.Write(entry.content)
-	}
-
-	return DirectorySnapshot{
-		Hash:       hex.EncodeToString(h.Sum(nil)),
-		FileCount:  len(entries),
-		TotalBytes: totalBytes,
-	}, nil
+	return hashEntries(entries, totalBytes), nil
 }
 
 // HashModule computes a deterministic SHA-256 hash for all artifact-relevant files in dir.

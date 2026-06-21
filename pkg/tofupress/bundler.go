@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -65,9 +66,12 @@ func DetectFormatFromPath(path string) (BundleFormat, bool) {
 }
 
 // Bundler creates archives from resolved module trees.
+//
+//nolint:govet // field alignment is not critical for this type
 type Bundler struct {
 	Format       BundleFormat
-	OCICompliant bool // When true, creates OCI-compliant bundle without sourcetree/ metadata
+	OCICompliant bool              // When true, creates OCI-compliant bundle without sourcetree/ metadata
+	Metadata     *ArtifactMetadata // Optional metadata to embed in the archive
 }
 
 // NewBundler creates a new Bundler with the specified format.
@@ -173,6 +177,10 @@ func (b *Bundler) bundleTarGZ(tree *ResolvedTree, outputPath string) error {
 		}
 	}
 
+	if err := b.addMetadataToTar(tarWriter); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -249,6 +257,10 @@ func (b *Bundler) bundleTarXZ(tree *ResolvedTree, outputPath string) error {
 		}
 	}
 
+	if err := b.addMetadataToTar(tarWriter); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -313,6 +325,10 @@ func (b *Bundler) bundleZIP(tree *ResolvedTree, outputPath string) error {
 		if err := b.addDirectoryToZip(zipWriter, pkg.LocalDir, prefix, tree.Packages); err != nil {
 			return fmt.Errorf("failed to add package %s: %w", pkg.PackageAddr, err)
 		}
+	}
+
+	if err := b.addMetadataToZip(zipWriter); err != nil {
+		return err
 	}
 
 	return nil
@@ -509,6 +525,12 @@ func (b *Bundler) bundleOCICompliant(tree *ResolvedTree, outputPath string) erro
 	// Rewrite all module sources to point to the new structure
 	if rewriteErr := rewriteOCISources(tree, stagingDir); rewriteErr != nil {
 		return fmt.Errorf("failed to rewrite sources: %w", rewriteErr)
+	}
+
+	if b.Metadata != nil {
+		if err := WriteMetadataFile(filepath.Join(stagingDir, MetadataFileName), b.Metadata); err != nil {
+			return fmt.Errorf("failed to stage metadata: %w", err)
+		}
 	}
 
 	// Create ZIP archive from staging directory
@@ -813,5 +835,50 @@ func (b *Bundler) aggregatePressedModules(tree *ResolvedTree) error {
 		}
 	}
 
+	return nil
+}
+
+func metadataJSON(metadata *ArtifactMetadata) ([]byte, error) {
+	if metadata == nil {
+		return nil, nil
+	}
+	data, err := json.MarshalIndent(metadata, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode metadata: %w", err)
+	}
+	return append(data, '\n'), nil
+}
+
+func (b *Bundler) addMetadataToTar(tw *tar.Writer) error {
+	data, err := metadataJSON(b.Metadata)
+	if err != nil || data == nil {
+		return err
+	}
+	header := &tar.Header{
+		Name: MetadataFileName,
+		Mode: 0o644,
+		Size: int64(len(data)),
+	}
+	if err := tw.WriteHeader(header); err != nil {
+		return fmt.Errorf("failed to write metadata tar header: %w", err)
+	}
+	if _, err := tw.Write(data); err != nil {
+		return fmt.Errorf("failed to write metadata tar content: %w", err)
+	}
+	return nil
+}
+
+func (b *Bundler) addMetadataToZip(zw *zip.Writer) error {
+	data, err := metadataJSON(b.Metadata)
+	if err != nil || data == nil {
+		return err
+	}
+	writer, err := zw.Create(MetadataFileName)
+	if err != nil {
+		return fmt.Errorf("failed to create metadata zip entry: %w", err)
+	}
+	if _, err := writer.Write(data); err != nil {
+		return fmt.Errorf("failed to write metadata zip content: %w", err)
+	}
 	return nil
 }

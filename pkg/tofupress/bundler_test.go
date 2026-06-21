@@ -431,6 +431,65 @@ func TestParseBundleFormat(t *testing.T) {
 	}
 }
 
+func TestBundler_EmbedsMetadataInZip(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeTerraformFile(t, tmpDir, "main.tf", `output "name" { value = "root" }`)
+	root := &ModuleNode{Name: "root", InstallDir: tmpDir, IsLocal: true}
+	tree := &ResolvedTree{
+		Root:       root,
+		AllModules: []*ModuleNode{root},
+		Packages:   make(map[string]*DownloadedPackage),
+	}
+	metadata := &ArtifactMetadata{SchemaVersion: MetadataSchemaVersion, CreatedAt: "2026-06-21T12:00:00Z"}
+
+	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
+	bundler := NewBundler(BundleFormatZIP)
+	bundler.Metadata = metadata
+	require.NoError(t, bundler.Bundle(tree, archivePath))
+
+	zipReader, err := zip.OpenReader(archivePath)
+	require.NoError(t, err)
+	defer func() { _ = zipReader.Close() }()
+
+	var found bool
+	for _, file := range zipReader.File {
+		if file.Name != MetadataFileName {
+			continue
+		}
+		found = true
+		reader, err := file.Open()
+		require.NoError(t, err)
+		data, err := io.ReadAll(reader)
+		require.NoError(t, err)
+		require.NoError(t, reader.Close())
+		assert.Contains(t, string(data), `"schema_version": "1"`)
+	}
+	assert.True(t, found, "zip bundle should contain meta.json at artifact root")
+}
+
+func TestBundler_EmbedsMetadataInTarGz(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeTerraformFile(t, tmpDir, "main.tf", `output "name" { value = "root" }`)
+	root := &ModuleNode{Name: "root", InstallDir: tmpDir, IsLocal: true}
+	tree := &ResolvedTree{
+		Root:       root,
+		AllModules: []*ModuleNode{root},
+		Packages:   make(map[string]*DownloadedPackage),
+	}
+	metadata := &ArtifactMetadata{SchemaVersion: MetadataSchemaVersion, CreatedAt: "2026-06-21T12:00:00Z"}
+
+	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
+	bundler := NewBundler(BundleFormatTarGZ)
+	bundler.Metadata = metadata
+	require.NoError(t, bundler.Bundle(tree, archivePath))
+
+	extractDir := t.TempDir()
+	extractTarGz(t, archivePath, extractDir)
+	data, err := os.ReadFile(filepath.Join(extractDir, MetadataFileName))
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"schema_version": "1"`)
+}
+
 func TestDetectFormatFromPath(t *testing.T) {
 	tests := []struct {
 		path     string

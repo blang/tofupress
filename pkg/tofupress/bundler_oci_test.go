@@ -135,6 +135,36 @@ func TestBundler_BundleOCICompliantOnlyZIP(t *testing.T) {
 	_ = err
 }
 
+func TestBundler_OCICompliantEmbedsMetadataAtRoot(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeTerraformFile(t, tmpDir, "main.tf", `output "name" { value = "root" }`)
+	root := &ModuleNode{Name: "root", InstallDir: tmpDir, IsLocal: true}
+	tree := &ResolvedTree{
+		Root:       root,
+		AllModules: []*ModuleNode{root},
+		Packages:   make(map[string]*DownloadedPackage),
+	}
+
+	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
+	bundler := NewBundler(BundleFormatZIP)
+	bundler.OCICompliant = true
+	bundler.Metadata = &ArtifactMetadata{SchemaVersion: MetadataSchemaVersion, CreatedAt: "2026-06-21T12:00:00Z"}
+	require.NoError(t, bundler.Bundle(tree, archivePath))
+
+	zipReader, err := zip.OpenReader(archivePath)
+	require.NoError(t, err)
+	defer zipReader.Close()
+
+	var hasMetadata bool
+	for _, file := range zipReader.File {
+		assert.NotContains(t, file.Name, "sourcetree/", "OCI-compliant bundle must not contain sourcetree layout")
+		if file.Name == MetadataFileName {
+			hasMetadata = true
+		}
+	}
+	assert.True(t, hasMetadata, "OCI-compliant bundle should still contain top-level meta.json")
+}
+
 // extractZipOCI is a test helper that extracts a ZIP archive.
 func extractZipOCI(t *testing.T, archivePath, destDir string) {
 	t.Helper()

@@ -150,15 +150,15 @@ func validateZipContents(t *testing.T, path string, expectedFiles []string) (map
 			}
 		}
 		if !found {
-			return contents, fmt.Errorf("expected file %q not found in archive. Files present: %v", expected, zipFileNames(f.File))
+			return contents, fmt.Errorf("expected file %q not found in archive. Files present: %v", expected, zipEntryNames(f.File))
 		}
 	}
 
 	return contents, nil
 }
 
-// zipFileNames returns a slice of file names from zip entries.
-func zipFileNames(files []*zip.File) []string {
+// zipEntryNames returns a slice of file names from zip entries.
+func zipEntryNames(files []*zip.File) []string {
 	names := make([]string, len(files))
 	for i, f := range files {
 		names[i] = f.Name

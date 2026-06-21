@@ -4,6 +4,7 @@ go = "1.26.4"
 golangci-lint = "2.11.4"
 prek = "0.3.8"
 yamllint = "1.38.0"
+terraform = "1.12.2"
 opentofu = "1.12.3"
 
 [hooks]

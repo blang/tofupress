@@ -119,7 +119,7 @@ resource "null_resource" "test2" {}
 	assert.NotEqual(t, hash1, hash2, "Different content should produce different hashes")
 }
 
-func TestHashModule_IgnoresNonTerraformFiles(t *testing.T) {
+func TestHashModule_IncludesNonTerraformFiles(t *testing.T) {
 	tmpDir1 := t.TempDir()
 	tfFile1 := filepath.Join(tmpDir1, "main.tf")
 	err := os.WriteFile(tfFile1, []byte(`
@@ -149,7 +149,68 @@ resource "null_resource" "test" {}
 	hash2, err := HashModule(tmpDir2)
 	require.NoError(t, err)
 
-	assert.Equal(t, hash1, hash2, "Non-.tf files should not affect the hash")
+	assert.NotEqual(t, hash1, hash2, "Non-.tf files should affect the hash (whole-directory hashing)")
+}
+
+func TestSnapshotDirectoryIncludesNonTerraformFilesAndSubdirectories(t *testing.T) {
+	baseDir := t.TempDir()
+	withExtraDir := t.TempDir()
+
+	require.NoError(t, os.WriteFile(filepath.Join(baseDir, "main.tf"), []byte("resource \"null_resource\" \"test\" {}"), 0o644))
+
+	require.NoError(t, os.WriteFile(filepath.Join(withExtraDir, "main.tf"), []byte("resource \"null_resource\" \"test\" {}"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(withExtraDir, "README.md"), []byte("# module docs"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(withExtraDir, "templates"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(withExtraDir, "templates", "userdata.tftpl"), []byte("hello ${name}"), 0o644))
+
+	baseSnapshot, err := SnapshotDirectory(baseDir)
+	require.NoError(t, err)
+	extraSnapshot, err := SnapshotDirectory(withExtraDir)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, baseSnapshot.Hash, extraSnapshot.Hash)
+	assert.Equal(t, 1, baseSnapshot.FileCount)
+	assert.Equal(t, 3, extraSnapshot.FileCount)
+	assert.Greater(t, extraSnapshot.TotalBytes, baseSnapshot.TotalBytes)
+}
+
+func TestSnapshotDirectoryIgnoresGeneratedAndVCSDirectories(t *testing.T) {
+	baseDir := t.TempDir()
+	withGeneratedDir := t.TempDir()
+
+	for _, dir := range []string{baseDir, withGeneratedDir} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "main.tf"), []byte("output \"name\" { value = \"same\" }"), 0o644))
+	}
+
+	require.NoError(t, os.MkdirAll(filepath.Join(withGeneratedDir, ".terraform", "modules"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(withGeneratedDir, ".terraform", "modules", "ignored.tf"), []byte("ignored"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(withGeneratedDir, ".git", "objects"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(withGeneratedDir, ".git", "objects", "ignored"), []byte("ignored"), 0o644))
+
+	baseSnapshot, err := SnapshotDirectory(baseDir)
+	require.NoError(t, err)
+	generatedSnapshot, err := SnapshotDirectory(withGeneratedDir)
+	require.NoError(t, err)
+
+	assert.Equal(t, baseSnapshot.Hash, generatedSnapshot.Hash)
+	assert.Equal(t, baseSnapshot.FileCount, generatedSnapshot.FileCount)
+	assert.Equal(t, baseSnapshot.TotalBytes, generatedSnapshot.TotalBytes)
+}
+
+func TestSnapshotDirectoryIncludesExecutableBit(t *testing.T) {
+	plainDir := t.TempDir()
+	execDir := t.TempDir()
+
+	content := []byte("#!/usr/bin/env sh\necho hello\n")
+	require.NoError(t, os.WriteFile(filepath.Join(plainDir, "script.sh"), content, 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(execDir, "script.sh"), content, 0o755))
+
+	plainSnapshot, err := SnapshotDirectory(plainDir)
+	require.NoError(t, err)
+	execSnapshot, err := SnapshotDirectory(execDir)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, plainSnapshot.Hash, execSnapshot.Hash)
 }
 
 func TestHashModule_OrderIndependent(t *testing.T) {
@@ -175,7 +236,7 @@ func TestHashModule_OrderIndependent(t *testing.T) {
 	assert.Equal(t, hash1, hash2, "Hash should be independent of file creation order")
 }
 
-func TestHashModule_IgnoresSubdirectories(t *testing.T) {
+func TestHashModule_IncludesSubdirectories(t *testing.T) {
 	tmpDir1 := t.TempDir()
 	tfFile1 := filepath.Join(tmpDir1, "main.tf")
 	err := os.WriteFile(tfFile1, []byte(`
@@ -203,5 +264,5 @@ resource "null_resource" "test" {}
 	hash2, err := HashModule(tmpDir2)
 	require.NoError(t, err)
 
-	assert.Equal(t, hash1, hash2, "Subdirectories should not affect the hash")
+	assert.NotEqual(t, hash1, hash2, "Subdirectories should affect the hash (whole-directory hashing)")
 }

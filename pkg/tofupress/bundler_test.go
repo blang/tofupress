@@ -620,3 +620,49 @@ func extractZip(t *testing.T, archivePath, destDir string) {
 		require.NoError(t, err)
 	}
 }
+
+func TestBundlerZIPAppliesModuleDirStripPlanWithoutMutatingSource(t *testing.T) {
+	rootDir := t.TempDir()
+	writeTerraformFile(t, rootDir, "main.tf", `output "name" { value = "root" }`)
+	require.NoError(t, os.WriteFile(filepath.Join(rootDir, "README.md"), []byte("must remain on disk, stripped from archive"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(rootDir, "examples"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(rootDir, "examples", "example.tf"), []byte("strip"), 0o644))
+
+	tree := &ResolvedTree{Root: &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}, Packages: map[string]*DownloadedPackage{}}
+	tree.AllModules = []*ModuleNode{tree.Root}
+	plan, err := PlanStripping(tree, StripModeConfigOnly)
+	require.NoError(t, err)
+
+	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
+	bundler := NewBundler(BundleFormatZIP)
+	bundler.StripPlan = plan
+	require.NoError(t, bundler.Bundle(tree, archivePath))
+
+	assert.Contains(t, zipFileNames(t, archivePath), "main.tf")
+	assert.NotContains(t, zipFileNames(t, archivePath), "README.md")
+	assert.NotContains(t, zipFileNames(t, archivePath), "examples/example.tf")
+	assert.FileExists(t, filepath.Join(rootDir, "README.md"), "source tree must not be mutated")
+}
+
+func TestBundlerTarGZAppliesModuleDirStripPlan(t *testing.T) {
+	rootDir := t.TempDir()
+	writeTerraformFile(t, rootDir, "main.tf", `locals { rendered = templatefile("templates/userdata.tftpl", {}) }`)
+	require.NoError(t, os.MkdirAll(filepath.Join(rootDir, "templates"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(rootDir, "templates", "userdata.tftpl"), []byte("hello"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(rootDir, "README.md"), []byte("strip"), 0o644))
+
+	tree := &ResolvedTree{Root: &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}, Packages: map[string]*DownloadedPackage{}}
+	tree.AllModules = []*ModuleNode{tree.Root}
+	plan, err := PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+
+	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
+	bundler := NewBundler(BundleFormatTarGZ)
+	bundler.StripPlan = plan
+	require.NoError(t, bundler.Bundle(tree, archivePath))
+
+	names := tarGzFileNames(t, archivePath)
+	assert.Contains(t, names, "main.tf")
+	assert.Contains(t, names, "templates/userdata.tftpl")
+	assert.NotContains(t, names, "README.md")
+}

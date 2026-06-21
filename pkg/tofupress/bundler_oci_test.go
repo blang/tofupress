@@ -135,6 +135,27 @@ func TestBundler_BundleOCICompliantOnlyZIP(t *testing.T) {
 	_ = err
 }
 
+func TestBundlerOCICompliantAppliesStripPlan(t *testing.T) {
+	rootDir := t.TempDir()
+	writeTerraformFile(t, rootDir, "main.tf", `output "name" { value = "root" }`)
+	require.NoError(t, os.WriteFile(filepath.Join(rootDir, "README.md"), []byte("strip"), 0o644))
+
+	tree := &ResolvedTree{Root: &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}, Packages: map[string]*DownloadedPackage{}}
+	tree.AllModules = []*ModuleNode{tree.Root}
+	plan, err := PlanStripping(tree, StripModeConfigOnly)
+	require.NoError(t, err)
+
+	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
+	bundler := NewBundler(BundleFormatZIP)
+	bundler.OCICompliant = true
+	bundler.StripPlan = plan
+	require.NoError(t, bundler.Bundle(tree, archivePath))
+
+	names := zipFileNames(t, archivePath)
+	assert.Contains(t, names, "main.tf")
+	assert.NotContains(t, names, "README.md")
+}
+
 func TestBundler_OCICompliantEmbedsMetadataAtRoot(t *testing.T) {
 	tmpDir := t.TempDir()
 	writeTerraformFile(t, tmpDir, "main.tf", `output "name" { value = "root" }`)

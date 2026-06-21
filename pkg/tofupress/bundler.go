@@ -72,6 +72,7 @@ type Bundler struct {
 	Format       BundleFormat
 	OCICompliant bool              // When true, creates OCI-compliant bundle without sourcetree/ metadata
 	Metadata     *ArtifactMetadata // Optional metadata to embed in the archive
+	StripPlan    *StripPlan        // Optional include/exclude plan for safe stripping
 }
 
 // NewBundler creates a new Bundler with the specified format.
@@ -353,6 +354,13 @@ func (b *Bundler) addDirectoryToTar(tw *tar.Writer, srcDir, prefix string, packa
 			return filepath.SkipDir
 		}
 
+		if b.StripPlan != nil && !b.StripPlan.IncludePath(path, info.IsDir()) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
 		relPath, err := filepath.Rel(srcDir, path)
 		if err != nil {
 			return err
@@ -412,6 +420,13 @@ func (b *Bundler) addDirectoryToZip(zw *zip.Writer, srcDir, prefix string, packa
 		// This prevents duplication in first bundle, but preserves sourcetree/ in nested bundles
 		if info.IsDir() && info.Name() == "sourcetree" && len(packages) > 0 {
 			return filepath.SkipDir
+		}
+
+		if b.StripPlan != nil && !b.StripPlan.IncludePath(path, info.IsDir()) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 
 		relPath, err := filepath.Rel(srcDir, path)
@@ -479,7 +494,7 @@ func (b *Bundler) bundleOCICompliant(tree *ResolvedTree, outputPath string) erro
 	defer os.RemoveAll(stagingDir) //nolint:errcheck // best-effort cleanup
 
 	// Copy root module files to staging root
-	if copyErr := copyDirOCI(tree.Root.InstallDir, stagingDir); copyErr != nil {
+	if copyErr := copyDirOCI(tree.Root.InstallDir, stagingDir, b.StripPlan); copyErr != nil {
 		return fmt.Errorf("failed to copy root module: %w", copyErr)
 	}
 
@@ -503,7 +518,7 @@ func (b *Bundler) bundleOCICompliant(tree *ResolvedTree, outputPath string) erro
 		// Module is outside root, copy it to staging
 		// Use the relative path structure, converting ../ to modules/
 		targetPath := filepath.Join(stagingDir, "modules", filepath.Base(module.InstallDir))
-		if copyErr := copyDirOCI(module.InstallDir, targetPath); copyErr != nil {
+		if copyErr := copyDirOCI(module.InstallDir, targetPath, b.StripPlan); copyErr != nil {
 			return fmt.Errorf("failed to copy local module %s: %w", module.Key, copyErr)
 		}
 	}
@@ -517,7 +532,7 @@ func (b *Bundler) bundleOCICompliant(tree *ResolvedTree, outputPath string) erro
 	for _, pkg := range tree.Packages {
 		uniqueID := filepath.Base(pkg.LocalDir)
 		targetPath := filepath.Join(modulesDir, uniqueID)
-		if copyErr := copyDirOCI(pkg.LocalDir, targetPath); copyErr != nil {
+		if copyErr := copyDirOCI(pkg.LocalDir, targetPath, b.StripPlan); copyErr != nil {
 			return fmt.Errorf("failed to inline package %s: %w", pkg.PackageAddr, copyErr)
 		}
 	}
@@ -539,7 +554,7 @@ func (b *Bundler) bundleOCICompliant(tree *ResolvedTree, outputPath string) erro
 
 // bundleZipFromDir creates a ZIP archive from a directory.
 //
-//nolint:gocognit // directory walking and zip creation is inherently complex
+//nolint:gocognit,gocyclo // directory walking and zip creation is inherently complex
 func (b *Bundler) bundleZipFromDir(srcDir, outputPath string) error {
 	outFile, err := os.Create(outputPath) //nolint:gosec // G304: path is provided by user
 	if err != nil {
@@ -569,6 +584,13 @@ func (b *Bundler) bundleZipFromDir(srcDir, outputPath string) error {
 			case dirNameTerraform, dirNameGit, dirNameSourceTree:
 				return filepath.SkipDir
 			}
+		}
+
+		if b.StripPlan != nil && !b.StripPlan.IncludePath(path, info.IsDir()) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 
 		relPath, relErr := filepath.Rel(srcDir, path)
@@ -617,7 +639,7 @@ func (b *Bundler) bundleZipFromDir(srcDir, outputPath string) error {
 
 // copyDirOCI copies a directory recursively for OCI bundling, skipping
 // .terraform, .git, and sourcetree directories.
-func copyDirOCI(src, dst string) error {
+func copyDirOCI(src, dst string, stripPlan *StripPlan) error {
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -629,6 +651,13 @@ func copyDirOCI(src, dst string) error {
 			case dirNameTerraform, dirNameGit, dirNameSourceTree:
 				return filepath.SkipDir
 			}
+		}
+
+		if stripPlan != nil && !stripPlan.IncludePath(path, info.IsDir()) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 
 		// Calculate relative path
@@ -785,7 +814,7 @@ func (b *Bundler) aggregatePressedModules(tree *ResolvedTree) error {
 
 			// Copy package to root sourcetree if it doesn't already exist
 			if _, err := os.Stat(targetPkgPath); os.IsNotExist(err) {
-				if err := copyDirOCI(sourcePkgPath, targetPkgPath); err != nil {
+				if err := copyDirOCI(sourcePkgPath, targetPkgPath, nil); err != nil {
 					return fmt.Errorf("failed to copy package %s: %w", packageID, err)
 				}
 

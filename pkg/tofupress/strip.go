@@ -272,11 +272,16 @@ func (p *StripPlan) IncludePath(absPath string, isDir bool) bool {
 	return pkgPlan.includePath(absPath, isDir)
 }
 
+//nolint:gocognit,gocyclo // directory inclusion checks require branching
 func (p *PackageStripPlan) includePath(absPath string, isDir bool) bool {
 	if isGeneratedOrVCSPath(absPath) {
 		return false
 	}
 	if p.IncludeAll {
+		return true
+	}
+	// Always include the package root directory itself
+	if absPath == p.PackageRoot {
 		return true
 	}
 	rel := cleanRel(p.PackageRoot, absPath)

@@ -81,6 +81,11 @@ func (b *Bundler) Bundle(tree *ResolvedTree, outputPath string) error {
 		return fmt.Errorf("tree is nil")
 	}
 
+	// Aggregate pressed modules before creating the bundle
+	if err := b.aggregatePressedModules(tree); err != nil {
+		return fmt.Errorf("failed to aggregate pressed modules: %w", err)
+	}
+
 	// Use OCI-compliant mode if enabled and format is ZIP
 	if b.OCICompliant && b.Format == BundleFormatZIP {
 		return b.bundleOCICompliant(tree, outputPath)
@@ -711,6 +716,89 @@ func rewriteOCISources(tree *ResolvedTree, stagingDir string) error {
 				// Not all modules may be in all files, so ignore errors
 				continue
 			}
+		}
+	}
+
+	return nil
+}
+
+// aggregatePressedModules finds local modules that are pressed bundles (have their own sourcetree)
+// and flattens their packages into the root sourcetree.
+//
+//nolint:gocyclo,gocognit // complex but straightforward aggregation logic
+func (b *Bundler) aggregatePressedModules(tree *ResolvedTree) error {
+	rootSourcetree := filepath.Join(tree.Root.InstallDir, dirNameSourceTree)
+
+	for _, module := range tree.AllModules {
+		// Skip remote modules and the root module itself
+		if !module.IsLocal || module == tree.Root {
+			continue
+		}
+
+		// Check if this module has its own sourcetree (it's a pressed module)
+		moduleSourcetree := filepath.Join(module.InstallDir, dirNameSourceTree)
+		if _, err := os.Stat(moduleSourcetree); os.IsNotExist(err) {
+			continue
+		}
+
+		// This is a pressed module - aggregate its packages
+		entries, err := os.ReadDir(moduleSourcetree)
+		if err != nil {
+			return fmt.Errorf("failed to read pressed module sourcetree: %w", err)
+		}
+
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+
+			packageID := entry.Name()
+			sourcePkgPath := filepath.Join(moduleSourcetree, packageID)
+			targetPkgPath := filepath.Join(rootSourcetree, packageID)
+
+			// Create root sourcetree if it doesn't exist
+			if err := os.MkdirAll(rootSourcetree, 0o755); err != nil { //nolint:gosec // G301: standard permissions
+				return fmt.Errorf("failed to create root sourcetree: %w", err)
+			}
+
+			// Copy package to root sourcetree if it doesn't already exist
+			if _, err := os.Stat(targetPkgPath); os.IsNotExist(err) {
+				if err := copyDirOCI(sourcePkgPath, targetPkgPath); err != nil {
+					return fmt.Errorf("failed to copy package %s: %w", packageID, err)
+				}
+
+				// Add to tree.Packages
+				tree.Packages[packageID] = &DownloadedPackage{
+					PackageAddr: packageID,
+					LocalDir:    targetPkgPath,
+				}
+			}
+
+			// Rewrite source in the pressed module
+			oldSource := "./" + dirNameSourceTree + "/" + packageID
+			// Calculate relative path from pressed module to root sourcetree
+			relPath, err := filepath.Rel(module.InstallDir, targetPkgPath)
+			if err != nil {
+				return fmt.Errorf("failed to calculate relative path: %w", err)
+			}
+			newSource := "./" + relPath
+
+			tfFiles, err := FindTerraformFiles(module.InstallDir)
+			if err != nil {
+				return fmt.Errorf("failed to find terraform files: %w", err)
+			}
+
+			for _, tfFile := range tfFiles {
+				if err := RewriteModuleSourceByOldSource(tfFile, oldSource, newSource); err != nil {
+					// Ignore errors - source might not be in this file
+					continue
+				}
+			}
+		}
+
+		// Remove the nested sourcetree from the pressed module
+		if err := os.RemoveAll(moduleSourcetree); err != nil {
+			return fmt.Errorf("failed to remove nested sourcetree: %w", err)
 		}
 	}
 

@@ -29,6 +29,68 @@ func TestSourcetreeIDFromHashRejectsInvalidHash(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid package hash")
 }
 
+func TestBuildSourcetreeIdentityPlanDeduplicatesDifferentSourcesWithSameFinalContent(t *testing.T) {
+	root := t.TempDir()
+	pkgA := filepath.Join(root, "sourcetree", "old-a")
+	pkgB := filepath.Join(root, "sourcetree", "old-b")
+	require.NoError(t, os.MkdirAll(pkgA, 0o755))
+	require.NoError(t, os.MkdirAll(pkgB, 0o755))
+	writeTerraformFile(t, pkgA, "main.tf", `output "id" { value = "same" }`)
+	writeTerraformFile(t, pkgB, "main.tf", `output "id" { value = "same" }`)
+	writeTestFile(t, filepath.Join(pkgA, "README.md"), "different docs a")
+	writeTestFile(t, filepath.Join(pkgB, "README.md"), "different docs b")
+
+	tree := &ResolvedTree{
+		Root: &ModuleNode{Key: "root", Name: "root", InstallDir: root, PackageRoot: root},
+		Packages: map[string]*DownloadedPackage{
+			"old-a": {PackageAddr: "git::file:///repo-a", LocalDir: pkgA, ContentHash: "download-a"},
+			"old-b": {PackageAddr: "git::file:///repo-b", LocalDir: pkgB, ContentHash: "download-b"},
+		},
+		AllModules: []*ModuleNode{
+			{Key: "root.a", Name: "a", PackageRoot: pkgA, InstallDir: pkgA, Source: ModuleSource{PackageAddr: "git::file:///repo-a"}, IsRemote: true},
+			{Key: "root.b", Name: "b", PackageRoot: pkgB, InstallDir: pkgB, Source: ModuleSource{PackageAddr: "git::file:///repo-b"}, IsRemote: true},
+		},
+	}
+	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+
+	plan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	require.NoError(t, err)
+	require.Len(t, plan.ByFinalID, 1)
+	require.Len(t, plan.DedupGroups, 1)
+	assert.ElementsMatch(t, []string{"git::file:///repo-a", "git::file:///repo-b"}, plan.DedupGroups[0].PackageAddrs)
+	assert.ElementsMatch(t, []string{"root.a", "root.b"}, plan.DedupGroups[0].ModuleKeys)
+}
+
+func TestBuildSourcetreeIdentityPlanDoesNotDeduplicateDifferentFinalContent(t *testing.T) {
+	root := t.TempDir()
+	pkgA := filepath.Join(root, "sourcetree", "old-a")
+	pkgB := filepath.Join(root, "sourcetree", "old-b")
+	require.NoError(t, os.MkdirAll(pkgA, 0o755))
+	require.NoError(t, os.MkdirAll(pkgB, 0o755))
+	writeTerraformFile(t, pkgA, "main.tf", `output "id" { value = "a" }`)
+	writeTerraformFile(t, pkgB, "main.tf", `output "id" { value = "b" }`)
+
+	tree := &ResolvedTree{
+		Root: &ModuleNode{Key: "root", Name: "root", InstallDir: root, PackageRoot: root},
+		Packages: map[string]*DownloadedPackage{
+			"old-a": {PackageAddr: "git::file:///repo-a", LocalDir: pkgA, ContentHash: "download-a"},
+			"old-b": {PackageAddr: "git::file:///repo-b", LocalDir: pkgB, ContentHash: "download-b"},
+		},
+		AllModules: []*ModuleNode{
+			{Key: "root.a", Name: "a", PackageRoot: pkgA, InstallDir: pkgA, Source: ModuleSource{PackageAddr: "git::file:///repo-a"}, IsRemote: true},
+			{Key: "root.b", Name: "b", PackageRoot: pkgB, InstallDir: pkgB, Source: ModuleSource{PackageAddr: "git::file:///repo-b"}, IsRemote: true},
+		},
+	}
+	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+
+	plan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	require.NoError(t, err)
+	assert.Len(t, plan.ByFinalID, 2)
+	assert.Empty(t, plan.DedupGroups)
+}
+
 func TestSnapshotDirectoryWithStripUsesIncludedFinalContent(t *testing.T) {
 	root := t.TempDir()
 	writeTerraformFile(t, root, "main.tf", `output "x" { value = "kept" }`)

@@ -58,6 +58,32 @@ func TestFindTerraformFiles_EmptyDirectory(t *testing.T) {
 	assert.Empty(t, files)
 }
 
+func TestFindTerraformFiles_IncludesTofuAndPrioritizesSameBasename(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "main.tf"), []byte("# tf main"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "main.tofu"), []byte("# tofu main"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "variables.tf"), []byte("# vars"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "outputs.tofu"), []byte("# outputs"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "README.md"), []byte("# readme"), 0o644))
+
+	subDir := filepath.Join(tmpDir, "modules")
+	require.NoError(t, os.MkdirAll(subDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(subDir, "child.tofu"), []byte("# child"), 0o644))
+
+	files, err := FindTerraformFiles(tmpDir)
+	require.NoError(t, err)
+
+	fileNames := make([]string, 0, len(files))
+	for _, file := range files {
+		fileNames = append(fileNames, filepath.Base(file))
+	}
+
+	assert.ElementsMatch(t, []string{"main.tofu", "variables.tf", "outputs.tofu"}, fileNames)
+	assert.NotContains(t, fileNames, "main.tf")
+	assert.NotContains(t, fileNames, "child.tofu")
+}
+
 func TestFindTerraformFiles_NonExistentDirectory(t *testing.T) {
 	files, err := FindTerraformFiles("/nonexistent/path")
 	assert.Error(t, err)

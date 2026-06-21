@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/hashicorp/hcl/v2"
@@ -23,33 +24,43 @@ func (m ModuleBlock) String() string {
 	return fmt.Sprintf("ModuleBlock{Name: %q, Source: %q}", m.Name, m.Source)
 }
 
-// FindTerraformFiles finds all .tf files in the given directory.
-// It skips hidden directories (those starting with '.') and only returns
-// files in the immediate directory (not subdirectories).
+// FindTerraformFiles finds Terraform/OpenTofu configuration files in the given directory.
+// It skips hidden files and directories, only returns files in the immediate directory,
+// and applies OpenTofu priority: if both name.tf and name.tofu exist, name.tofu wins.
 func FindTerraformFiles(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read directory %s: %w", dir, err)
 	}
 
-	var files []string
+	byBase := make(map[string]string)
 	for _, entry := range entries {
 		name := entry.Name()
 
-		// Skip directories
-		if entry.IsDir() {
+		if entry.IsDir() || strings.HasPrefix(name, ".") {
 			continue
 		}
 
-		// Skip hidden files
-		if strings.HasPrefix(name, ".") {
+		ext := filepath.Ext(name)
+		if ext != ".tf" && ext != ".tofu" {
 			continue
 		}
 
-		// Only include .tf files
-		if strings.HasSuffix(name, ".tf") {
-			files = append(files, filepath.Join(dir, name))
+		base := strings.TrimSuffix(name, ext)
+		if ext == ".tofu" || byBase[base] == "" {
+			byBase[base] = filepath.Join(dir, name)
 		}
+	}
+
+	bases := make([]string, 0, len(byBase))
+	for base := range byBase {
+		bases = append(bases, base)
+	}
+	sort.Strings(bases)
+
+	files := make([]string, 0, len(bases))
+	for _, base := range bases {
+		files = append(files, byBase[base])
 	}
 
 	return files, nil

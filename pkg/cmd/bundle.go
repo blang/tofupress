@@ -31,8 +31,11 @@ Example:
 func init() {
 	bundleCmd.Flags().String("format", "auto", "Bundle format: auto, zip, tar.gz, tar.xz (auto detects from output file extension)")
 	bundleCmd.Flags().Bool("oci-compliant", false, "Generate OCI-compliant bundle (no sourcetree metadata, inlined modules)")
+	bundleCmd.Flags().String("metadata-out", "", "Write bundle metadata JSON to a separate path")
 }
 
+//
+//nolint:gocognit,gocyclo // CLI wiring naturally involves multiple configuration steps
 func runBundle(cmd *cobra.Command, args []string) error {
 	source := args[0]
 	outputPath := args[1]
@@ -101,6 +104,24 @@ func runBundle(cmd *cobra.Command, args []string) error {
 		}
 		bundler.OCICompliant = true
 	}
+
+	metadata, err := tofupress.BuildArtifactMetadata(tree, &tofupress.MetadataRequest{
+		Build: tofupress.BuildInfo{
+			Version: BuildVersion,
+			Commit:  BuildCommit,
+			Time:    BuildTime,
+		},
+		Command:    "bundle",
+		Args:       []string{source, outputPath},
+		Options:    tofupress.BundleOptions{Format: string(format), OCICompliant: ociCompliant, StripMode: "none"},
+		RootSource: source,
+		OutputPath: outputPath,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to build metadata: %w", err)
+	}
+	bundler.Metadata = metadata
+
 	if bundleErr := bundler.Bundle(tree, outputPath); bundleErr != nil {
 		return fmt.Errorf("failed to create bundle: %w", bundleErr)
 	}
@@ -112,6 +133,24 @@ func runBundle(cmd *cobra.Command, args []string) error {
 	}
 
 	fmt.Fprintf(stdout, "Bundle created successfully: %s (%.2f MB)\n", outputPath, float64(info.Size())/(1024*1024)) //nolint:errcheck // stdout writes are best-effort
+
+	metadataOut, _ := cmd.Flags().GetString("metadata-out")
+	if metadataOut != "" {
+		if err := tofupress.WriteMetadataFile(metadataOut, metadata); err != nil {
+			return fmt.Errorf("failed to write metadata output: %w", err)
+		}
+	}
+
+	fmt.Fprintf(stdout, "Module references: %d\n", metadata.Stats.ModuleReferences) //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Unique packages: %d\n", metadata.Stats.UniquePackages)     //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Source types: %v\n", metadata.Stats.SourceTypes)           //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Original bytes: %d\n", metadata.Stats.OriginalBytes)       //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Final bytes: %d\n", metadata.Stats.FinalBytes)             //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Stripped bytes: %d\n", metadata.Stats.StrippedBytes)       //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Metadata: %s\n", tofupress.MetadataFileName)               //nolint:errcheck // stdout writes are best-effort
+	if metadataOut != "" {
+		fmt.Fprintf(stdout, "Metadata: %s\n", metadataOut) //nolint:errcheck // stdout writes are best-effort
+	}
 
 	return nil
 }

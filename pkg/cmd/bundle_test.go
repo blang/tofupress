@@ -2,6 +2,8 @@
 package cmd
 
 import (
+	"bytes"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -20,4 +22,34 @@ func TestRunBundleErrorsOnUnknownExtensionWhenFormatAuto(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "could not infer bundle format")
 	assert.Contains(t, err.Error(), "--format")
+}
+
+func TestRunBundleWritesMetadataOutAndPrintsStats(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "main.tf"), []byte(`output "name" { value = "root" }`), 0o644))
+
+	outDir := t.TempDir()
+	bundlePath := filepath.Join(outDir, "bundle.zip")
+	metadataPath := filepath.Join(outDir, "meta.json")
+
+	cmd := &cobra.Command{}
+	cmd.Flags().String("format", "zip", "")
+	cmd.Flags().Bool("oci-compliant", false, "")
+	cmd.Flags().String("metadata-out", metadataPath, "")
+
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+
+	require.NoError(t, runBundle(cmd, []string{tmpDir, bundlePath}))
+
+	assert.FileExists(t, bundlePath)
+	assert.FileExists(t, metadataPath)
+	assert.Contains(t, stdout.String(), "Module references:")
+	assert.Contains(t, stdout.String(), "Unique packages:")
+	assert.Contains(t, stdout.String(), "Metadata: "+metadataPath)
+
+	data, err := os.ReadFile(metadataPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"schema_version": "1"`)
+	assert.Contains(t, string(data), `"format": "zip"`)
 }

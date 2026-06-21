@@ -49,7 +49,7 @@ func ParseBundleFormat(s string) (BundleFormat, error) {
 }
 
 // DetectFormatFromPath infers the bundle format from the output file extension.
-// Returns the detected format and true if recognized, or BundleFormatZIP and false if not.
+// Returns the detected format and true if recognized, or an empty format and false if not.
 func DetectFormatFromPath(path string) (BundleFormat, bool) {
 	lower := strings.ToLower(path)
 	switch {
@@ -60,7 +60,7 @@ func DetectFormatFromPath(path string) (BundleFormat, bool) {
 	case strings.HasSuffix(lower, ".zip"):
 		return BundleFormatZIP, true
 	default:
-		return BundleFormatZIP, false
+		return "", false
 	}
 }
 

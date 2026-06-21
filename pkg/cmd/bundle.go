@@ -87,12 +87,10 @@ func runBundle(cmd *cobra.Command, args []string) error {
 	// Auto-detect format from output file extension if not explicitly set
 	if format == tofupress.BundleFormatAuto {
 		detected, ok := tofupress.DetectFormatFromPath(outputPath)
-		if ok {
-			format = detected
-		} else {
-			fmt.Fprintf(os.Stderr, "Warning: could not infer format from output file '%s', defaulting to zip\n", outputPath) //nolint:errcheck // stderr is best-effort
-			format = tofupress.BundleFormatZIP
+		if !ok {
+			return fmt.Errorf("could not infer bundle format from output path %q; pass --format=zip, --format=tar.gz, or --format=tar.xz", outputPath)
 		}
+		format = detected
 	}
 
 	bundler := tofupress.NewBundler(format)

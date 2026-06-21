@@ -444,9 +444,9 @@ func TestDetectFormatFromPath(t *testing.T) {
 		{"output.TAR.GZ", BundleFormatTarGZ, true},
 		{"output.tar.xz", BundleFormatTarXZ, true},
 		{"output.txz", BundleFormatTarXZ, true},
-		{"bundle.tar", BundleFormatZIP, false},
-		{"bundle", BundleFormatZIP, false},
-		{"bundle.rar", BundleFormatZIP, false},
+		{"bundle.tar", "", false},
+		{"bundle", "", false},
+		{"bundle.rar", "", false},
 	}
 
 	for _, tt := range tests {

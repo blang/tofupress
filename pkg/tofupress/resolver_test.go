@@ -3,6 +3,7 @@ package tofupress
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -228,6 +229,66 @@ module "vpc" {
 	require.NotNil(t, vpc)
 	assert.Equal(t, SourceGit, vpc.Source.Type)
 	assert.Equal(t, infra, vpc.Parent)
+}
+
+func TestResolver_LocalPackageSubdirAllowsSiblingReferences(t *testing.T) {
+	rootDir := t.TempDir()
+
+	packageDir := filepath.Join(rootDir, "package")
+	moduleADir := filepath.Join(packageDir, "modules", "moduleA")
+	moduleBDir := filepath.Join(packageDir, "modules", "moduleB")
+	require.NoError(t, os.MkdirAll(moduleADir, 0o755))
+	require.NoError(t, os.MkdirAll(moduleBDir, 0o755))
+
+	writeTerraformFile(t, rootDir, "main.tf", `
+module "moduleA" {
+  source = "./package//modules/moduleA"
+}
+`)
+	writeTerraformFile(t, moduleADir, "main.tf", `
+module "sibling" {
+  source = "../moduleB"
+}
+`)
+	writeTerraformFile(t, moduleBDir, "main.tf", `
+output "name" {
+  value = "moduleB"
+}
+`)
+
+	resolver := NewResolver()
+	resolver.PackageRoot = rootDir
+	tree, err := resolver.Resolve(context.Background(), rootDir)
+	require.NoError(t, err)
+
+	moduleA := tree.Find("moduleA")
+	require.NotNil(t, moduleA)
+	assert.Equal(t, packageDir, moduleA.PackageRoot)
+	assert.Equal(t, moduleADir, moduleA.InstallDir)
+
+	sibling := tree.Find("moduleA.sibling")
+	require.NotNil(t, sibling)
+	assert.Equal(t, packageDir, sibling.PackageRoot)
+	assert.Equal(t, moduleBDir, sibling.InstallDir)
+}
+
+func TestResolver_RejectsAbsoluteModuleSourceByDefault(t *testing.T) {
+	tmpDir := t.TempDir()
+	absoluteModuleDir := filepath.Join(t.TempDir(), "absolute-module")
+	require.NoError(t, os.MkdirAll(absoluteModuleDir, 0o755))
+	writeTerraformFile(t, absoluteModuleDir, "main.tf", `output "name" { value = "absolute" }`)
+
+	writeTerraformFile(t, tmpDir, "main.tf", fmt.Sprintf(`
+module "absolute" {
+  source = %q
+}
+`, absoluteModuleDir))
+
+	resolver := NewResolver()
+	_, err := resolver.Resolve(context.Background(), tmpDir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "absolute module source paths are not portable")
+	assert.Contains(t, err.Error(), absoluteModuleDir)
 }
 
 func TestResolver_ResolveEmptyModule(t *testing.T) {

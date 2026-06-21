@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -140,12 +141,15 @@ func (r *Resolver) downloadPackagesParallel(ctx context.Context, requests []down
 //
 //nolint:gocognit,gocyclo // BFS resolution is inherently complex
 func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, error) {
+	rootPackage := r.PackageRoot
+
 	tree := &ResolvedTree{
 		Root: &ModuleNode{
-			Key:        "",
-			Name:       "root", //nolint:goconst // module name
-			InstallDir: rootDir,
-			IsLocal:    true,
+			Key:         "",
+			Name:        "root", //nolint:goconst // module name
+			InstallDir:  rootDir,
+			PackageRoot: rootPackage,
+			IsLocal:     true,
 		},
 		AllModules: []*ModuleNode{},
 		Packages:   make(map[string]*DownloadedPackage),
@@ -226,37 +230,51 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 
 					// Handle based on source type
 					//nolint:gocritic // if-else chain has substantial logic per branch
-					if source.Type == SourceLocal {
-						// Local module: resolve path relative to parent
-						localPath := filepath.Join(item.dir, source.Raw)
+					if source.Type == SourceAbsolute {
+						return nil, fmt.Errorf("module %s uses absolute module source %q; absolute module source paths are not portable in self-contained artifacts", mod.Name, source.Raw)
+					} else if source.Type == SourceLocal {
+						// Local module: resolve package root and active module directory
+						packageAddr := source.PackageAddr
+						if packageAddr == "" {
+							packageAddr = source.Raw
+						}
 
-						// Check package boundary
-						if r.PackageRoot != "" {
-							relPath, err := filepath.Rel(r.PackageRoot, localPath)
-							if err != nil {
-								return nil, fmt.Errorf("failed to check package boundary for module %s: %w", mod.Name, err)
+						packageRoot := filepath.Clean(filepath.Join(item.dir, packageAddr))
+						installDir, err := resolveModuleInstallDir(packageRoot, source.SubDir)
+						if err != nil {
+							return nil, fmt.Errorf("module %s has invalid subdirectory %q: %w", mod.Name, source.SubDir, err)
+						}
+
+						if item.node.PackageRoot != "" {
+							boundaryTarget := packageRoot
+							if source.SubDir == "" {
+								boundaryTarget = installDir
 							}
-							if strings.HasPrefix(relPath, "..") {
+							if err := ensureWithinPackage(item.node.PackageRoot, boundaryTarget); err != nil {
 								return nil, fmt.Errorf("module %s at %s escapes package boundary: source %s resolves to %s, which is outside package root %s",
-									mod.Name, item.dir, source.Raw, localPath, r.PackageRoot)
+									mod.Name, item.dir, source.Raw, boundaryTarget, item.node.PackageRoot)
+							}
+							if source.SubDir == "" {
+								packageRoot = item.node.PackageRoot
 							}
 						}
 
-						child.InstallDir = localPath
+						child.InstallDir = installDir
+						child.PackageRoot = packageRoot
 						child.IsLocal = true
 						child.IsRemote = false
 
 						// Cycle detection: skip if already visited
-						if visitedPaths[localPath] {
+						if visitedPaths[installDir] {
 							// Add child to parent and tree but don't process again
 							item.node.Children = append(item.node.Children, child)
 							tree.AllModules = append(tree.AllModules, child)
 							continue
 						}
-						visitedPaths[localPath] = true
+						visitedPaths[installDir] = true
 
 						// Add to queue for processing
-						queue = append(queue, queueItem{node: child, dir: localPath})
+						queue = append(queue, queueItem{node: child, dir: installDir})
 					} else if source.Type == SourceRegistry {
 						// Registry module: query Terraform Registry API to get download URL
 						child.IsLocal = false
@@ -275,8 +293,13 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 						// Check if already downloaded (deduplication)
 						localPath, exists := downloadedPackages[registryURL]
 						if exists {
-							// Already downloaded - just set install directory
-							child.InstallDir = localPath
+							// Already downloaded - resolve subdirectory
+							installDir, err := resolveModuleInstallDir(localPath, source.SubDir)
+							if err != nil {
+								return nil, fmt.Errorf("failed to resolve subdirectory for module %s: %w", mod.Name, err)
+							}
+							child.PackageRoot = localPath
+							child.InstallDir = installDir
 						} else {
 							// Always track this module as needing the package
 							downloadInfoMap[registryURL] = append(downloadInfoMap[registryURL], &downloadInfo{
@@ -307,8 +330,13 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 						// Check if already downloaded (deduplication)
 						localPath, exists := downloadedPackages[source.PackageAddr]
 						if exists {
-							// Already downloaded - just set install directory
-							child.InstallDir = localPath
+							// Already downloaded - resolve subdirectory
+							installDir, err := resolveModuleInstallDir(localPath, source.SubDir)
+							if err != nil {
+								return nil, fmt.Errorf("failed to resolve subdirectory for module %s: %w", mod.Name, err)
+							}
+							child.PackageRoot = localPath
+							child.InstallDir = installDir
 						} else {
 							// Always track this module as needing the package
 							downloadInfoMap[source.PackageAddr] = append(downloadInfoMap[source.PackageAddr], &downloadInfo{
@@ -378,21 +406,26 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 
 				// Set install directory and rewrite source for all modules using this package
 				for _, info := range infos {
-					info.child.InstallDir = localPath
+					installDir, err := resolveModuleInstallDir(localPath, info.child.Source.SubDir)
+					if err != nil {
+						return nil, fmt.Errorf("failed to resolve subdirectory for module %s: %w", info.modName, err)
+					}
 
-					// Rewrite the source in the .tf file to point to local path
+					info.child.PackageRoot = localPath
+					info.child.InstallDir = installDir
+
 					relPath, err := filepath.Rel(info.parentDir, localPath)
 					if err != nil {
 						return nil, fmt.Errorf("failed to compute relative path: %w", err)
 					}
-					newSource := "./" + relPath
+					newSource := moduleSourcePath(relPath, info.child.Source.SubDir)
 
 					if err := RewriteModuleSource(info.tfFile, info.modName, newSource); err != nil {
 						return nil, fmt.Errorf("failed to rewrite source for module %s: %w", info.modName, err)
 					}
 
 					// Add to queue for processing
-					queue = append(queue, queueItem{node: info.child, dir: localPath})
+					queue = append(queue, queueItem{node: info.child, dir: installDir})
 				}
 			}
 		}
@@ -406,6 +439,49 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 func generateUniqueID(packageAddr string) string {
 	hash := sha256.Sum256([]byte(packageAddr))
 	return hex.EncodeToString(hash[:8]) // First 8 bytes = 16 hex chars = 64 bits
+}
+
+// resolveModuleInstallDir computes the active module directory given a package root
+// and an optional subdirectory (from a //subdir source reference).
+func resolveModuleInstallDir(packageRoot, subDir string) (string, error) {
+	if subDir == "" || subDir == "." {
+		return packageRoot, nil
+	}
+
+	installDir := filepath.Clean(filepath.Join(packageRoot, subDir))
+	if err := ensureWithinPackage(packageRoot, installDir); err != nil {
+		return "", err
+	}
+	return installDir, nil
+}
+
+// ensureWithinPackage verifies that target is within the package root boundary.
+func ensureWithinPackage(packageRoot, target string) error {
+	if packageRoot == "" {
+		return nil
+	}
+
+	relPath, err := filepath.Rel(packageRoot, target)
+	if err != nil {
+		return fmt.Errorf("failed to check package boundary: %w", err)
+	}
+	if relPath == ".." || strings.HasPrefix(relPath, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("path %s escapes package root %s", target, packageRoot)
+	}
+	return nil
+}
+
+// moduleSourcePath builds a local source string from a package-relative path and an
+// optional subdirectory, preserving //subdir semantics in the rewritten source.
+func moduleSourcePath(packageRelPath, subDir string) string {
+	localPath := filepath.ToSlash(packageRelPath)
+	if !strings.HasPrefix(localPath, "./") && !strings.HasPrefix(localPath, "../") {
+		localPath = "./" + localPath
+	}
+	if subDir == "" || subDir == "." {
+		return localPath
+	}
+	return localPath + "//" + path.Clean(filepath.ToSlash(subDir))
 }
 
 // registryResponse represents the Terraform Registry API response.

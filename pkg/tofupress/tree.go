@@ -41,14 +41,15 @@ const (
 // ModuleNode represents a single module instance in the resolved tree.
 // The same package can appear multiple times in the tree with different keys.
 type ModuleNode struct {
-	Parent     *ModuleNode
-	Source     ModuleSource
-	Key        string
-	Name       string
-	InstallDir string
-	Children   []*ModuleNode
-	IsLocal    bool
-	IsRemote   bool
+	Parent      *ModuleNode
+	Source      ModuleSource
+	Key         string
+	Name        string
+	InstallDir  string
+	PackageRoot string
+	Children    []*ModuleNode
+	IsLocal     bool
+	IsRemote    bool
 }
 
 // DownloadedPackage tracks a unique remote package that was downloaded.

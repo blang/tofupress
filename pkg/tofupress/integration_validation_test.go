@@ -133,3 +133,27 @@ output "runtime" {
 	// Init succeeds because the archive has valid .tf files and no providers
 	validateArchiveWithAllTools(t, serveArtifact(t, artifact))
 }
+
+func TestIntegrationOpenTofuSameBasenameTofuPriorityValidates(t *testing.T) {
+	bin := buildTofuPressBinary(t)
+	sourceDir := t.TempDir()
+	writeIntegrationFile(t, sourceDir, "main.tf", `
+locals {
+  terraform_only = file("${path.module}/missing-for-terraform.txt")
+}
+`)
+	writeIntegrationFile(t, sourceDir, "main.tofu", `
+output "tofu_priority" {
+  value = "open tofu loaded main.tofu"
+}
+`)
+
+	artifact := filepath.Join(t.TempDir(), "tofu-priority.zip")
+	runTofuPressBundle(t, bin, sourceDir, artifact, "--format=zip")
+
+	metadata := metadataFromArtifact(t, artifact)
+	assert.Equal(t, string(StripModeModuleDir), metadata.Command.Options.StripMode)
+	assert.Empty(t, metadata.FilesystemFunctions, "scanner must honor .tofu priority and ignore same-basename .tf")
+
+	validateArchiveWithTool(t, requireIACTool(t, "tofu"), serveArtifact(t, artifact))
+}

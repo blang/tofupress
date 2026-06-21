@@ -1,3 +1,5 @@
+//go:build integration
+
 //nolint:gosec // test files use standard permissions and safe paths
 package tofupress
 
@@ -23,10 +25,6 @@ func cloneRepo(t *testing.T, repoURL, dest string) {
 }
 
 func TestIntegration_FullResolutionWithRealRepo(t *testing.T) { //nolint:gocognit // complex integration test with multiple verification steps
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
 	// Create a test scenario that exercises the full resolution pipeline
 	tmpDir := t.TempDir()
 
@@ -118,10 +116,6 @@ variable "test" {
 }
 
 func TestIntegration_DeduplicationWithRealRepo(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
 	// Create a test scenario with duplicate remote modules
 	tmpDir := t.TempDir()
 
@@ -173,10 +167,6 @@ module "vpc3" {
 }
 
 func TestIntegration_DeepNestingWithRemoteModules(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
 	// Create a deeply nested structure
 	tmpDir := t.TempDir()
 
@@ -228,10 +218,6 @@ module "remote" {
 }
 
 func TestIntegration_MixedLocalAndRemoteModules(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
 	// Create a module with both local and remote dependencies
 	tmpDir := t.TempDir()
 
@@ -345,10 +331,6 @@ module "c" {
 }
 
 func TestIntegration_TreeStatistics(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-
 	// Create a complex tree to test statistics
 	tmpDir := t.TempDir()
 

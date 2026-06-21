@@ -157,3 +157,38 @@ output "tofu_priority" {
 
 	validateArchiveWithTool(t, requireIACTool(t, "tofu"), serveArtifact(t, artifact))
 }
+
+func TestIntegrationPackageSubdirArchivePreservesLegalSiblingReads(t *testing.T) {
+	bin := buildTofuPressBinary(t)
+	packageRoot := t.TempDir()
+	writeIntegrationFile(t, packageRoot, "modules/app/main.tf", `
+locals {
+  rendered = templatefile("${path.module}/../shared/template.tftpl", { name = "subdir" })
+}
+
+module "sibling" {
+  source = "../sibling"
+  value  = local.rendered
+}
+
+output "rendered" {
+  value = module.sibling.value
+}
+`)
+	writeIntegrationFile(t, packageRoot, "modules/sibling/main.tf", `
+variable "value" { type = string }
+output "value" { value = var.value }
+`)
+	writeIntegrationFile(t, packageRoot, "modules/shared/template.tftpl", `hello ${name}`)
+	writeIntegrationFile(t, packageRoot, "README.md", `package-level file kept only when package scope is required`)
+
+	artifact := filepath.Join(t.TempDir(), "subdir.tar.gz")
+	runTofuPressBundle(t, bin, packageRoot+"//modules/app", artifact, "--format=tar.gz")
+
+	metadata := metadataFromArtifact(t, artifact)
+	assert.Equal(t, string(StripModeModuleDir), metadata.Command.Options.StripMode)
+	require.NotEmpty(t, metadata.FilesystemFunctions)
+
+	artifactSource := serveArtifact(t, artifact) + "//modules/app"
+	validateArchiveWithAllTools(t, artifactSource)
+}

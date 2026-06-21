@@ -108,6 +108,20 @@ func (b *Bundler) Bundle(tree *ResolvedTree, outputPath string) error {
 	}
 }
 
+// rootArchiveDir returns the directory that should serve as the archive root.
+// For //subdir package-boundary inputs, this is the PackageRoot (the full package)
+// so that the subdirectory structure is preserved in the archive.
+// Otherwise, it falls back to the InstallDir.
+func rootArchiveDir(tree *ResolvedTree) string {
+	if tree != nil && tree.Root != nil && tree.Root.PackageRoot != "" {
+		return tree.Root.PackageRoot
+	}
+	if tree != nil && tree.Root != nil {
+		return tree.Root.InstallDir
+	}
+	return ""
+}
+
 // bundleTarGZ creates a tar.gz archive.
 //
 //nolint:gocognit,gocyclo // complex but straightforward bundling logic
@@ -136,7 +150,7 @@ func (b *Bundler) bundleTarGZ(tree *ResolvedTree, outputPath string) error {
 		}
 	}()
 
-	if err := b.addDirectoryToTar(tarWriter, tree.Root.InstallDir, "", tree.Packages); err != nil {
+	if err := b.addDirectoryToTar(tarWriter, rootArchiveDir(tree), "", tree.Packages); err != nil {
 		return fmt.Errorf("failed to add root module: %w", err)
 	}
 
@@ -216,7 +230,7 @@ func (b *Bundler) bundleTarXZ(tree *ResolvedTree, outputPath string) error {
 		}
 	}()
 
-	if err := b.addDirectoryToTar(tarWriter, tree.Root.InstallDir, "", tree.Packages); err != nil {
+	if err := b.addDirectoryToTar(tarWriter, rootArchiveDir(tree), "", tree.Packages); err != nil {
 		return fmt.Errorf("failed to add root module: %w", err)
 	}
 
@@ -286,7 +300,7 @@ func (b *Bundler) bundleZIP(tree *ResolvedTree, outputPath string) error {
 		}
 	}()
 
-	if err := b.addDirectoryToZip(zipWriter, tree.Root.InstallDir, "", tree.Packages); err != nil {
+	if err := b.addDirectoryToZip(zipWriter, rootArchiveDir(tree), "", tree.Packages); err != nil {
 		return fmt.Errorf("failed to add root module: %w", err)
 	}
 

@@ -169,6 +169,7 @@ func collectPackageRoots(tree *ResolvedTree) []string {
 	return roots
 }
 
+//nolint:gocognit // subdir parent-plan inclusion adds natural complexity
 func includeResolvedModuleDirs(plan *StripPlan, tree *ResolvedTree) {
 	for _, module := range tree.AllModules {
 		pkgPlan := plan.PackageForPath(module.InstallDir)
@@ -186,6 +187,17 @@ func includeResolvedModuleDirs(plan *StripPlan, tree *ResolvedTree) {
 			}
 		} else {
 			pkgPlan.includeDir(module.InstallDir)
+		}
+
+		// Also include the module directory in any broader parent package plan
+		// so the walker from the package root can reach //subdir modules.
+		for _, parentPlan := range plan.Packages {
+			if parentPlan == pkgPlan {
+				continue
+			}
+			if strings.HasPrefix(module.InstallDir, parentPlan.PackageRoot+string(filepath.Separator)) {
+				parentPlan.includeDir(module.InstallDir)
+			}
 		}
 	}
 }

@@ -47,8 +47,10 @@ func TestBinary_BundleMonorepoComplex(t *testing.T) {
 	extractDir := t.TempDir()
 	extractTarGz(t, outputFile, extractDir)
 
-	// Verify main.tf exists in the bundle
-	mainTf := filepath.Join(extractDir, "main.tf")
+	// Verify main.tf exists in the bundle (archived from PackageRoot for //subdir inputs)
+	// For subdir inputs (e.g., monorepo//infra/environments/prod), the archive preserves
+	// the full package structure: infra/environments/prod/main.tf
+	mainTf := filepath.Join(extractDir, "infra", "environments", "prod", "main.tf")
 	content, err := os.ReadFile(mainTf)
 	require.NoError(t, err, "main.tf should be readable")
 
@@ -73,20 +75,11 @@ func TestBinary_BundleMonorepoComplex(t *testing.T) {
 		}
 	}
 
-	// Verify sourcetree directory exists (contains remote and local modules)
-	sourcetreeDir := filepath.Join(extractDir, "sourcetree")
+	// Verify sourcetree directory does NOT exist (no remote packages downloaded)
+	// The monorepo fixture has only local modules with no remote dependencies.
+	sourcetreeDir := filepath.Join(extractDir, "infra", "environments", "prod", "sourcetree")
 	_, err = os.Stat(sourcetreeDir)
-	require.NoError(t, err, "sourcetree directory should exist")
-
-	// Count modules in sourcetree
-	entries, err := os.ReadDir(sourcetreeDir)
-	require.NoError(t, err)
-	t.Logf("Found %d modules in sourcetree (deduplication working)", len(entries))
-
-	// Log the modules found
-	for _, entry := range entries {
-		t.Logf("  - %s", entry.Name())
-	}
+	assert.True(t, os.IsNotExist(err), "sourcetree should not exist for local-only modules: %v", err)
 }
 
 // TestBinary_BundleMonorepoMultipleEnvs validates bundling different environments

@@ -168,7 +168,7 @@ func (b *Bundler) bundleTarGZ(tree *ResolvedTree, outputPath string) error {
 		// For local modules, check if they're outside the root directory
 		if module.IsLocal && module.InstallDir != "" {
 			// Calculate relative path from root to this module
-			relPath, err := filepath.Rel(tree.Root.InstallDir, module.InstallDir)
+			relPath, err := filepath.Rel(rootArchiveDir(tree), module.InstallDir)
 			if err != nil {
 				continue
 			}
@@ -248,7 +248,7 @@ func (b *Bundler) bundleTarXZ(tree *ResolvedTree, outputPath string) error {
 		// For local modules, check if they're outside the root directory
 		if module.IsLocal && module.InstallDir != "" {
 			// Calculate relative path from root to this module
-			relPath, err := filepath.Rel(tree.Root.InstallDir, module.InstallDir)
+			relPath, err := filepath.Rel(rootArchiveDir(tree), module.InstallDir)
 			if err != nil {
 				continue
 			}
@@ -318,7 +318,7 @@ func (b *Bundler) bundleZIP(tree *ResolvedTree, outputPath string) error {
 		// For local modules, check if they're outside the root directory
 		if module.IsLocal && module.InstallDir != "" {
 			// Calculate relative path from root to this module
-			relPath, err := filepath.Rel(tree.Root.InstallDir, module.InstallDir)
+			relPath, err := filepath.Rel(rootArchiveDir(tree), module.InstallDir)
 			if err != nil {
 				continue
 			}

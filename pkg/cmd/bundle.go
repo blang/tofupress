@@ -123,18 +123,37 @@ func runBundle(cmd *cobra.Command, args []string) error {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", warning.Message) //nolint:errcheck // stderr writes are best-effort
 	}
 
+	// Plan and apply sourcetree identity (archive-only; OCI-compliant inlines modules)
+	var sourcetreePlan *tofupress.SourcetreeIdentityPlan
+	if !ociCompliant {
+		sourcetreePlan, err = tofupress.BuildSourcetreeIdentityPlan(tree, stripPlan)
+		if err != nil {
+			return fmt.Errorf("failed to plan sourcetree identity: %w", err)
+		}
+		if applyErr := tofupress.ApplySourcetreeIdentityPlan(tree, sourcetreePlan); applyErr != nil {
+			return fmt.Errorf("failed to apply sourcetree identity: %w", applyErr)
+		}
+		// Re-plan stripping after identity application since package directories changed
+		stripPlan, err = tofupress.PlanStripping(tree, stripMode)
+		if err != nil {
+			return fmt.Errorf("failed to plan final stripping: %w", err)
+		}
+		bundler.StripPlan = stripPlan
+	}
+
 	metadata, err := tofupress.BuildArtifactMetadata(tree, &tofupress.MetadataRequest{
 		Build: tofupress.BuildInfo{
 			Version: BuildVersion,
 			Commit:  BuildCommit,
 			Time:    BuildTime,
 		},
-		Command:    "bundle",
-		Args:       []string{source, outputPath},
-		Options:    tofupress.BundleOptions{Format: string(format), OCICompliant: ociCompliant, StripMode: string(stripMode)},
-		RootSource: source,
-		OutputPath: outputPath,
-		StripPlan:  stripPlan,
+		Command:        "bundle",
+		Args:           []string{source, outputPath},
+		Options:        tofupress.BundleOptions{Format: string(format), OCICompliant: ociCompliant, StripMode: string(stripMode)},
+		RootSource:     source,
+		OutputPath:     outputPath,
+		StripPlan:      stripPlan,
+		SourcetreePlan: sourcetreePlan,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to build metadata: %w", err)
@@ -160,13 +179,14 @@ func runBundle(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Fprintf(stdout, "Module references: %d\n", metadata.Stats.ModuleReferences) //nolint:errcheck // stdout writes are best-effort
-	fmt.Fprintf(stdout, "Unique packages: %d\n", metadata.Stats.UniquePackages)     //nolint:errcheck // stdout writes are best-effort
-	fmt.Fprintf(stdout, "Source types: %v\n", metadata.Stats.SourceTypes)           //nolint:errcheck // stdout writes are best-effort
-	fmt.Fprintf(stdout, "Original bytes: %d\n", metadata.Stats.OriginalBytes)       //nolint:errcheck // stdout writes are best-effort
-	fmt.Fprintf(stdout, "Final bytes: %d\n", metadata.Stats.FinalBytes)             //nolint:errcheck // stdout writes are best-effort
-	fmt.Fprintf(stdout, "Stripped bytes: %d\n", metadata.Stats.StrippedBytes)       //nolint:errcheck // stdout writes are best-effort
-	fmt.Fprintf(stdout, "Metadata: %s\n", tofupress.MetadataFileName)               //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Module references: %d\n", metadata.Stats.ModuleReferences)         //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Unique packages: %d\n", metadata.Stats.UniquePackages)             //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Deduplicated packages: %d\n", metadata.Stats.DeduplicatedPackages) //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Source types: %v\n", metadata.Stats.SourceTypes)                   //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Original bytes: %d\n", metadata.Stats.OriginalBytes)               //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Final bytes: %d\n", metadata.Stats.FinalBytes)                     //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Stripped bytes: %d\n", metadata.Stats.StrippedBytes)               //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Metadata: %s\n", tofupress.MetadataFileName)                       //nolint:errcheck // stdout writes are best-effort
 	if metadataOut != "" {
 		fmt.Fprintf(stdout, "Metadata: %s\n", metadataOut) //nolint:errcheck // stdout writes are best-effort
 	}

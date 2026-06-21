@@ -104,6 +104,21 @@ locals { rendered = file("templates/${var.name}.tftpl") }`), 0o644))
 	assert.Contains(t, stderr.String(), "filesystem reads were detected")
 }
 
+func TestBundleCommandPrintsDeduplicatedPackages(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "main.tf"), []byte(`output "x" { value = "root" }`), 0o644))
+	output := filepath.Join(t.TempDir(), "bundle.zip")
+
+	cmd := newTestBundleCommand(t, "")
+	buf := new(bytes.Buffer)
+	cmd.SetOut(buf)
+	cmd.SetErr(new(bytes.Buffer))
+
+	require.NoError(t, runBundle(cmd, []string{root, output}))
+	assert.Contains(t, buf.String(), "Deduplicated packages: 0")
+}
+
+//nolint:unparam // metadataPath is always empty string; kept as parameter for test readability
 func newTestBundleCommand(t *testing.T, metadataPath string) *cobra.Command {
 	t.Helper()
 	cmd := &cobra.Command{}

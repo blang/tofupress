@@ -32,14 +32,15 @@ type BundleOptions struct {
 
 // MetadataRequest contains the inputs needed to build artifact metadata.
 type MetadataRequest struct {
-	Build      BuildInfo
-	Command    string
-	Args       []string
-	Options    BundleOptions
-	RootSource string
-	OutputPath string
-	CreatedAt  time.Time
-	StripPlan  *StripPlan // Optional strip plan for stats and filesystem function reporting
+	Build          BuildInfo
+	Command        string
+	Args           []string
+	Options        BundleOptions
+	RootSource     string
+	OutputPath     string
+	CreatedAt      time.Time
+	StripPlan      *StripPlan              // Optional strip plan for stats and filesystem function reporting
+	SourcetreePlan *SourcetreeIdentityPlan // Optional sourcetree identity plan for dedup metadata
 }
 
 // MetadataCommand records the CLI command used to create the artifact.
@@ -73,26 +74,41 @@ type ModuleMetadata struct {
 
 // PackageMetadata records information about a downloaded remote package.
 type PackageMetadata struct {
-	ID             string `json:"id"`
-	PackageAddr    string `json:"package_addr"`
-	LocalDir       string `json:"local_dir"`
-	DownloadedHash string `json:"downloaded_hash"`
-	FinalHash      string `json:"final_hash"`
-	FileCount      int    `json:"file_count"`
-	SizeBytes      int64  `json:"size_bytes"`
+	ID                   string   `json:"id"`
+	PackageAddr          string   `json:"package_addr"`
+	LocalDir             string   `json:"local_dir"`
+	DownloadedHash       string   `json:"downloaded_hash"`
+	FinalHash            string   `json:"final_hash"`
+	FileCount            int      `json:"file_count"`
+	SizeBytes            int64    `json:"size_bytes"`
+	SourcetreeID         string   `json:"sourcetree_id,omitempty"`
+	CanonicalPackageAddr string   `json:"canonical_package_addr,omitempty"`
+	PackageAddrs         []string `json:"package_addrs,omitempty"`
+	ModuleKeys           []string `json:"module_keys,omitempty"`
+	Deduplicated         bool     `json:"deduplicated,omitempty"`
+}
+
+// DedupGroupMetadata records a group of source addresses that map to the same final package.
+type DedupGroupMetadata struct {
+	ID                   string   `json:"id"`
+	FinalHash            string   `json:"final_hash"`
+	CanonicalPackageAddr string   `json:"canonical_package_addr"`
+	PackageAddrs         []string `json:"package_addrs"`
+	ModuleKeys           []string `json:"module_keys"`
 }
 
 // BundleStats records aggregate statistics about the bundle.
 type BundleStats struct {
-	ModuleReferences int            `json:"module_references"`
-	UniquePackages   int            `json:"unique_packages"`
-	LocalModules     int            `json:"local_modules"`
-	RemoteModules    int            `json:"remote_modules"`
-	SourceTypes      map[string]int `json:"source_types"`
-	OriginalBytes    int64          `json:"original_bytes"`
-	FinalBytes       int64          `json:"final_bytes"`
-	StrippedBytes    int64          `json:"stripped_bytes"`
-	StrippedFiles    int            `json:"stripped_files"`
+	ModuleReferences     int            `json:"module_references"`
+	UniquePackages       int            `json:"unique_packages"`
+	LocalModules         int            `json:"local_modules"`
+	RemoteModules        int            `json:"remote_modules"`
+	SourceTypes          map[string]int `json:"source_types"`
+	OriginalBytes        int64          `json:"original_bytes"`
+	FinalBytes           int64          `json:"final_bytes"`
+	StrippedBytes        int64          `json:"stripped_bytes"`
+	StrippedFiles        int            `json:"stripped_files"`
+	DeduplicatedPackages int            `json:"deduplicated_packages"`
 }
 
 // ArtifactMetadata is the top-level metadata structure embedded in every bundle.
@@ -108,6 +124,7 @@ type ArtifactMetadata struct {
 	Stats               BundleStats             `json:"stats"`
 	FilesystemFunctions []FilesystemFunctionRef `json:"filesystem_functions,omitempty"`
 	StripWarnings       []StripWarning          `json:"strip_warnings,omitempty"`
+	DedupGroups         []DedupGroupMetadata    `json:"dedup_groups,omitempty"`
 }
 
 // BuildArtifactMetadata constructs artifact metadata from a resolved module tree.
@@ -143,6 +160,9 @@ func BuildArtifactMetadata(tree *ResolvedTree, req *MetadataRequest) (*ArtifactM
 		StrippedBytes:    0,
 		StrippedFiles:    0,
 	}
+	if req.SourcetreePlan != nil {
+		stats.DeduplicatedPackages = len(req.SourcetreePlan.DedupGroups)
+	}
 
 	// Apply strip plan stats if available
 	if req.StripPlan != nil {
@@ -176,6 +196,10 @@ func BuildArtifactMetadata(tree *ResolvedTree, req *MetadataRequest) (*ArtifactM
 	if req.StripPlan != nil {
 		artifact.FilesystemFunctions = req.StripPlan.FilesystemFunctions
 		artifact.StripWarnings = req.StripPlan.Warnings
+	}
+
+	if req.SourcetreePlan != nil {
+		artifact.DedupGroups = buildDedupGroupMetadata(req.SourcetreePlan.DedupGroups)
 	}
 
 	return artifact, nil
@@ -227,13 +251,18 @@ func buildPackageMetadata(packages map[string]*DownloadedPackage) ([]PackageMeta
 		}
 		totalBytes += snapshot.TotalBytes
 		result = append(result, PackageMetadata{
-			ID:             id,
-			PackageAddr:    pkg.PackageAddr,
-			LocalDir:       pkg.LocalDir,
-			DownloadedHash: pkg.ContentHash,
-			FinalHash:      snapshot.Hash,
-			FileCount:      snapshot.FileCount,
-			SizeBytes:      snapshot.TotalBytes,
+			ID:                   id,
+			PackageAddr:          pkg.PackageAddr,
+			LocalDir:             pkg.LocalDir,
+			DownloadedHash:       pkg.ContentHash,
+			FinalHash:            snapshot.Hash,
+			FileCount:            snapshot.FileCount,
+			SizeBytes:            snapshot.TotalBytes,
+			SourcetreeID:         pkg.SourcetreeID,
+			CanonicalPackageAddr: pkg.CanonicalPackageAddr,
+			PackageAddrs:         append([]string(nil), pkg.PackageAddrs...),
+			ModuleKeys:           append([]string(nil), pkg.ModuleKeys...),
+			Deduplicated:         pkg.Deduplicated,
 		})
 	}
 	return result, totalBytes, nil
@@ -248,6 +277,21 @@ func countSourceTypes(nodes []*ModuleNode) map[string]int {
 		counts[node.Source.Type.String()]++
 	}
 	return counts
+}
+
+// buildDedupGroupMetadata converts internal dedup groups to their metadata representation.
+func buildDedupGroupMetadata(groups []DedupGroup) []DedupGroupMetadata {
+	out := make([]DedupGroupMetadata, 0, len(groups))
+	for _, group := range groups {
+		out = append(out, DedupGroupMetadata{
+			ID:                   group.ID,
+			FinalHash:            group.FinalHash,
+			CanonicalPackageAddr: group.CanonicalPackageAddr,
+			PackageAddrs:         append([]string(nil), group.PackageAddrs...),
+			ModuleKeys:           append([]string(nil), group.ModuleKeys...),
+		})
+	}
+	return out
 }
 
 // WriteMetadataFile writes metadata as indented JSON to the given path.

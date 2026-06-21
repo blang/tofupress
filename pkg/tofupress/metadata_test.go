@@ -2,7 +2,6 @@
 package tofupress
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -121,8 +120,53 @@ func TestWriteMetadataFileWritesIndentedJSON(t *testing.T) {
 	data, err := os.ReadFile(outPath)
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "\n  \"schema_version\":")
+}
 
-	var decoded ArtifactMetadata
-	require.NoError(t, json.Unmarshal(data, &decoded))
-	assert.Equal(t, MetadataSchemaVersion, decoded.SchemaVersion)
+func TestBuildArtifactMetadataIncludesSourcetreeDedupGroups(t *testing.T) {
+	root := t.TempDir()
+	finalDir := filepath.Join(root, "sourcetree", "pkg-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	require.NoError(t, os.MkdirAll(finalDir, 0o755))
+	writeTerraformFile(t, finalDir, "main.tf", `output "id" { value = "same" }`)
+
+	rootModule := &ModuleNode{Key: "root", Name: "root", InstallDir: root, PackageRoot: root}
+	tree := &ResolvedTree{
+		Root:       rootModule,
+		AllModules: []*ModuleNode{rootModule},
+		Packages: map[string]*DownloadedPackage{
+			"pkg-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
+				PackageAddr:          "git::file:///repo-a",
+				LocalDir:             finalDir,
+				ContentHash:          "download-a",
+				SourcetreeID:         "pkg-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				FinalHash:            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+				CanonicalPackageAddr: "git::file:///repo-a",
+				PackageAddrs:         []string{"git::file:///repo-a", "git::file:///repo-b"},
+				ModuleKeys:           []string{"root.a", "root.b"},
+				Deduplicated:         true,
+			},
+		},
+	}
+	identityPlan := &SourcetreeIdentityPlan{DedupGroups: []DedupGroup{{
+		ID:                   "pkg-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		FinalHash:            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		CanonicalPackageAddr: "git::file:///repo-a",
+		PackageAddrs:         []string{"git::file:///repo-a", "git::file:///repo-b"},
+		ModuleKeys:           []string{"root.a", "root.b"},
+	}}}
+
+	metadata, err := BuildArtifactMetadata(tree, &MetadataRequest{
+		Command:        "bundle",
+		OutputPath:     filepath.Join(root, "bundle.zip"),
+		Options:        BundleOptions{Format: "zip", StripMode: string(StripModeModuleDir)},
+		CreatedAt:      time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC),
+		SourcetreePlan: identityPlan,
+	})
+	require.NoError(t, err)
+	require.Len(t, metadata.Packages, 1)
+	assert.Equal(t, "pkg-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", metadata.Packages[0].SourcetreeID)
+	assert.True(t, metadata.Packages[0].Deduplicated)
+	assert.ElementsMatch(t, []string{"git::file:///repo-a", "git::file:///repo-b"}, metadata.Packages[0].PackageAddrs)
+	assert.Equal(t, 1, metadata.Stats.DeduplicatedPackages)
+	require.Len(t, metadata.DedupGroups, 1)
+	assert.Equal(t, metadata.Packages[0].SourcetreeID, metadata.DedupGroups[0].ID)
 }

@@ -25,12 +25,10 @@ BINARY="$PROJECT_DIR/tofupress"
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
 NC='\033[0m'
 
 PASS=0
 FAIL=0
-SKIP=0
 
 # --- Helpers ---
 
@@ -254,64 +252,22 @@ test_resolve_cross_boundary_error() {
 
 # --- Known Issues (expected failures, documented in QA report) ---
 
-test_known_issue_symlink_fails() {
-    # Known: symlinks in local modules may fail (QA Finding #1)
-    echo -e "${YELLOW}KNOWN ISSUE${NC}: Symlink resolution (QA Finding #1)" >&2
-    set +e
-    local output
-    output=$("$BINARY" resolve "$FIXTURES_DIR/symlink-test" 2>&1)
-    local rc=$?
-    set -e
-    if echo "$output" | grep -q "no such file"; then
-        echo -e "${YELLOW}  -> Confirmed: symlink issue present${NC}" >&2
-        ((SKIP++)) || true
-    elif [ $rc -eq 0 ]; then
-        echo -e "${GREEN}  -> Fixed! Symlinks now resolve correctly${NC}" >&2
-        ((PASS++)) || true
-    else
-        echo -e "${YELLOW}  -> Different error: $(echo "$output" | head -1)${NC}" >&2
-        ((SKIP++)) || true
-    fi
+test_resolve_symlink_module() {
+    assert_output_contains "Resolve: symlinked module resolved" \
+        "$BINARY resolve $FIXTURES_DIR/symlink-test" \
+        "Total modules: 2"
 }
 
-test_known_issue_heredoc_fails() {
-    # Known: heredoc source syntax unsupported (QA Finding #3)
-    echo -e "${YELLOW}KNOWN ISSUE${NC}: Heredoc source unsupported (QA Finding #3)" >&2
-    set +e
-    local output
-    output=$("$BINARY" resolve "$FIXTURES_DIR/heredoc" 2>&1)
-    local rc=$?
-    set -e
-    if echo "$output" | grep -q "no such file"; then
-        echo -e "${YELLOW}  -> Confirmed: heredoc issue present${NC}" >&2
-        ((SKIP++)) || true
-    elif [ $rc -eq 0 ]; then
-        echo -e "${GREEN}  -> Fixed! Heredoc sources now work${NC}" >&2
-        ((PASS++)) || true
-    else
-        echo -e "${YELLOW}  -> Different error: $(echo "$output" | head -1)${NC}" >&2
-        ((SKIP++)) || true
-    fi
+test_resolve_heredoc_source() {
+    assert_output_contains "Resolve: heredoc source resolved" \
+        "$BINARY resolve $FIXTURES_DIR/heredoc" \
+        "Total modules: 2"
 }
 
-test_known_issue_duplicate_names_silent() {
-    # Known: duplicate module names silently accepted (QA Finding #4)
-    echo -e "${YELLOW}KNOWN ISSUE${NC}: Duplicate module names silently accepted (QA Finding #4)" >&2
-    set +e
-    local output
-    output=$("$BINARY" resolve "$FIXTURES_DIR/dup-name" 2>&1)
-    local rc=$?
-    set -e
-    if [ $rc -eq 0 ] && echo "$output" | grep -q "Total modules: 3"; then
-        echo -e "${YELLOW}  -> Confirmed: duplicate names accepted (should error)${NC}" >&2
-        ((SKIP++)) || true
-    elif [ $rc -ne 0 ]; then
-        echo -e "${GREEN}  -> Fixed! Duplicate names now rejected${NC}" >&2
-        ((PASS++)) || true
-    else
-        echo -e "${YELLOW}  -> Unexpected state${NC}" >&2
-        ((SKIP++)) || true
-    fi
+test_resolve_duplicate_names_error() {
+    assert_failure "Resolve: duplicate module names rejected" \
+        "$BINARY resolve $FIXTURES_DIR/dup-name" \
+        "duplicate module"
 }
 
 # --- Bundle Tests ---
@@ -500,19 +456,6 @@ test_cli_debug_flag_accepted() {
         "$BINARY resolve $FIXTURES_DIR/simple-module --debug"
 }
 
-# --- Temp Dir Leak Check ---
-
-# NOTE: The original temp dir leak test was a false positive — it counted all
-# /tmp/tofupress-* entries including the QA fixture directory itself and
-# pre-existing test artifacts. resolveSource() correctly calls cleanup() in
-# all error paths. Temp dir cleanup is implicitly validated by Go test
-# infrastructure (testing.TempDir()).
-test_temp_dir_not_leaked_on_success() {
-    echo -e "${YELLOW}SKIP${NC}: Temp leak test deprecated (false positive — counted fixture dirs)" >&2
-    ((SKIP++)) || true
-    known_test_names+=("Temp: no new leaks on successful run")
-}
-
 # --- Main ---
 
 main() {
@@ -535,8 +478,8 @@ main() {
 
     echo "" >&2
     echo "========================================" >&2
-    echo -e "Results: ${GREEN}$PASS passed${NC}, ${RED}$FAIL failed${NC}, ${YELLOW}$SKIP known issues${NC}" >&2
-    echo "Total: $((PASS + FAIL + SKIP)) tests ($count functions)" >&2
+    echo -e "Results: ${GREEN}$PASS passed${NC}, ${RED}$FAIL failed${NC}" >&2
+    echo "Total: $((PASS + FAIL)) tests ($count functions)" >&2
     echo "Temp output kept at: $OUTPUT_DIR" >&2
     echo "========================================" >&2
 

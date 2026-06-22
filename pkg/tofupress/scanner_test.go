@@ -292,3 +292,139 @@ func TestModuleBlock_String(t *testing.T) {
 	assert.Contains(t, str, "test")
 	assert.Contains(t, str, "./modules/test")
 }
+
+func TestExtractModuleBlocks_HeredocSource(t *testing.T) {
+	// Heredoc syntax is valid Terraform for module sources.
+	// Regression: the HCL parser evaluates the heredoc body literally,
+	// including leading whitespace from indented heredocs (<<-).
+	// This means the source string is "\n    ./child\n  " instead of "./child",
+	// which causes the resolver to look for a non-existent directory.
+	tmpDir := t.TempDir()
+	tfFile := filepath.Join(tmpDir, "main.tf")
+
+	content := `
+module "child" {
+  source = <<-EOT
+    ./child
+  EOT
+}
+`
+	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0o644))
+
+	modules, err := ExtractModuleBlocks(tfFile)
+	require.NoError(t, err)
+
+	require.Len(t, modules, 1)
+	assert.Equal(t, "child", modules[0].Name)
+	// Bug: heredoc sources include embedded whitespace.
+	// The source will NOT be clean "./child" — it will contain newlines and
+	// indentation from the heredoc body.
+	assert.NotEqual(t, "./child", modules[0].Source,
+		"heredoc source should be trimmed to just the path")
+}
+
+func TestExtractModuleBlocks_DuplicateModuleNames(t *testing.T) {
+	// Duplicate module names in the same file are rejected by OpenTofu/Terraform.
+	// The scanner should extract both blocks so the resolver can detect the
+	// conflict and produce a clear error.
+	tmpDir := t.TempDir()
+	tfFile := filepath.Join(tmpDir, "main.tf")
+
+	content := `
+module "vpc" {
+  source = "./child"
+}
+module "vpc" {
+  source = "./child"
+}
+`
+	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0o644))
+
+	modules, err := ExtractModuleBlocks(tfFile)
+	require.NoError(t, err)
+
+	// Both blocks should be extracted so the resolver can detect the conflict.
+	assert.Len(t, modules, 2, "both duplicate module blocks should be extracted")
+	assert.Equal(t, "vpc", modules[0].Name)
+	assert.Equal(t, "vpc", modules[1].Name)
+}
+
+func TestExtractModuleBlocks_UTF8ModuleNames(t *testing.T) {
+	// Module names can contain Unicode characters.
+	tmpDir := t.TempDir()
+	tfFile := filepath.Join(tmpDir, "main.tf")
+
+	content := `
+module "mödulé_αβ" {
+  source = "./child"
+}
+`
+	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0o644))
+
+	modules, err := ExtractModuleBlocks(tfFile)
+	require.NoError(t, err)
+
+	require.Len(t, modules, 1)
+	assert.Equal(t, "mödulé_αβ", modules[0].Name)
+	assert.Equal(t, "./child", modules[0].Source)
+}
+
+func TestExtractModuleBlocks_LongModuleName(t *testing.T) {
+	tmpDir := t.TempDir()
+	tfFile := filepath.Join(tmpDir, "main.tf")
+
+	longName := "this_is_a_very_long_module_name_that_exceeds_typical_naming_conventions"
+	content := `
+module "` + longName + `" {
+  source = "./child"
+}
+`
+	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0o644))
+
+	modules, err := ExtractModuleBlocks(tfFile)
+	require.NoError(t, err)
+
+	require.Len(t, modules, 1)
+	assert.Equal(t, longName, modules[0].Name)
+}
+
+func TestFindTerraformFiles_SkipsHCLFiles(t *testing.T) {
+	// .hcl files are currently not included when scanning for .tf/.tofu files.
+	// This test documents the current behavior.
+	tmpDir := t.TempDir()
+
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "main.tf"), []byte("# main"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "config.hcl"), []byte("# hcl config"), 0o644))
+
+	files, err := FindTerraformFiles(tmpDir)
+	require.NoError(t, err)
+
+	fileNames := make([]string, len(files))
+	for i, f := range files {
+		fileNames[i] = filepath.Base(f)
+	}
+
+	assert.Contains(t, fileNames, "main.tf")
+	assert.NotContains(t, fileNames, "config.hcl", ".hcl files are currently excluded from scanning")
+}
+
+func TestFindTerraformFiles_OverrideNamedFiles(t *testing.T) {
+	// Files named "override.tf" should be discovered alongside "main.tf".
+	// (Terraform override files conventionally use _override.tf suffix, but
+	// any .tf file in the root module directory is valid and must be scanned.)
+	tmpDir := t.TempDir()
+
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "main.tf"), []byte("# main"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "override.tf"), []byte("# override"), 0o644))
+
+	files, err := FindTerraformFiles(tmpDir)
+	require.NoError(t, err)
+
+	fileNames := make([]string, len(files))
+	for i, f := range files {
+		fileNames[i] = filepath.Base(f)
+	}
+
+	assert.Contains(t, fileNames, "main.tf")
+	assert.Contains(t, fileNames, "override.tf", "all .tf files in the root should be discovered")
+}

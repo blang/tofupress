@@ -108,6 +108,9 @@ build-all:
         tar -C "{{dist_dir}}" -czf "$output.tar.gz" "$binary"
     done
 
+qa:
+    bash .pi/qa-tests.sh
+
 prek-install:
     prek install
 

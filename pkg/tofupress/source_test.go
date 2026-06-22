@@ -486,6 +486,68 @@ func TestSourceType_String(t *testing.T) {
 	}
 }
 
+func TestClassifySource_HostShorthand(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		pwd  string
+		want ModuleSource
+	}{
+		{
+			name: "github shorthand basic",
+			raw:  "github.com/user/repo",
+			pwd:  "",
+			want: ModuleSource{
+				Raw:         "github.com/user/repo",
+				Type:        SourceGit,
+				PackageAddr: "git::https://github.com/user/repo.git",
+			},
+		},
+		{
+			name: "github shorthand with ref",
+			raw:  "github.com/user/repo?ref=v1.0",
+			pwd:  "",
+			want: ModuleSource{
+				Raw:         "github.com/user/repo?ref=v1.0",
+				Type:        SourceGit,
+				PackageAddr: "git::https://github.com/user/repo.git?ref=v1.0",
+				Ref:         "v1.0",
+			},
+		},
+		{
+			name: "bitbucket shorthand",
+			raw:  "bitbucket.org/user/repo",
+			pwd:  "",
+			want: ModuleSource{
+				Raw:         "bitbucket.org/user/repo",
+				Type:        SourceGit,
+				PackageAddr: "git::https://bitbucket.org/user/repo.git",
+			},
+		},
+		{
+			name: "github shorthand with subdir",
+			raw:  "github.com/user/repo//modules/vpc",
+			pwd:  "",
+			want: ModuleSource{
+				Raw:         "github.com/user/repo//modules/vpc",
+				Type:        SourceGit,
+				PackageAddr: "git::https://github.com/user/repo.git",
+				SubDir:      "modules/vpc",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ClassifySource(tt.raw, tt.pwd)
+			assert.Equal(t, tt.want.Type, got.Type)
+			assert.Equal(t, tt.want.PackageAddr, got.PackageAddr)
+			assert.Equal(t, tt.want.SubDir, got.SubDir)
+			assert.Equal(t, tt.want.Ref, got.Ref)
+		})
+	}
+}
+
 func TestClassifySource_Integration(t *testing.T) {
 	// Test real-world examples from tf-test1 and tf-test2
 	tests := []struct {

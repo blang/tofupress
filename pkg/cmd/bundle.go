@@ -32,7 +32,8 @@ func init() {
 	bundleCmd.Flags().String("format", "auto", "Bundle format: auto, zip, tar.gz, tar.xz (auto detects from output file extension)")
 	bundleCmd.Flags().Bool("oci-compliant", false, "Generate OCI-compliant bundle (no sourcetree metadata, inlined modules)")
 	bundleCmd.Flags().String("metadata-out", "", "Write bundle metadata JSON to a separate path")
-	bundleCmd.Flags().String("strip", "module-dir", "Strip mode: none, module-dir (safe default), or config-only")
+	bundleCmd.Flags().String("strip", "module-dir", "Strip mode: none, module-dir (safe default), config-only, or tf-only (alias for config-only)")
+	bundleCmd.Flags().String("vendor-dir", "sourcetree", "Vendored modules directory name")
 }
 
 //
@@ -60,6 +61,10 @@ func runBundle(cmd *cobra.Command, args []string) error {
 	// Resolve modules in temp directory
 	resolver := tofupress.NewResolver()
 	resolver.PackageRoot = packageRoot // Set package boundary for local path enforcement
+	vendorDir, _ := cmd.Flags().GetString("vendor-dir")
+	if vendorDir != "" {
+		resolver.VendorDir = vendorDir
+	}
 	resolver.Progress = func(event *tofupress.ProgressEvent) {
 		if event == nil {
 			return

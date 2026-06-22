@@ -51,6 +51,12 @@ func ClassifySource(raw, pwd string) ModuleSource {
 		return parseHTTPSource(raw)
 	}
 
+	// 3.5 Host-based shorthand (e.g., github.com/user/repo)
+	// Must appear before the registry check because these look like 3-part registry sources.
+	if isHostShorthand(raw) {
+		return parseGitSource(hostShorthandToGit(raw))
+	}
+
 	// 4. Registry module (3-part: namespace/name/provider)
 	if isRegistrySource(raw) {
 		return parseRegistrySource(raw)
@@ -206,6 +212,48 @@ func IsAbsoluteSource(raw string) bool {
 // IsLocalSource returns true if the source is a local path (starts with ./ or ../).
 func IsLocalSource(raw string) bool {
 	return strings.HasPrefix(raw, "./") || strings.HasPrefix(raw, "../")
+}
+
+// isHostShorthand returns true if raw looks like a host-based git shorthand.
+// Examples: github.com/user/repo, bitbucket.org/user/repo
+// These look like 3-part registry sources but the first segment is a hostname.
+func isHostShorthand(raw string) bool {
+	clean := raw
+
+	// Strip query parameters
+	if idx := strings.Index(clean, "?"); idx > -1 {
+		clean = clean[:idx]
+	}
+
+	// Strip //subdir
+	if idx := strings.Index(clean, "//"); idx > -1 {
+		clean = clean[:idx]
+	}
+
+	parts := strings.Split(clean, "/")
+	return len(parts) == 3 && strings.Contains(parts[0], ".")
+}
+
+// hostShorthandToGit transforms a host-based shorthand (github.com/user/repo)
+// into a proper git source URL (git::https://github.com/user/repo.git).
+func hostShorthandToGit(raw string) string {
+	pkgAddr, subDir := SplitPackageSubdir(raw)
+
+	// Insert .git before query string if present
+	base := pkgAddr
+	query := ""
+	if idx := strings.Index(pkgAddr, "?"); idx > -1 {
+		base = pkgAddr[:idx]
+		query = pkgAddr[idx:]
+	}
+
+	gitURL := "git::https://" + base + ".git" + query
+
+	if subDir != "" {
+		gitURL += "//" + subDir
+	}
+
+	return gitURL
 }
 
 // isRegistrySource returns true if the source looks like a registry module.

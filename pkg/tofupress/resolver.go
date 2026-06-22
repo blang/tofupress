@@ -51,6 +51,9 @@ type Resolver struct {
 	fetcher     *Fetcher         // 8 bytes (ptr)
 	PackageRoot string           // 16 bytes (data ptr + length)
 	Concurrency int              // 8 bytes
+	MaxDepth    int              // 0 = unlimited, max depth of module tree
+	MaxModules  int              // 0 = unlimited, max number of modules
+	VendorDir   string           // Custom vendored directory name (default: "sourcetree")
 }
 
 // NewResolver creates a new Resolver with default configuration.
@@ -155,7 +158,12 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 		Packages:   make(map[string]*DownloadedPackage),
 	}
 
-	sourcetreeDir := filepath.Join(rootDir, "sourcetree")
+	vendorDirName := r.VendorDir
+	if vendorDirName == "" {
+		vendorDirName = "sourcetree"
+	}
+	sourcetreeDir := filepath.Join(rootDir, vendorDirName)
+	tree.VendorDir = vendorDirName
 	if err := os.MkdirAll(sourcetreeDir, 0o755); err != nil { //nolint:gosec // G301: 0755 is standard for directories
 		return nil, fmt.Errorf("failed to create sourcetree directory: %w", err)
 	}
@@ -164,6 +172,7 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 	downloadedPackages := make(map[string]string) // packageAddr -> localPath
 	contentHashes := make(map[string]string)      // contentHash -> localPath
 	visitedPaths := make(map[string]bool)         // Track visited local paths to prevent cycles
+	visitedModules := make(map[string]bool)       // Track module keys to detect cycles
 
 	// BFS queue: each item is a module to process
 	type queueItem struct {
@@ -264,7 +273,14 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 						child.IsLocal = true
 						child.IsRemote = false
 
-						// Cycle detection: skip if already visited
+						// Cycle detection: check if child's install dir matches any ancestor
+						for ancestor := item.node; ancestor != nil; ancestor = ancestor.Parent {
+							if ancestor.InstallDir == installDir {
+								return nil, fmt.Errorf("cycle detected: module %q references ancestor module %q", child.Key, ancestor.Key)
+							}
+						}
+
+						// Deduplication: skip if already visited (shared module, not a cycle)
 						if visitedPaths[installDir] {
 							// Add child to parent and tree but don't process again
 							item.node.Children = append(item.node.Children, child)
@@ -272,6 +288,22 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 							continue
 						}
 						visitedPaths[installDir] = true
+
+						// Check depth limit
+						if r.MaxDepth > 0 && child.Depth() > r.MaxDepth {
+							return nil, fmt.Errorf("maximum depth %d exceeded at module %s", r.MaxDepth, child.Key)
+						}
+
+						// Check module count limit
+						if r.MaxModules > 0 && len(tree.AllModules) >= r.MaxModules {
+							return nil, fmt.Errorf("module limit %d exceeded at module %s", r.MaxModules, child.Key)
+						}
+
+						// Cycle detection by module key
+						if visitedModules[child.Key] {
+							return nil, fmt.Errorf("cycle detected: module %q appears multiple times in the dependency tree", child.Key)
+						}
+						visitedModules[child.Key] = true
 
 						// Add to queue for processing
 						queue = append(queue, queueItem{node: child, dir: installDir})
@@ -423,6 +455,22 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 					if err := RewriteModuleSource(info.tfFile, info.modName, newSource); err != nil {
 						return nil, fmt.Errorf("failed to rewrite source for module %s: %w", info.modName, err)
 					}
+
+					// Check depth limit
+					if r.MaxDepth > 0 && info.child.Depth() > r.MaxDepth {
+						return nil, fmt.Errorf("maximum depth %d exceeded at module %s", r.MaxDepth, info.child.Key)
+					}
+
+					// Check module count limit
+					if r.MaxModules > 0 && len(tree.AllModules) >= r.MaxModules {
+						return nil, fmt.Errorf("module limit %d exceeded at module %s", r.MaxModules, info.child.Key)
+					}
+
+					// Cycle detection by module key
+					if visitedModules[info.child.Key] {
+						return nil, fmt.Errorf("cycle detected: module %q appears multiple times in the dependency tree", info.child.Key)
+					}
+					visitedModules[info.child.Key] = true
 
 					// Add to queue for processing
 					queue = append(queue, queueItem{node: info.child, dir: installDir})

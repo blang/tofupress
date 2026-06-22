@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -438,4 +439,155 @@ module "vpc_by_sha" {
 	// This test will fail in RED phase, then pass after GREEN implementation
 	assert.Len(t, tree.Packages, 1,
 		"Identical content from different refs should be deduplicated into 1 package")
+}
+
+func TestResolver_CycleDetection(t *testing.T) {
+	// Create a module tree with a cycle: A -> B -> A, all within the same package
+	tmpDir := t.TempDir()
+
+	writeTerraformFile(t, tmpDir, "main.tf", `
+module "a" {
+  source = "./a"
+}
+`)
+
+	// Module A references module B
+	aDir := filepath.Join(tmpDir, "a")
+	require.NoError(t, os.MkdirAll(aDir, 0o755))
+	writeTerraformFile(t, aDir, "main.tf", `
+module "b" {
+  source = "../b"
+}
+`)
+
+	// Module B references back to module A (cycle!)
+	bDir := filepath.Join(tmpDir, "b")
+	require.NoError(t, os.MkdirAll(bDir, 0o755))
+	writeTerraformFile(t, bDir, "main.tf", `
+module "a_back" {
+  source = "../a"
+}
+`)
+
+	resolver := NewResolver()
+	resolver.PackageRoot = tmpDir // Allow cross-sibling references within the same package
+	_, err := resolver.Resolve(context.Background(), tmpDir)
+	require.Error(t, err, "cycle detection should reject circular module references")
+	assert.Contains(t, err.Error(), "cycle")
+}
+
+func TestResolver_MaxDepth(t *testing.T) {
+	// Create a deep chain of nested modules, all within the same package
+	tmpDir := t.TempDir()
+
+	writeTerraformFile(t, tmpDir, "main.tf", `
+module "l1" {
+  source = "./l1"
+}
+`)
+
+	// Build a nested chain: l1 -> l2 -> l3 -> l4 -> l5 -> l6 -> l7
+	// Each level contains a module reference to ./next_level
+	currentDir := tmpDir
+	for i := 1; i <= 6; i++ {
+		thisName := fmt.Sprintf("l%d", i)
+		nextName := fmt.Sprintf("l%d", i+1)
+		thisDir := filepath.Join(currentDir, thisName)
+		require.NoError(t, os.MkdirAll(thisDir, 0o755))
+
+		if i < 6 {
+			writeTerraformFile(t, thisDir, "main.tf", fmt.Sprintf(`
+module "%s" {
+  source = "./%s"
+}
+`, nextName, nextName))
+		} else {
+			writeTerraformFile(t, thisDir, "main.tf", `# leaf`)
+		}
+		// Create the next level directory
+		nextDir := filepath.Join(thisDir, nextName)
+		require.NoError(t, os.MkdirAll(nextDir, 0o755))
+		writeTerraformFile(t, nextDir, "main.tf", `# leaf`)
+		currentDir = thisDir
+	}
+
+	resolver := NewResolver()
+	resolver.PackageRoot = tmpDir
+	resolver.MaxDepth = 3
+	_, err := resolver.Resolve(context.Background(), tmpDir)
+	require.Error(t, err, "should reject modules beyond max depth")
+	assert.Contains(t, err.Error(), "depth")
+}
+
+func TestResolver_MaxModules(t *testing.T) {
+	// Create many sibling modules
+	tmpDir := t.TempDir()
+
+	// Write root with 10 local modules
+	var rootTF strings.Builder
+	for i := range 10 {
+		fmt.Fprintf(&rootTF, "\nmodule \"mod%d\" {\n  source = \"./modules/mod%d\"\n}\n", i, i)
+	}
+	writeTerraformFile(t, tmpDir, "main.tf", rootTF.String())
+
+	// Create each module
+	for i := range 10 {
+		modDir := filepath.Join(tmpDir, "modules", fmt.Sprintf("mod%d", i))
+		require.NoError(t, os.MkdirAll(modDir, 0o755))
+		writeTerraformFile(t, modDir, "main.tf", `# empty`)
+	}
+
+	resolver := NewResolver()
+	resolver.MaxModules = 5
+	_, err := resolver.Resolve(context.Background(), tmpDir)
+	require.Error(t, err, "should reject when module count exceeds limit")
+	assert.Contains(t, err.Error(), "module")
+}
+
+func TestResolver_NoCycle_SharedModule(t *testing.T) {
+	// Verify that shared modules (same module referenced from two parents, but at
+	// different install paths) are NOT flagged as cycles.
+	tmpDir := t.TempDir()
+
+	writeTerraformFile(t, tmpDir, "main.tf", `
+module "a" {
+  source = "./modules/a"
+}
+
+module "b" {
+  source = "./modules/b"
+}
+`)
+
+	// Module A references a nested module in its own tree
+	aDir := filepath.Join(tmpDir, "modules", "a")
+	require.NoError(t, os.MkdirAll(aDir, 0o755))
+	writeTerraformFile(t, aDir, "main.tf", `
+module "nested" {
+  source = "./nested"
+}
+`)
+	aNestedDir := filepath.Join(aDir, "nested")
+	require.NoError(t, os.MkdirAll(aNestedDir, 0o755))
+	writeTerraformFile(t, aNestedDir, "main.tf", `# leaf`)
+
+	// Module B also references a nested module (different path, no cycle)
+	bDir := filepath.Join(tmpDir, "modules", "b")
+	require.NoError(t, os.MkdirAll(bDir, 0o755))
+	writeTerraformFile(t, bDir, "main.tf", `
+module "nested" {
+  source = "./nested"
+}
+`)
+	bNestedDir := filepath.Join(bDir, "nested")
+	require.NoError(t, os.MkdirAll(bNestedDir, 0o755))
+	writeTerraformFile(t, bNestedDir, "main.tf", `# leaf`)
+
+	resolver := NewResolver()
+	tree, err := resolver.Resolve(context.Background(), tmpDir)
+	require.NoError(t, err)
+	require.NotNil(t, tree)
+
+	// Should have root + a + a.nested + b + b.nested = 5 modules
+	assert.Len(t, tree.AllModules, 5)
 }

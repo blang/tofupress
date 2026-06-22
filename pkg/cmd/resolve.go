@@ -37,6 +37,19 @@ func runResolve(cmd *cobra.Command, args []string) error {
 
 	// Resolve modules in temp directory
 	resolver := tofupress.NewResolver()
+	resolver.Progress = func(event *tofupress.ProgressEvent) {
+		if event == nil {
+			return
+		}
+		switch event.Type {
+		case "resolving":
+			fmt.Fprintf(cmd.ErrOrStderr(), "  Resolving module: %s\n", event.ModuleName) //nolint:errcheck // stderr writes are best-effort
+		case "downloading":
+			fmt.Fprintf(cmd.ErrOrStderr(), "  ⬇ Downloading: %s from %s\n", event.ModuleName, event.Source) //nolint:errcheck // stderr writes are best-effort
+		case "downloaded":
+			fmt.Fprintf(cmd.ErrOrStderr(), "  ✓ Downloaded: %s\n", event.ModuleName) //nolint:errcheck // stderr writes are best-effort
+		}
+	}
 	tree, err := resolver.Resolve(cmd.Context(), workDir)
 	if err != nil {
 		return fmt.Errorf("failed to resolve modules: %w", err)

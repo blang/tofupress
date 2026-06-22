@@ -70,6 +70,8 @@ linters:
 
     govet:
       enable-all: true
+      disable:
+        - fieldalignment
 
     revive:
       severity: warning

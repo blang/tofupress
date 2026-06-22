@@ -33,6 +33,17 @@ const (
 	dirNameSourceTree = "sourcetree"
 )
 
+// defaultVendorDir is the fallback vendor directory name.
+const defaultVendorDir = "sourcetree"
+
+// vendorDirName returns the vendored modules directory name for a tree.
+func vendorDirName(tree *ResolvedTree) string {
+	if tree != nil && tree.VendorDir != "" {
+		return tree.VendorDir
+	}
+	return defaultVendorDir
+}
+
 // ParseBundleFormat parses a format string into a BundleFormat.
 func ParseBundleFormat(s string) (BundleFormat, error) {
 	switch strings.ToLower(s) {
@@ -73,6 +84,7 @@ type Bundler struct {
 	OCICompliant bool              // When true, creates OCI-compliant bundle without sourcetree/ metadata
 	Metadata     *ArtifactMetadata // Optional metadata to embed in the archive
 	StripPlan    *StripPlan        // Optional include/exclude plan for safe stripping
+	VendorDir    string            // Vendored modules directory name (from tree.VendorDir)
 }
 
 // NewBundler creates a new Bundler with the specified format.
@@ -85,6 +97,9 @@ func (b *Bundler) Bundle(tree *ResolvedTree, outputPath string) error {
 	if tree == nil {
 		return fmt.Errorf("tree is nil")
 	}
+
+	// Use the tree's vendor dir, falling back to default
+	b.VendorDir = vendorDirName(tree)
 
 	// Aggregate pressed modules before creating the bundle
 	if err := b.aggregatePressedModules(tree); err != nil {
@@ -186,7 +201,7 @@ func (b *Bundler) bundleTarGZ(tree *ResolvedTree, outputPath string) error {
 
 	for _, pkg := range tree.Packages {
 		uniqueID := filepath.Base(pkg.LocalDir)
-		prefix := filepath.Join("sourcetree", uniqueID)
+		prefix := filepath.Join(vendorDirName(tree), uniqueID)
 		if err := b.addDirectoryToTar(tarWriter, pkg.LocalDir, prefix, tree.Packages); err != nil {
 			return fmt.Errorf("failed to add package %s: %w", pkg.PackageAddr, err)
 		}
@@ -266,7 +281,7 @@ func (b *Bundler) bundleTarXZ(tree *ResolvedTree, outputPath string) error {
 
 	for _, pkg := range tree.Packages {
 		uniqueID := filepath.Base(pkg.LocalDir)
-		prefix := filepath.Join("sourcetree", uniqueID)
+		prefix := filepath.Join(vendorDirName(tree), uniqueID)
 		if err := b.addDirectoryToTar(tarWriter, pkg.LocalDir, prefix, tree.Packages); err != nil {
 			return fmt.Errorf("failed to add package %s: %w", pkg.PackageAddr, err)
 		}
@@ -336,7 +351,7 @@ func (b *Bundler) bundleZIP(tree *ResolvedTree, outputPath string) error {
 
 	for _, pkg := range tree.Packages {
 		uniqueID := filepath.Base(pkg.LocalDir)
-		prefix := filepath.Join("sourcetree", uniqueID)
+		prefix := filepath.Join(vendorDirName(tree), uniqueID)
 		if err := b.addDirectoryToZip(zipWriter, pkg.LocalDir, prefix, tree.Packages); err != nil {
 			return fmt.Errorf("failed to add package %s: %w", pkg.PackageAddr, err)
 		}
@@ -364,7 +379,7 @@ func (b *Bundler) addDirectoryToTar(tw *tar.Writer, srcDir, prefix string, packa
 
 		// Only skip sourcetree/ when packages will be added separately (non-empty packages map)
 		// This prevents duplication in first bundle, but preserves sourcetree/ in nested bundles
-		if info.IsDir() && info.Name() == "sourcetree" && len(packages) > 0 {
+		if info.IsDir() && info.Name() == b.VendorDir && len(packages) > 0 {
 			return filepath.SkipDir
 		}
 
@@ -432,7 +447,7 @@ func (b *Bundler) addDirectoryToZip(zw *zip.Writer, srcDir, prefix string, packa
 
 		// Only skip sourcetree/ when packages will be added separately (non-empty packages map)
 		// This prevents duplication in first bundle, but preserves sourcetree/ in nested bundles
-		if info.IsDir() && info.Name() == "sourcetree" && len(packages) > 0 {
+		if info.IsDir() && info.Name() == b.VendorDir && len(packages) > 0 {
 			return filepath.SkipDir
 		}
 

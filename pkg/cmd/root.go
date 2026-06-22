@@ -64,4 +64,5 @@ func init() {
 	rootCmd.AddCommand(resolveCmd)
 	rootCmd.AddCommand(bundleCmd)
 	rootCmd.AddCommand(metadataCmd)
+	rootCmd.AddCommand(versionCmd)
 }

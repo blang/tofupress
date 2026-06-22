@@ -28,7 +28,7 @@ func ParseStripMode(raw string) (StripMode, error) {
 	case string(StripModeConfigOnly), "tf-only":
 		return StripModeConfigOnly, nil
 	default:
-		return "", fmt.Errorf("unsupported strip mode %q (use none, module-dir, or config-only)", raw)
+		return "", fmt.Errorf("unsupported strip mode %q (use none, module-dir, config-only, or tf-only)", raw)
 	}
 }
 

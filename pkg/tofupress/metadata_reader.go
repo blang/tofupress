@@ -14,9 +14,16 @@ import (
 
 // ReadMetadataFromArtifact reads metadata from a supported archive format.
 func ReadMetadataFromArtifact(path string) (*ArtifactMetadata, error) {
+	// Early validation: check that the file exists and is readable
+	if info, err := os.Stat(path); err != nil {
+		return nil, fmt.Errorf("artifact not accessible: %w", err)
+	} else if info.IsDir() {
+		return nil, fmt.Errorf("artifact path is a directory, not an archive: %s", path)
+	}
+
 	format, ok := DetectFormatFromPath(path)
 	if !ok {
-		return nil, fmt.Errorf("could not infer artifact format from %q", path)
+		return nil, fmt.Errorf("could not infer artifact format from file extension %q; supported: .zip, .tar.gz, .tar.xz", path)
 	}
 
 	switch format {

@@ -109,7 +109,7 @@ build-all:
     done
 
 qa:
-    bash .pi/qa-tests.sh
+    bash scripts/qa-tests.sh
 
 prek-install:
     prek install

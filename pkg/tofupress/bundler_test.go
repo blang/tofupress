@@ -6,6 +6,7 @@ import (
 	"archive/zip"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,6 +16,8 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/ulikunitz/xz"
 )
+
+const testCustomVendorDir = "_vendor"
 
 func TestBundler_BundleLocalModulesOnly(t *testing.T) {
 	// Create a simple module structure
@@ -808,14 +811,214 @@ module "remote" {
 	writeTerraformFile(t, localDir, "main.tf", `# local module`)
 
 	resolver := NewResolver()
-	resolver.VendorDir = "_vendor"
+	resolver.VendorDir = testCustomVendorDir
 	tree, err := resolver.Resolve(context.Background(), rootDir)
 	require.NoError(t, err)
 	require.NotEmpty(t, tree.Packages)
 
 	bundler := NewBundler(BundleFormatTarGZ)
-	bundler.VendorDir = "_vendor"
+	bundler.VendorDir = testCustomVendorDir
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
 	err = bundler.Bundle(tree, archivePath)
 	require.NoError(t, err) // custom vendor dir doesn't conflict with modules/
+}
+
+// TestBundler_VendorDirConflict_FullIntegrity verifies that when a conflict is
+// resolved via --vendor-dir, ALL modules are preserved in the bundle — both user
+// local modules under modules/ and remote packages under the custom vendor dir.
+// This is a full-scope integrity test: conflict detection, resolution, source
+// rewriting, and file presence.
+func TestBundler_VendorDirConflict_FullIntegrity(t *testing.T) {
+	rootDir := t.TempDir()
+
+	// Root with TWO user local modules under modules/ AND a remote dep
+	writeTerraformFile(t, rootDir, "main.tf", `
+module "local_a" {
+  source = "./modules/local"
+  input  = "alpha"
+}
+
+module "local_b" {
+  source = "./modules/extra"
+  input  = module.local_a.out
+}
+
+module "remote" {
+  source = "git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git?ref=v5.0.0"
+  name   = "test-vpc"
+}
+
+output "result" {
+  value = module.local_b.out
+}
+`)
+
+	// Create user local modules
+	for _, name := range []string{"local", "extra"} {
+		dir := filepath.Join(rootDir, "modules", name)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		writeTerraformFile(t, dir, "main.tf", fmt.Sprintf(`
+variable "input" { type = string }
+output "out" { value = "%s-${var.input}" }
+`, name))
+	}
+
+	// Phase 1: Default vendor dir must error (conflict)
+	resolver := NewResolver()
+	tree, err := resolver.Resolve(context.Background(), rootDir)
+	require.NoError(t, err)
+	require.NotEmpty(t, tree.Packages)
+
+	bundler := NewBundler(BundleFormatTarGZ)
+	err = bundler.Bundle(tree, filepath.Join(t.TempDir(), "conflict.tar.gz"))
+	require.Error(t, err, "default vendor dir must detect conflict")
+	assert.Contains(t, err.Error(), "conflicts with existing content")
+
+	// Phase 2: Re-resolve and bundle with custom vendor dir (fresh root to avoid resolver state)
+	rootDir2 := t.TempDir()
+	writeTerraformFile(t, rootDir2, "main.tf", `
+module "local_a" {
+  source = "./modules/local"
+  input  = "alpha"
+}
+
+module "local_b" {
+  source = "./modules/extra"
+  input  = module.local_a.out
+}
+
+module "remote" {
+  source = "git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git?ref=v5.0.0"
+  name   = "test-vpc"
+}
+
+output "result" {
+  value = module.local_b.out
+}
+`)
+	for _, name := range []string{"local", "extra"} {
+		dir := filepath.Join(rootDir2, "modules", name)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		writeTerraformFile(t, dir, "main.tf", fmt.Sprintf(`
+variable "input" { type = string }
+output "out" { value = "%s-${var.input}" }
+`, name))
+	}
+
+	resolver2 := NewResolver()
+	resolver2.VendorDir = testCustomVendorDir
+	tree2, err := resolver2.Resolve(context.Background(), rootDir2)
+	require.NoError(t, err)
+	require.NotEmpty(t, tree2.Packages)
+
+	bundler2 := NewBundler(BundleFormatTarGZ)
+	bundler2.VendorDir = testCustomVendorDir
+	archivePath := filepath.Join(t.TempDir(), "resolved.tar.gz")
+	err = bundler2.Bundle(tree2, archivePath)
+	require.NoError(t, err, "custom vendor dir must succeed")
+
+	// Phase 3: Extract and verify complete integrity
+	extractDir := t.TempDir()
+	extractTarGz(t, archivePath, extractDir)
+
+	// All user local modules must be present
+	assert.FileExists(t, filepath.Join(extractDir, "main.tf"), "root main.tf missing")
+	assert.FileExists(t, filepath.Join(extractDir, "modules", "local", "main.tf"),
+		"user module local/ missing — silently dropped!")
+	assert.FileExists(t, filepath.Join(extractDir, "modules", "extra", "main.tf"),
+		"user module extra/ missing — silently dropped!")
+
+	// Remote package must be present under custom vendor dir
+	vendorDir := filepath.Join(extractDir, testCustomVendorDir)
+	assert.DirExists(t, vendorDir, "custom vendor dir missing")
+	entries, err := os.ReadDir(vendorDir)
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(entries), 1, "vendor dir must contain at least one package")
+
+	// Verify source rewrites in root main.tf
+	mainContent, err := os.ReadFile(filepath.Join(extractDir, "main.tf"))
+	require.NoError(t, err)
+	mainStr := string(mainContent)
+
+	// User local module sources must be UNCHANGED (relative paths)
+	assert.Contains(t, mainStr, `source = "./modules/local"`,
+		"user local module source must not be rewritten")
+	assert.Contains(t, mainStr, `source = "./modules/extra"`,
+		"user local module source must not be rewritten")
+
+	// Remote module source must be rewritten to custom vendor dir
+	assert.Contains(t, mainStr, `source = "./_vendor/`,
+		"remote module source must point to custom vendor dir")
+
+	// Verify no dangling sourcetree references (old naming)
+	assert.NotContains(t, mainStr, "sourcetree",
+		"bundle must not contain old sourcetree naming")
+
+	// Verify the user module files have correct content (not corrupted by rewrite)
+	localContent, err := os.ReadFile(filepath.Join(extractDir, "modules", "local", "main.tf"))
+	require.NoError(t, err)
+	assert.Contains(t, string(localContent), "local-${var.input}",
+		"user module content must be preserved")
+
+	extraContent, err := os.ReadFile(filepath.Join(extractDir, "modules", "extra", "main.tf"))
+	require.NoError(t, err)
+	assert.Contains(t, string(extraContent), "extra-${var.input}",
+		"user module content must be preserved")
+}
+
+// TestBundler_NoConflict_AllModulesPresent verifies that when the user's local
+// modules are NOT in the vendor directory, the default vendor dir works correctly
+// and all modules (local + remote) are present in the bundle.
+func TestBundler_NoConflict_AllModulesPresent(t *testing.T) {
+	rootDir := t.TempDir()
+
+	// User modules in local_modules/ — does NOT conflict with modules/ vendor dir
+	writeTerraformFile(t, rootDir, "main.tf", `
+module "user_local" {
+  source = "./local_modules/app"
+}
+
+module "remote" {
+  source = "git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git?ref=v5.0.0"
+  name   = "test-vpc"
+}
+`)
+
+	localDir := filepath.Join(rootDir, "local_modules", "app")
+	require.NoError(t, os.MkdirAll(localDir, 0o755))
+	writeTerraformFile(t, localDir, "main.tf", `output "app" { value = "user-local" }`)
+
+	resolver := NewResolver()
+	tree, err := resolver.Resolve(context.Background(), rootDir)
+	require.NoError(t, err)
+	require.NotEmpty(t, tree.Packages, "must have remote packages")
+
+	bundler := NewBundler(BundleFormatTarGZ)
+	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
+	err = bundler.Bundle(tree, archivePath)
+	require.NoError(t, err, "no conflict — default vendor dir must work")
+
+	extractDir := t.TempDir()
+	extractTarGz(t, archivePath, extractDir)
+
+	// User local module must be present
+	assert.FileExists(t, filepath.Join(extractDir, "local_modules", "app", "main.tf"),
+		"user local module missing")
+
+	// Remote packages must be present in vendor dir
+	assert.DirExists(t, filepath.Join(extractDir, "modules"),
+		"vendor dir (modules/) missing")
+
+	entries, err := os.ReadDir(filepath.Join(extractDir, "modules"))
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(entries), 1, "vendor dir must contain packages")
+
+	// Source rewrites must be correct
+	mainContent, err := os.ReadFile(filepath.Join(extractDir, "main.tf"))
+	require.NoError(t, err)
+	mainStr := string(mainContent)
+	assert.Contains(t, mainStr, `source = "./local_modules/app"`,
+		"user module source must be preserved")
+	assert.Contains(t, mainStr, `source = "./modules/`,
+		"remote module source must point to vendor dir")
 }

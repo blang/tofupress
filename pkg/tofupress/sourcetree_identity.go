@@ -262,7 +262,7 @@ func ApplySourcetreeIdentityPlan(tree *ResolvedTree, plan *SourcetreeIdentityPla
 		return err
 	}
 	updateTreePackagePointers(tree, plan)
-	if err := rewriteModuleSourcesToFinalIDs(tree); err != nil {
+	if err := rewriteModuleSourcesToFinalIDs(tree, plan); err != nil {
 		return err
 	}
 	if err := removeSupersededPackageDirs(plan); err != nil {
@@ -344,11 +344,26 @@ func treePackageContentHash(tree *ResolvedTree, identity *PackageIdentity) strin
 	return ""
 }
 
-// rewriteModuleSourcesToFinalIDs rewrites all module source references in parent modules
-// to point to the final sourcetree IDs.
-func rewriteModuleSourcesToFinalIDs(tree *ResolvedTree) error {
+// rewriteModuleSourcesToFinalIDs rewrites module source references in parent modules
+// to point to the final sourcetree IDs. Only modules whose package root was affected
+// by the identity plan are rewritten; local modules within the root package are left alone.
+func rewriteModuleSourcesToFinalIDs(tree *ResolvedTree, plan *SourcetreeIdentityPlan) error {
+	if len(plan.Packages) == 0 {
+		return nil
+	}
+	// Build a set of final package roots that were affected by the identity plan.
+	// Use FinalLocalDir (post-update) because updateTreePackagePointers already
+	// updated module.PackageRoot to the canonical location.
+	affectedRoots := make(map[string]bool)
+	for _, identity := range plan.ByFinalID {
+		affectedRoots[filepath.Clean(identity.FinalLocalDir)] = true
+	}
 	for _, module := range tree.AllModules {
 		if module == nil || module.Parent == nil || module.Parent.InstallDir == "" || module.PackageRoot == "" {
+			continue
+		}
+		// Only rewrite sources for modules whose package was actually moved by identity planning
+		if !affectedRoots[filepath.Clean(module.PackageRoot)] {
 			continue
 		}
 		relPath, err := filepath.Rel(module.Parent.InstallDir, module.PackageRoot)

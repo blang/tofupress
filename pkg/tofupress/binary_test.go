@@ -377,11 +377,11 @@ func TestBinary_BundlePreservesSource(t *testing.T) {
 	assert.Equal(t, originalChildModTime, afterChildInfo.ModTime(),
 		"child/main.tf modification time changed - source file was touched!")
 
-	// Verify no sourcetree/ directory was created in source directory
-	sourcetreePath := filepath.Join(fixture, "sourcetree")
+	// Verify no modules/ directory was created in source directory
+	sourcetreePath := filepath.Join(fixture, "modules")
 	_, err = os.Stat(sourcetreePath)
 	assert.True(t, os.IsNotExist(err),
-		"sourcetree/ directory should NOT exist in source directory - bundling polluted the source!")
+		"modules/ directory should NOT exist in source directory - bundling polluted the source!")
 }
 
 // hashFile returns the SHA-256 hash of a file's contents.
@@ -545,7 +545,7 @@ func TestBinary_BundleWithSubpath(t *testing.T) {
 }
 
 // TestBinary_BundleNestedArchive verifies that bundling a directory that was itself
-// created by bundling another module works correctly. The sourcetree/ directory
+// created by bundling another module works correctly. The modules/ directory
 // should be preserved in the new bundle.
 func TestBinary_BundleNestedArchive(t *testing.T) {
 	if testing.Short() {
@@ -578,9 +578,9 @@ module "remote" {
 	output, err = cmd.CombinedOutput()
 	require.NoError(t, err, "unzip failed: %s", string(output))
 
-	// Verify the extracted bundle has sourcetree/
-	_, err = os.Stat(filepath.Join(extractDir, "sourcetree"))
-	require.NoError(t, err, "extracted bundle should have sourcetree/ directory")
+	// Verify the extracted bundle has modules/
+	_, err = os.Stat(filepath.Join(extractDir, "modules"))
+	require.NoError(t, err, "extracted bundle should have modules/ directory")
 
 	// Second bundle (bundle the extracted bundle)
 	secondBundlePath := filepath.Join(t.TempDir(), "second-bundle.zip")
@@ -589,11 +589,11 @@ module "remote" {
 	require.NoError(t, err, "second bundle failed: %s", string(output))
 	require.FileExists(t, secondBundlePath)
 
-	// Verify the second bundle also contains sourcetree/
+	// Verify the second bundle also contains modules/
 	cmd = exec.Command("unzip", "-l", secondBundlePath)
 	output, err = cmd.CombinedOutput()
 	require.NoError(t, err, "unzip -l failed: %s", string(output))
-	require.Contains(t, string(output), "sourcetree/", "second bundle should contain sourcetree/ directory")
+	require.Contains(t, string(output), "modules/", "second bundle should contain modules/ directory")
 	require.Contains(t, string(output), "main.tf", "second bundle should contain main.tf")
 }
 
@@ -624,10 +624,10 @@ module "consul" {
 	require.NoError(t, err, "registry bundle failed: %s", string(output))
 	require.FileExists(t, bundlePath)
 
-	// Verify the bundle contains sourcetree/ with the registry module
+	// Verify the bundle contains modules/ with the registry module
 	cmd = exec.Command("unzip", "-l", bundlePath)
 	output, err = cmd.CombinedOutput()
 	require.NoError(t, err, "unzip -l failed: %s", string(output))
-	require.Contains(t, string(output), "sourcetree/", "bundle should contain sourcetree/ directory")
+	require.Contains(t, string(output), "modules/", "bundle should contain modules/ directory")
 	require.Contains(t, string(output), "main.tf", "bundle should contain main.tf")
 }

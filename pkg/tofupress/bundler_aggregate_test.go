@@ -23,14 +23,14 @@ func TestBundler_AggregatePressedSubModules(t *testing.T) {
 	pressedMainTF := filepath.Join(pressedModuleDir, "main.tf")
 	if err := os.WriteFile(pressedMainTF, []byte(`
 module "inner" {
-  source = "./sourcetree/abc123"
+  source = "./modules/abc123"
 }
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
 	// Create sourcetree with an inner package
-	innerPackageDir := filepath.Join(pressedModuleDir, "sourcetree", "abc123")
+	innerPackageDir := filepath.Join(pressedModuleDir, "modules", "abc123")
 	if err := os.MkdirAll(innerPackageDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -98,13 +98,13 @@ module "pressed" {
 
 	// Verify that the inner package is in the root sourcetree (flattened)
 	// The inner package should NOT be in a nested sourcetree
-	flattenedPackageDir := filepath.Join(extractDir, "sourcetree", "abc123")
+	flattenedPackageDir := filepath.Join(extractDir, "modules", "abc123")
 	if _, statErr := os.Stat(flattenedPackageDir); os.IsNotExist(statErr) {
 		t.Errorf("Inner package should be flattened to root sourcetree at %s", flattenedPackageDir)
 	}
 
 	// Verify that there's no nested sourcetree
-	nestedSourcetreePath := filepath.Join(extractDir, "pressed", "sourcetree")
+	nestedSourcetreePath := filepath.Join(extractDir, "pressed", "modules")
 	if _, statErr := os.Stat(nestedSourcetreePath); !os.IsNotExist(statErr) {
 		t.Errorf("Should not have nested sourcetree at %s", nestedSourcetreePath)
 	}
@@ -117,7 +117,7 @@ module "pressed" {
 	}
 
 	// The source should be rewritten to point to the flattened sourcetree
-	if !strings.Contains(string(content), "./../sourcetree/abc123") {
+	if !strings.Contains(string(content), "./../modules/abc123") {
 		t.Errorf("Pressed module source should be rewritten to point to flattened sourcetree, got: %s", string(content))
 	}
 }

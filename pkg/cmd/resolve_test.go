@@ -214,7 +214,7 @@ func resolveTreeWithRemoteModule(t *testing.T) *tofupress.ResolvedTree {
 	remote := &tofupress.ModuleNode{
 		Key:        "mod_remote",
 		Name:       "mod_remote",
-		InstallDir: "/app/sourcetree/abc123",
+		InstallDir: "/app/modules/abc123",
 		IsLocal:    false,
 		IsRemote:   true,
 		Parent:     root,

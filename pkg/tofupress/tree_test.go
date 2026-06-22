@@ -83,7 +83,7 @@ func TestModuleNode_WithChildren(t *testing.T) {
 		Key:        "sub2",
 		Name:       "sub2",
 		Parent:     root,
-		InstallDir: "/root/sourcetree/abc123",
+		InstallDir: "/root/modules/abc123",
 		IsRemote:   true,
 	}
 

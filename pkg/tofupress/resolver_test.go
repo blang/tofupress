@@ -144,12 +144,12 @@ module "vpc" {
 	assert.False(t, vpc.IsLocal)
 
 	// Verify the source was rewritten to local path
-	assert.Contains(t, vpc.InstallDir, "sourcetree/")
+	assert.Contains(t, vpc.InstallDir, "modules/")
 
 	// Verify the main.tf was rewritten
 	mainContent, err := os.ReadFile(filepath.Join(tmpDir, "main.tf"))
 	require.NoError(t, err)
-	assert.Contains(t, string(mainContent), "source = \"./sourcetree/")
+	assert.Contains(t, string(mainContent), "source = \"./modules/")
 }
 
 func TestResolver_ResolveDeduplication(t *testing.T) {

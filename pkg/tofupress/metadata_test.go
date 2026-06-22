@@ -13,9 +13,9 @@ import (
 
 func TestBuildArtifactMetadataFromResolvedTree(t *testing.T) {
 	rootDir := t.TempDir()
-	packageDir := filepath.Join(rootDir, "sourcetree", "abc123")
+	packageDir := filepath.Join(rootDir, "modules", "abc123")
 	require.NoError(t, os.MkdirAll(packageDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(rootDir, "main.tf"), []byte("module \"remote\" { source = \"./sourcetree/abc123\" }"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(rootDir, "main.tf"), []byte("module \"remote\" { source = \"./modules/abc123\" }"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(packageDir, "main.tf"), []byte("output \"id\" { value = \"remote\" }"), 0o644))
 
 	root := &ModuleNode{
@@ -125,7 +125,7 @@ func TestWriteMetadataFileWritesIndentedJSON(t *testing.T) {
 
 func TestBuildArtifactMetadataIncludesSourcetreeDedupGroups(t *testing.T) {
 	root := t.TempDir()
-	finalDir := filepath.Join(root, "sourcetree", "pkg-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+	finalDir := filepath.Join(root, "modules", "pkg-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 	require.NoError(t, os.MkdirAll(finalDir, 0o755))
 	writeTerraformFile(t, finalDir, "main.tf", `output "id" { value = "same" }`)
 

@@ -41,9 +41,9 @@ module "vpc" {
 	extractDir := t.TempDir()
 	extractZipOCI(t, archivePath, extractDir)
 
-	// Verify no sourcetree/ directory exists
-	sourcetreePath := filepath.Join(extractDir, "sourcetree")
-	assert.NoDirExists(t, sourcetreePath, "OCI bundle should not contain sourcetree/")
+	// Verify modules/ directory exists (inlined packages)
+	sourcetreePath := filepath.Join(extractDir, "modules")
+	assert.DirExists(t, sourcetreePath, "OCI bundle should contain modules/ for inlined packages")
 
 	// Verify root module exists
 	mainFile := filepath.Join(extractDir, "main.tf")
@@ -100,9 +100,9 @@ module "remote" {
 	extractDir := t.TempDir()
 	extractZipOCI(t, archivePath, extractDir)
 
-	// Verify no sourcetree/ directory
-	sourcetreePath := filepath.Join(extractDir, "sourcetree")
-	assert.NoDirExists(t, sourcetreePath)
+	// Verify modules/ directory exists (inlined packages)
+	sourcetreePath := filepath.Join(extractDir, "modules")
+	assert.DirExists(t, sourcetreePath, "OCI bundle should contain modules/ for inlined packages")
 
 	// Verify local module is preserved in its relative location
 	localModulePath := filepath.Join(extractDir, "modules", "local", "main.tf")

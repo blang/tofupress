@@ -175,12 +175,12 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 
 	vendorDirName := r.VendorDir
 	if vendorDirName == "" {
-		vendorDirName = "sourcetree"
+		vendorDirName = "modules"
 	}
 	sourcetreeDir := filepath.Join(rootDir, vendorDirName)
 	tree.VendorDir = vendorDirName
 	if err := os.MkdirAll(sourcetreeDir, 0o755); err != nil { //nolint:gosec // G301: 0755 is standard for directories
-		return nil, fmt.Errorf("failed to create sourcetree directory: %w", err)
+		return nil, fmt.Errorf("failed to create modules directory: %w", err)
 	}
 
 	// Respect context cancellation immediately

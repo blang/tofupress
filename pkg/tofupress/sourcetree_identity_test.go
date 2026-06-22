@@ -31,8 +31,8 @@ func TestSourcetreeIDFromHashRejectsInvalidHash(t *testing.T) {
 
 func TestBuildSourcetreeIdentityPlanDeduplicatesDifferentSourcesWithSameFinalContent(t *testing.T) {
 	root := t.TempDir()
-	pkgA := filepath.Join(root, "sourcetree", "old-a")
-	pkgB := filepath.Join(root, "sourcetree", "old-b")
+	pkgA := filepath.Join(root, "modules", "old-a")
+	pkgB := filepath.Join(root, "modules", "old-b")
 	require.NoError(t, os.MkdirAll(pkgA, 0o755))
 	require.NoError(t, os.MkdirAll(pkgB, 0o755))
 	writeTerraformFile(t, pkgA, "main.tf", `output "id" { value = "same" }`)
@@ -64,8 +64,8 @@ func TestBuildSourcetreeIdentityPlanDeduplicatesDifferentSourcesWithSameFinalCon
 
 func TestBuildSourcetreeIdentityPlanDoesNotDeduplicateDifferentFinalContent(t *testing.T) {
 	root := t.TempDir()
-	pkgA := filepath.Join(root, "sourcetree", "old-a")
-	pkgB := filepath.Join(root, "sourcetree", "old-b")
+	pkgA := filepath.Join(root, "modules", "old-a")
+	pkgB := filepath.Join(root, "modules", "old-b")
 	require.NoError(t, os.MkdirAll(pkgA, 0o755))
 	require.NoError(t, os.MkdirAll(pkgB, 0o755))
 	writeTerraformFile(t, pkgA, "main.tf", `output "id" { value = "a" }`)
@@ -118,11 +118,11 @@ func TestSnapshotDirectoryWithStripUsesIncludedFinalContent(t *testing.T) {
 func TestApplySourcetreeIdentityPlanMaterializesCanonicalDirectoryAndRewritesSources(t *testing.T) {
 	root := t.TempDir()
 	writeTerraformFile(t, root, "main.tf", `
-module "a" { source = "./sourcetree/old-a" }
-module "b" { source = "./sourcetree/old-b" }
+module "a" { source = "./modules/old-a" }
+module "b" { source = "./modules/old-b" }
 `)
-	pkgA := filepath.Join(root, "sourcetree", "old-a")
-	pkgB := filepath.Join(root, "sourcetree", "old-b")
+	pkgA := filepath.Join(root, "modules", "old-a")
+	pkgB := filepath.Join(root, "modules", "old-b")
 	require.NoError(t, os.MkdirAll(pkgA, 0o755))
 	require.NoError(t, os.MkdirAll(pkgB, 0o755))
 	writeTerraformFile(t, pkgA, "main.tf", `output "id" { value = "same" }`)
@@ -150,16 +150,16 @@ module "b" { source = "./sourcetree/old-b" }
 	for id := range plan.ByFinalID {
 		finalID = id
 	}
-	assert.DirExists(t, filepath.Join(root, "sourcetree", finalID))
-	assert.NoDirExists(t, filepath.Join(root, "sourcetree", "old-b"))
+	assert.DirExists(t, filepath.Join(root, "modules", finalID))
+	assert.NoDirExists(t, filepath.Join(root, "modules", "old-b"))
 	assert.Len(t, tree.Packages, 1)
 	assert.Contains(t, tree.Packages, finalID)
-	assert.Equal(t, filepath.Join(root, "sourcetree", finalID), modA.PackageRoot)
-	assert.Equal(t, filepath.Join(root, "sourcetree", finalID), modB.PackageRoot)
+	assert.Equal(t, filepath.Join(root, "modules", finalID), modA.PackageRoot)
+	assert.Equal(t, filepath.Join(root, "modules", finalID), modB.PackageRoot)
 
 	mainContent, err := os.ReadFile(filepath.Join(root, "main.tf"))
 	require.NoError(t, err)
-	assert.Contains(t, string(mainContent), `source = "./sourcetree/`+finalID+`"`)
+	assert.Contains(t, string(mainContent), `source = "./modules/`+finalID+`"`)
 	assert.NotContains(t, string(mainContent), "old-a")
 	assert.NotContains(t, string(mainContent), "old-b")
 }

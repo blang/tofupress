@@ -171,14 +171,14 @@ module "local" {
 	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0o644))
 
 	// Rewrite local to remote path
-	err := RewriteModuleSource(tfFile, "local", "./sourcetree/abc123/modules/local")
+	err := RewriteModuleSource(tfFile, "local", "./modules/abc123/modules/local")
 	require.NoError(t, err)
 
 	modules, err := ExtractModuleBlocks(tfFile)
 	require.NoError(t, err)
 	require.Len(t, modules, 1)
 
-	assert.Equal(t, "./sourcetree/abc123/modules/local", modules[0].Source)
+	assert.Equal(t, "./modules/abc123/modules/local", modules[0].Source)
 }
 
 func TestRewriteModuleSource_WithComplexPath(t *testing.T) {
@@ -192,14 +192,14 @@ module "nested" {
 `
 	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0o644))
 
-	err := RewriteModuleSource(tfFile, "nested", "./sourcetree/def456/modules/nested")
+	err := RewriteModuleSource(tfFile, "nested", "./modules/def456/modules/nested")
 	require.NoError(t, err)
 
 	modules, err := ExtractModuleBlocks(tfFile)
 	require.NoError(t, err)
 	require.Len(t, modules, 1)
 
-	assert.Equal(t, "./sourcetree/def456/modules/nested", modules[0].Source)
+	assert.Equal(t, "./modules/def456/modules/nested", modules[0].Source)
 }
 
 func TestRewriteModuleSource_InvalidHCL(t *testing.T) {

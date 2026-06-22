@@ -97,10 +97,10 @@ module "vpc" {
 
 	mainContent, err := os.ReadFile(mainFile)
 	require.NoError(t, err)
-	assert.Contains(t, string(mainContent), "source = \"./sourcetree/")
+	assert.Contains(t, string(mainContent), "source = \"./modules/")
 
 	// Verify sourcetree directory exists
-	sourcetreeDir := filepath.Join(extractDir, "sourcetree")
+	sourcetreeDir := filepath.Join(extractDir, "modules")
 	assert.DirExists(t, sourcetreeDir)
 
 	// Verify at least one package was bundled
@@ -224,11 +224,11 @@ func TestBundler_BundleToInvalidPath(t *testing.T) {
 func TestBundlerArchiveUsesFinalContentSourcetreeIDAndDeduplicates(t *testing.T) {
 	root := t.TempDir()
 	writeTerraformFile(t, root, "main.tf", `
-module "a" { source = "./sourcetree/old-a" }
-module "b" { source = "./sourcetree/old-b" }
+module "a" { source = "./modules/old-a" }
+module "b" { source = "./modules/old-b" }
 `)
-	pkgA := filepath.Join(root, "sourcetree", "old-a")
-	pkgB := filepath.Join(root, "sourcetree", "old-b")
+	pkgA := filepath.Join(root, "modules", "old-a")
+	pkgB := filepath.Join(root, "modules", "old-b")
 	require.NoError(t, os.MkdirAll(pkgA, 0o755))
 	require.NoError(t, os.MkdirAll(pkgB, 0o755))
 	writeTerraformFile(t, pkgA, "main.tf", `output "id" { value = "same" }`)
@@ -263,10 +263,10 @@ module "b" { source = "./sourcetree/old-b" }
 	for id := range identityPlan.ByFinalID {
 		finalID = id
 	}
-	assert.Contains(t, names, "sourcetree/"+finalID+"/main.tf")
-	assert.NotContains(t, names, "sourcetree/old-a/main.tf")
-	assert.NotContains(t, names, "sourcetree/old-b/main.tf")
-	assert.NotContains(t, names, "sourcetree/"+finalID+"/README.md")
+	assert.Contains(t, names, "modules/"+finalID+"/main.tf")
+	assert.NotContains(t, names, "modules/old-a/main.tf")
+	assert.NotContains(t, names, "modules/old-b/main.tf")
+	assert.NotContains(t, names, "modules/"+finalID+"/README.md")
 }
 
 func TestBundler_BundleNestedModules(t *testing.T) {
@@ -312,7 +312,7 @@ module "remote" {
 	assert.FileExists(t, level1File)
 
 	// Verify remote module was bundled
-	sourcetreeDir := filepath.Join(extractDir, "sourcetree")
+	sourcetreeDir := filepath.Join(extractDir, "modules")
 	assert.DirExists(t, sourcetreeDir)
 }
 
@@ -725,4 +725,97 @@ func TestBundlerDefaultModuleDirStrippingDropsIrrelevantPackageFilesWhenReadsAre
 	assert.Contains(t, names, "templates/userdata.tftpl")
 	assert.NotContains(t, names, "templates/unused.tftpl")
 	assert.NotContains(t, names, "README.md")
+}
+
+func TestBundler_RejectsVendorDirConflict(t *testing.T) {
+	// Root has a local module at modules/local/ AND a remote git dependency.
+	// The vendor dir (modules/) would contain both user content (local/) and
+	// downloaded packages. Bundling must error rather than silently dropping
+	// the user's local module.
+	rootDir := t.TempDir()
+
+	writeTerraformFile(t, rootDir, "main.tf", `
+module "local" {
+  source = "./modules/local"
+}
+
+module "remote" {
+  source = "git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git?ref=v5.0.0"
+  name   = "test-vpc"
+}
+`)
+
+	localDir := filepath.Join(rootDir, "modules", "local")
+	require.NoError(t, os.MkdirAll(localDir, 0o755))
+	writeTerraformFile(t, localDir, "main.tf", `# local module`)
+
+	resolver := NewResolver()
+	tree, err := resolver.Resolve(context.Background(), rootDir)
+	require.NoError(t, err)
+	require.NotEmpty(t, tree.Packages, "must have remote packages for the conflict scenario")
+
+	bundler := NewBundler(BundleFormatTarGZ)
+	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
+	err = bundler.Bundle(tree, archivePath)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "conflicts with existing content")
+	assert.Contains(t, err.Error(), "local")
+	assert.Contains(t, err.Error(), "--vendor-dir")
+}
+
+func TestBundler_AllowsVendorDirWhenNoRemotePackages(t *testing.T) {
+	// No remote packages => vendor dir skip won't trigger, so no conflict.
+	rootDir := t.TempDir()
+
+	writeTerraformFile(t, rootDir, "main.tf", `
+module "local" {
+  source = "./modules/local"
+}
+`)
+
+	localDir := filepath.Join(rootDir, "modules", "local")
+	require.NoError(t, os.MkdirAll(localDir, 0o755))
+	writeTerraformFile(t, localDir, "main.tf", `# local module`)
+
+	resolver := NewResolver()
+	tree, err := resolver.Resolve(context.Background(), rootDir)
+	require.NoError(t, err)
+	require.Empty(t, tree.Packages)
+
+	bundler := NewBundler(BundleFormatTarGZ)
+	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
+	err = bundler.Bundle(tree, archivePath)
+	require.NoError(t, err) // no remote packages, no conflict
+}
+
+func TestBundler_AllowsVendorDirWithCustomName(t *testing.T) {
+	// Custom --vendor-dir avoids the conflict with user's modules/ directory.
+	rootDir := t.TempDir()
+
+	writeTerraformFile(t, rootDir, "main.tf", `
+module "local" {
+  source = "./modules/local"
+}
+
+module "remote" {
+  source = "git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git?ref=v5.0.0"
+  name   = "test-vpc"
+}
+`)
+
+	localDir := filepath.Join(rootDir, "modules", "local")
+	require.NoError(t, os.MkdirAll(localDir, 0o755))
+	writeTerraformFile(t, localDir, "main.tf", `# local module`)
+
+	resolver := NewResolver()
+	resolver.VendorDir = "_vendor"
+	tree, err := resolver.Resolve(context.Background(), rootDir)
+	require.NoError(t, err)
+	require.NotEmpty(t, tree.Packages)
+
+	bundler := NewBundler(BundleFormatTarGZ)
+	bundler.VendorDir = "_vendor"
+	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
+	err = bundler.Bundle(tree, archivePath)
+	require.NoError(t, err) // custom vendor dir doesn't conflict with modules/
 }

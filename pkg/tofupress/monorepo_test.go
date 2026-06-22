@@ -77,7 +77,7 @@ func TestBinary_BundleMonorepoComplex(t *testing.T) {
 
 	// Verify sourcetree directory does NOT exist (no remote packages downloaded)
 	// The monorepo fixture has only local modules with no remote dependencies.
-	sourcetreeDir := filepath.Join(extractDir, "infra", "environments", "prod", "sourcetree")
+	sourcetreeDir := filepath.Join(extractDir, "infra", "environments", "prod", "modules")
 	_, err = os.Stat(sourcetreeDir)
 	assert.True(t, os.IsNotExist(err), "sourcetree should not exist for local-only modules: %v", err)
 }

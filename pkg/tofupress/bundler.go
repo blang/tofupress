@@ -31,11 +31,11 @@ const (
 const (
 	dirNameTerraform  = ".terraform"
 	dirNameGit        = ".git"
-	dirNameSourceTree = "sourcetree"
+	dirNameSourceTree = "sourcetree" // legacy vendor dir name (pre-rename)
 )
 
 // defaultVendorDir is the fallback vendor directory name.
-const defaultVendorDir = "sourcetree"
+const defaultVendorDir = "modules"
 
 // vendorDirName returns the vendored modules directory name for a tree.
 func vendorDirName(tree *ResolvedTree) string {
@@ -109,7 +109,13 @@ func (b *Bundler) Bundle(tree *ResolvedTree, outputPath string) error {
 
 	// Use OCI-compliant mode if enabled and format is ZIP
 	if b.OCICompliant && b.Format == BundleFormatZIP {
+		b.VendorDir = "" // OCI inlines everything; no vendor dir to skip during zip creation
 		return b.bundleOCICompliant(tree, outputPath)
+	}
+
+	// Non-OCI mode: validate vendor directory doesn't conflict with user content
+	if err := b.validateVendorDir(tree); err != nil {
+		return err
 	}
 
 	switch b.Format {
@@ -378,9 +384,9 @@ func (b *Bundler) addDirectoryToTar(tw *tar.Writer, srcDir, prefix string, packa
 			return filepath.SkipDir
 		}
 
-		// Only skip sourcetree/ when packages will be added separately (non-empty packages map)
-		// This prevents duplication in first bundle, but preserves sourcetree/ in nested bundles
-		if info.IsDir() && info.Name() == b.VendorDir && len(packages) > 0 {
+		// Only skip the vendor dir when packages will be added separately.
+		// Use exact path matching to avoid skipping user-created modules/ directories.
+		if info.IsDir() && path == filepath.Join(srcDir, b.VendorDir) && len(packages) > 0 {
 			return filepath.SkipDir
 		}
 
@@ -446,9 +452,9 @@ func (b *Bundler) addDirectoryToZip(zw *zip.Writer, srcDir, prefix string, packa
 			return filepath.SkipDir
 		}
 
-		// Only skip sourcetree/ when packages will be added separately (non-empty packages map)
-		// This prevents duplication in first bundle, but preserves sourcetree/ in nested bundles
-		if info.IsDir() && info.Name() == b.VendorDir && len(packages) > 0 {
+		// Only skip the vendor dir when packages will be added separately.
+		// Use exact path matching to avoid skipping user-created modules/ directories.
+		if info.IsDir() && path == filepath.Join(srcDir, b.VendorDir) && len(packages) > 0 {
 			return filepath.SkipDir
 		}
 
@@ -615,7 +621,8 @@ func (b *Bundler) bundleZipFromDir(srcDir, outputPath string) (err error) {
 			case dirNameTerraform, dirNameGit:
 				return filepath.SkipDir
 			}
-			if info.Name() == b.VendorDir {
+			// Only skip the vendor dir by exact path (not just basename)
+			if b.VendorDir != "" && path == filepath.Join(srcDir, b.VendorDir) {
 				return filepath.SkipDir
 			}
 		}
@@ -956,5 +963,52 @@ func (b *Bundler) addMetadataToZip(zw *zip.Writer) error {
 	if _, err := writer.Write(data); err != nil {
 		return fmt.Errorf("failed to write metadata zip content: %w", err)
 	}
+	return nil
+}
+
+// validateVendorDir checks whether the vendor directory contains any non-package
+// content that would be silently lost during bundling. When remote packages exist
+// AND the vendor directory contains user-created directories, bundling would skip
+// the entire vendor dir and only add back known packages, silently dropping user
+// content. This check ensures we fail with a clear error instead of producing an
+// inconsistent bundle.
+func (b *Bundler) validateVendorDir(tree *ResolvedTree) error {
+	vendorPath := filepath.Join(tree.Root.InstallDir, b.VendorDir)
+
+	entries, err := os.ReadDir(vendorPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // no vendor dir yet, no conflict
+		}
+		return fmt.Errorf("failed to read vendor directory %q: %w", b.VendorDir, err)
+	}
+
+	if len(tree.Packages) == 0 {
+		return nil // no remote packages to vendor, vendor dir skip won't trigger
+	}
+
+	// Build set of known package directory base names
+	packageBases := make(map[string]bool, len(tree.Packages))
+	for _, pkg := range tree.Packages {
+		packageBases[filepath.Base(pkg.LocalDir)] = true
+	}
+
+	// Check for non-package content that would be lost
+	var conflicts []string
+	for _, entry := range entries {
+		if !packageBases[entry.Name()] {
+			conflicts = append(conflicts, entry.Name())
+		}
+	}
+
+	if len(conflicts) > 0 {
+		return fmt.Errorf(
+			"vendor directory %q conflicts with existing content: %v; "+
+				"the vendor directory must only contain downloaded packages; "+
+				"use --vendor-dir to specify a different directory name that does not conflict",
+			b.VendorDir, conflicts,
+		)
+	}
+
 	return nil
 }

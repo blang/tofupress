@@ -140,7 +140,7 @@ func rootArchiveDir(tree *ResolvedTree) string {
 // bundleTarGZ creates a tar.gz archive.
 //
 //nolint:gocognit,gocyclo // complex but straightforward bundling logic
-func (b *Bundler) bundleTarGZ(tree *ResolvedTree, outputPath string) error {
+func (b *Bundler) bundleTarGZ(tree *ResolvedTree, outputPath string) (err error) {
 	outFile, err := os.Create(outputPath) //nolint:gosec // G304: path is provided by user
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
@@ -211,13 +211,13 @@ func (b *Bundler) bundleTarGZ(tree *ResolvedTree, outputPath string) error {
 		return err
 	}
 
-	return nil
+	return //nolint:nakedret // named return needed to propagate deferred close errors
 }
 
 // bundleTarXZ creates a tar.xz archive.
 //
 //nolint:gocognit,gocyclo // complex but straightforward bundling logic
-func (b *Bundler) bundleTarXZ(tree *ResolvedTree, outputPath string) error {
+func (b *Bundler) bundleTarXZ(tree *ResolvedTree, outputPath string) (err error) {
 	outFile, err := os.Create(outputPath) //nolint:gosec // G304: path is provided by user
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
@@ -291,13 +291,13 @@ func (b *Bundler) bundleTarXZ(tree *ResolvedTree, outputPath string) error {
 		return err
 	}
 
-	return nil
+	return //nolint:nakedret // named return needed to propagate deferred close errors
 }
 
 // bundleZIP creates a ZIP archive.
 //
 //nolint:gocognit,gocyclo // complex but straightforward bundling logic
-func (b *Bundler) bundleZIP(tree *ResolvedTree, outputPath string) error {
+func (b *Bundler) bundleZIP(tree *ResolvedTree, outputPath string) (err error) {
 	outFile, err := os.Create(outputPath) //nolint:gosec // G304: path is provided by user
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
@@ -361,7 +361,7 @@ func (b *Bundler) bundleZIP(tree *ResolvedTree, outputPath string) error {
 		return err
 	}
 
-	return nil
+	return //nolint:nakedret // named return needed to propagate deferred close errors
 }
 
 // addDirectoryToTar recursively adds a directory to a tar archive.
@@ -584,7 +584,7 @@ func (b *Bundler) bundleOCICompliant(tree *ResolvedTree, outputPath string) erro
 // bundleZipFromDir creates a ZIP archive from a directory.
 //
 //nolint:gocognit,gocyclo // directory walking and zip creation is inherently complex
-func (b *Bundler) bundleZipFromDir(srcDir, outputPath string) error {
+func (b *Bundler) bundleZipFromDir(srcDir, outputPath string) (err error) {
 	outFile, err := os.Create(outputPath) //nolint:gosec // G304: path is provided by user
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
@@ -602,7 +602,8 @@ func (b *Bundler) bundleZipFromDir(srcDir, outputPath string) error {
 		}
 	}()
 
-	return filepath.Walk(srcDir, func(path string, info os.FileInfo, walkErr error) error {
+	//nolint:nakedret // named return needed to propagate deferred close errors
+	err = filepath.Walk(srcDir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}
@@ -664,6 +665,7 @@ func (b *Bundler) bundleZipFromDir(srcDir, outputPath string) error {
 
 		return nil
 	})
+	return //nolint:nakedret // named return needed to propagate deferred close errors
 }
 
 // copyDirOCI copies a directory recursively for OCI bundling, skipping

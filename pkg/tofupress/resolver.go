@@ -257,6 +257,18 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 					return nil, fmt.Errorf("failed to extract module blocks from %s: %w", r.displayPath(tfFile), err)
 				}
 
+				// Detect duplicate module names within the same file.
+				// Terraform/OpenTofu rejects these, so we should too.
+				seenNames := make(map[string]bool, len(modules))
+				for _, mod := range modules {
+					if seenNames[mod.Name] {
+						return nil, fmt.Errorf(
+							"duplicate module %q in %s: each module block must have a unique name within the same file",
+							mod.Name, r.displayPath(tfFile))
+					}
+					seenNames[mod.Name] = true
+				}
+
 				// Process each module
 				for _, mod := range modules {
 					// Check for dynamic (variable) source — warn and skip

@@ -147,7 +147,7 @@ func ExtractModuleBlocks(filePath string) ([]ModuleBlock, error) {
 			continue
 		}
 
-		source := val.AsString()
+		source := strings.TrimSpace(val.AsString())
 
 		// Extract version attribute if present
 		var version string

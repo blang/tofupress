@@ -65,7 +65,8 @@ func TestBuildArtifactMetadataFromResolvedTree(t *testing.T) {
 	assert.Equal(t, "bundle", metadata.Command.Name)
 	assert.Equal(t, "bundle.zip", metadata.Artifact.OutputPath)
 	assert.Equal(t, "zip", metadata.Artifact.Format)
-	assert.Equal(t, rootDir, metadata.Root.InstallDir)
+	// InstallDir should be relative to root to avoid leaking temp paths
+	assert.Equal(t, ".", metadata.Root.InstallDir)
 	assert.Len(t, metadata.Modules, 2)
 	assert.Len(t, metadata.Packages, 1)
 	assert.Equal(t, "git::https://example.com/repo.git", metadata.Packages[0].PackageAddr)

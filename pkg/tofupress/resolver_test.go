@@ -797,9 +797,7 @@ module "b" {
 }
 
 func TestResolver_DuplicateModuleNamesCreatesConflictingKeys(t *testing.T) {
-	// When two module blocks in the same file use the SAME name, the resolver
-	// currently creates two nodes with the same key — which is buggy.
-	// Regression test for QA Finding #4.
+	// Duplicate module names in the same file should be rejected with a clear error.
 	tmpDir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, "child"), 0o755))
 	writeTerraformFile(t, filepath.Join(tmpDir, "child"), "main.tf", `resource "null_resource" "x" {}`)
@@ -814,15 +812,10 @@ module "vpc" {
 `)
 
 	resolver := NewResolver()
-	tree, err := resolver.Resolve(context.Background(), tmpDir)
-	require.NoError(t, err)
-
-	// Bug: both modules get key "vpc", producing 3 AllModules entries but the
-	// second vpc never gets its source rewritten (RewriteModuleSource picks the
-	// first matching block). This test documents the current behavior.
-	// TODO(#4): when fixed, the resolver should return an error for duplicate
-	// module names within the same parent.
-	_ = tree
+	_, err := resolver.Resolve(context.Background(), tmpDir)
+	require.Error(t, err, "duplicate module names must be rejected")
+	assert.Contains(t, err.Error(), "duplicate module")
+	assert.Contains(t, err.Error(), "vpc")
 }
 
 func TestResolver_ForEachCountDoesNotInterfere(t *testing.T) {

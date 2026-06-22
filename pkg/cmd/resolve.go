@@ -22,7 +22,6 @@ var resolveCmd = &cobra.Command{
 func init() {
 	resolveCmd.Flags().Bool("json", false, "Output in JSON format")
 	resolveCmd.Flags().String("vendor-dir", "sourcetree", "Vendored modules directory name")
-	resolveCmd.Flags().String("strip", "module-dir", "Strip mode: none, module-dir (safe default), config-only, or tf-only (alias for config-only)")
 }
 
 //nolint:gocognit // JSON and text output branching is straightforward

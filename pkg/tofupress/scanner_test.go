@@ -295,10 +295,8 @@ func TestModuleBlock_String(t *testing.T) {
 
 func TestExtractModuleBlocks_HeredocSource(t *testing.T) {
 	// Heredoc syntax is valid Terraform for module sources.
-	// Regression: the HCL parser evaluates the heredoc body literally,
-	// including leading whitespace from indented heredocs (<<-).
-	// This means the source string is "\n    ./child\n  " instead of "./child",
-	// which causes the resolver to look for a non-existent directory.
+	// The scanner trims whitespace so heredoc bodies with indentation
+	// resolve to the actual path.
 	tmpDir := t.TempDir()
 	tfFile := filepath.Join(tmpDir, "main.tf")
 
@@ -316,10 +314,7 @@ module "child" {
 
 	require.Len(t, modules, 1)
 	assert.Equal(t, "child", modules[0].Name)
-	// Bug: heredoc sources include embedded whitespace.
-	// The source will NOT be clean "./child" — it will contain newlines and
-	// indentation from the heredoc body.
-	assert.NotEqual(t, "./child", modules[0].Source,
+	assert.Equal(t, "./child", modules[0].Source,
 		"heredoc source should be trimmed to just the path")
 }
 

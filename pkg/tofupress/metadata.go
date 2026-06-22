@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -128,6 +129,8 @@ type ArtifactMetadata struct {
 }
 
 // BuildArtifactMetadata constructs artifact metadata from a resolved module tree.
+// All file paths in InstallDir and PackageRoot are made relative to the root
+// module's install directory to avoid leaking temporary build paths.
 func BuildArtifactMetadata(tree *ResolvedTree, req *MetadataRequest) (*ArtifactMetadata, error) {
 	if tree == nil || tree.Root == nil {
 		return nil, fmt.Errorf("cannot build metadata for empty resolved tree")
@@ -138,8 +141,8 @@ func BuildArtifactMetadata(tree *ResolvedTree, req *MetadataRequest) (*ArtifactM
 		createdAt = time.Now().UTC()
 	}
 
-	modules := buildModuleMetadata(tree.AllModules)
-	packages, packageBytes, err := buildPackageMetadata(tree.Packages)
+	modules := buildModuleMetadata(tree.AllModules, tree.Root.InstallDir)
+	packages, packageBytes, err := buildPackageMetadata(tree.Packages, tree.Root.InstallDir)
 	if err != nil {
 		return nil, err
 	}
@@ -187,7 +190,7 @@ func BuildArtifactMetadata(tree *ResolvedTree, req *MetadataRequest) (*ArtifactM
 			OCICompliant: req.Options.OCICompliant,
 			MetadataPath: MetadataFileName,
 		},
-		Root:     moduleToMetadata(tree.Root),
+		Root:     moduleToMetadata(tree.Root, tree.Root.InstallDir),
 		Modules:  modules,
 		Packages: packages,
 		Stats:    stats,
@@ -205,10 +208,10 @@ func BuildArtifactMetadata(tree *ResolvedTree, req *MetadataRequest) (*ArtifactM
 	return artifact, nil
 }
 
-func buildModuleMetadata(nodes []*ModuleNode) []ModuleMetadata {
+func buildModuleMetadata(nodes []*ModuleNode, rootDir string) []ModuleMetadata {
 	modules := make([]ModuleMetadata, 0, len(nodes))
 	for _, node := range nodes {
-		modules = append(modules, moduleToMetadata(node))
+		modules = append(modules, moduleToMetadata(node, rootDir))
 	}
 	sort.Slice(modules, func(i, j int) bool {
 		return modules[i].Key < modules[j].Key
@@ -216,7 +219,7 @@ func buildModuleMetadata(nodes []*ModuleNode) []ModuleMetadata {
 	return modules
 }
 
-func moduleToMetadata(node *ModuleNode) ModuleMetadata {
+func moduleToMetadata(node *ModuleNode, rootDir string) ModuleMetadata {
 	if node == nil {
 		return ModuleMetadata{}
 	}
@@ -227,14 +230,14 @@ func moduleToMetadata(node *ModuleNode) ModuleMetadata {
 		SourceType:  node.Source.Type.String(),
 		PackageAddr: node.Source.PackageAddr,
 		SubDir:      node.Source.SubDir,
-		InstallDir:  node.InstallDir,
-		PackageRoot: node.PackageRoot,
+		InstallDir:  relPathNoLeak(node.InstallDir, rootDir),
+		PackageRoot: relPathNoLeak(node.PackageRoot, rootDir),
 		IsLocal:     node.IsLocal,
 		IsRemote:    node.IsRemote,
 	}
 }
 
-func buildPackageMetadata(packages map[string]*DownloadedPackage) ([]PackageMetadata, int64, error) {
+func buildPackageMetadata(packages map[string]*DownloadedPackage, rootDir string) ([]PackageMetadata, int64, error) {
 	ids := make([]string, 0, len(packages))
 	for id := range packages {
 		ids = append(ids, id)
@@ -253,7 +256,7 @@ func buildPackageMetadata(packages map[string]*DownloadedPackage) ([]PackageMeta
 		result = append(result, PackageMetadata{
 			ID:                   id,
 			PackageAddr:          pkg.PackageAddr,
-			LocalDir:             pkg.LocalDir,
+			LocalDir:             relPathNoLeak(pkg.LocalDir, rootDir),
 			DownloadedHash:       pkg.ContentHash,
 			FinalHash:            snapshot.Hash,
 			FileCount:            snapshot.FileCount,
@@ -292,6 +295,20 @@ func buildDedupGroupMetadata(groups []DedupGroup) []DedupGroupMetadata {
 		})
 	}
 	return out
+}
+
+// relPathNoLeak returns path as a relative path under rootDir, or the original
+// path if rootDir is not a prefix (e.g., for separately-downloaded packages).
+// This prevents temporary build directory paths from leaking into metadata.
+func relPathNoLeak(path, rootDir string) string {
+	if path == "" || rootDir == "" {
+		return path
+	}
+	rel, err := filepath.Rel(filepath.Clean(rootDir), filepath.Clean(path))
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return path
+	}
+	return rel
 }
 
 // WriteMetadataFile writes metadata as indented JSON to the given path.

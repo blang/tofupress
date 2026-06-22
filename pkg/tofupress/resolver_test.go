@@ -4,10 +4,13 @@ package tofupress
 import (
 	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -630,4 +633,111 @@ module "broken" {
 	assert.Contains(t, err.Error(), "main.tf")
 	assert.NotContains(t, err.Error(), "cycle detected",
 		"error should not mention cycles for a missing source attribute")
+}
+
+func TestQueryRegistryAPI_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/modules/hashicorp/consul/aws/1.0.0", r.URL.Path)
+		assert.Equal(t, "tofupress/dev", r.Header.Get("User-Agent"))
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"source": "https://github.com/hashicorp/terraform-aws-consul.git", "version": "1.0.0", "tag": "v1.0.0"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	origBase := testRegistryBaseURL
+	testRegistryBaseURL = server.URL
+	t.Cleanup(func() { testRegistryBaseURL = origBase })
+
+	result, err := queryRegistryAPI(context.Background(), "hashicorp", "consul", "aws", "1.0.0")
+	require.NoError(t, err)
+	assert.Equal(t, "git::https://github.com/hashicorp/terraform-aws-consul.git?ref=v1.0.0", result)
+}
+
+func TestQueryRegistryAPI_RetryOnTransient(t *testing.T) {
+	var attempts int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		if attempts <= 2 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"source": "https://github.com/test/repo.git", "version": "1.0.0", "tag": "v1.0.0"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	origBase := testRegistryBaseURL
+	testRegistryBaseURL = server.URL
+	t.Cleanup(func() { testRegistryBaseURL = origBase })
+
+	result, err := queryRegistryAPI(context.Background(), "test", "mod", "aws", "1.0.0")
+	require.NoError(t, err)
+	assert.Equal(t, 3, attempts, "expected 3 attempts (2 failures + 1 success)")
+	assert.Contains(t, result, "git::https://")
+}
+
+func TestQueryRegistryAPI_NonOKStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(server.Close)
+
+	origBase := testRegistryBaseURL
+	testRegistryBaseURL = server.URL
+	t.Cleanup(func() { testRegistryBaseURL = origBase })
+
+	_, err := queryRegistryAPI(context.Background(), "missing", "module", "aws", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "registry API returned status 404")
+	assert.Contains(t, err.Error(), "missing/module/aws")
+}
+
+func TestQueryRegistryAPI_InvalidJSON(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`not json`))
+	}))
+	t.Cleanup(server.Close)
+
+	origBase := testRegistryBaseURL
+	testRegistryBaseURL = server.URL
+	t.Cleanup(func() { testRegistryBaseURL = origBase })
+
+	_, err := queryRegistryAPI(context.Background(), "test", "mod", "aws", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to parse registry API response")
+}
+
+func TestQueryRegistryAPI_MissingSource(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"source": "", "version": "1.0.0"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	origBase := testRegistryBaseURL
+	testRegistryBaseURL = server.URL
+	t.Cleanup(func() { testRegistryBaseURL = origBase })
+
+	_, err := queryRegistryAPI(context.Background(), "test", "mod", "aws", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "did not return a source URL")
+}
+
+func TestQueryRegistryAPI_ContextCancelled(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(2 * time.Second)
+	}))
+	t.Cleanup(server.Close)
+
+	origBase := testRegistryBaseURL
+	testRegistryBaseURL = server.URL
+	t.Cleanup(func() { testRegistryBaseURL = origBase })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	t.Cleanup(cancel)
+
+	_, err := queryRegistryAPI(ctx, "test", "mod", "aws", "")
+	require.Error(t, err)
 }

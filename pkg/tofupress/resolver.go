@@ -587,30 +587,67 @@ type registryResponse struct {
 // maxRegistryResponseSize is the maximum size of a registry API response (1MB).
 const maxRegistryResponseSize = 1 << 20 // 1MB
 
-// queryRegistryAPI queries the Terraform Registry API to get the download URL for a module.
-func queryRegistryAPI(ctx context.Context, namespace, name, provider, version string) (string, error) {
-	// Construct the registry API URL with proper URL encoding
-	// Format: https://registry.terraform.io/v1/modules/{namespace}/{name}/{provider}
-	apiURL := fmt.Sprintf("https://registry.terraform.io/v1/modules/%s/%s/%s",
-		url.PathEscape(namespace), url.PathEscape(name), url.PathEscape(provider))
+// testRegistryBaseURL is set by tests to point to a local httptest server.
+// It defaults to the production Terraform Registry URL.
+var testRegistryBaseURL string
 
-	// Add version if specified
+// queryRegistryAPI queries the Terraform Registry API to get the download URL for a module.
+// It retries transient errors (5xx status codes, network failures) with exponential backoff.
+func queryRegistryAPI(ctx context.Context, namespace, name, provider, version string) (string, error) {
+	baseURL := testRegistryBaseURL
+	if baseURL == "" {
+		baseURL = "https://registry.terraform.io"
+	}
+
+	apiURL := fmt.Sprintf("%s/v1/modules/%s/%s/%s",
+		baseURL, url.PathEscape(namespace), url.PathEscape(name), url.PathEscape(provider))
+
 	if version != "" {
 		apiURL = fmt.Sprintf("%s/%s", apiURL, url.PathEscape(version))
 	}
 
-	// Create HTTP request with context for cancellation support
+	const maxRetries = 3
+	var lastErr error
+
+	for attempt := range maxRetries {
+		if attempt > 0 {
+			// Exponential backoff: 1s, 2s, 4s
+			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(backoff):
+			}
+		}
+
+		result, err := doRegistryQuery(ctx, apiURL)
+		if err == nil {
+			return result, nil
+		}
+
+		// Only retry on transient errors (5xx status codes, network errors)
+		if !isTransientError(err) {
+			return "", err
+		}
+		lastErr = err
+	}
+
+	return "", fmt.Errorf("registry API query failed after %d attempts for %s/%s/%s: %w",
+		maxRetries, namespace, name, provider, lastErr)
+}
+
+// doRegistryQuery executes a single HTTP query to the registry API.
+func doRegistryQuery(ctx context.Context, apiURL string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, http.NoBody)
 	if err != nil {
 		return "", fmt.Errorf("failed to create registry API request: %w", err)
 	}
+	req.Header.Set("User-Agent", "tofupress/dev")
 
-	// Create HTTP client with timeout
 	client := &http.Client{
 		Timeout: 30 * time.Second,
 	}
 
-	// Make the request
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("failed to query registry API: %w", err)
@@ -618,16 +655,19 @@ func queryRegistryAPI(ctx context.Context, namespace, name, provider, version st
 	defer resp.Body.Close() //nolint:errcheck // best effort
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("registry API returned status %d for %s", resp.StatusCode, apiURL)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return "", &registryAPIError{
+			StatusCode: resp.StatusCode,
+			URL:        apiURL,
+			Body:       string(body),
+		}
 	}
 
-	// Read the response body with size limit to prevent OOM
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRegistryResponseSize))
 	if err != nil {
 		return "", fmt.Errorf("failed to read registry API response: %w", err)
 	}
 
-	// Parse the JSON response
 	var registryResp registryResponse
 	if err := json.Unmarshal(body, &registryResp); err != nil {
 		return "", fmt.Errorf("failed to parse registry API response: %w", err)
@@ -637,12 +677,50 @@ func queryRegistryAPI(ctx context.Context, namespace, name, provider, version st
 		return "", fmt.Errorf("registry API did not return a source URL")
 	}
 
-	// Construct a git source URL from the source and tag
-	// Format: git::https://github.com/...?ref=vX.Y.Z
 	gitURL := fmt.Sprintf("git::%s", registryResp.Source)
 	if registryResp.Tag != "" {
 		gitURL = fmt.Sprintf("%s?ref=%s", gitURL, registryResp.Tag)
 	}
 
 	return gitURL, nil
+}
+
+// registryAPIError is a typed error for non-200 registry API responses.
+type registryAPIError struct {
+	StatusCode int
+	URL        string
+	Body       string
+}
+
+func (e *registryAPIError) Error() string {
+	return fmt.Sprintf("registry API returned status %d for %s: %s", e.StatusCode, e.URL, e.Body)
+}
+
+// isTransientError returns true for errors that should be retried.
+// Only 5xx status codes and network errors are considered transient.
+func isTransientError(err error) bool {
+	var apiErr *registryAPIError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode >= 500
+	}
+	// Only network/transport errors are transient.
+	// JSON parse errors, missing source errors, etc. are not retried.
+	return isNetworkError(err)
+}
+
+// isNetworkError returns true if the error is a network/transport-level error
+// (e.g., DNS failure, connection refused, TLS handshake failure, timeout).
+func isNetworkError(err error) bool {
+	// Check for common Go net error types
+	var netErr interface{ Timeout() bool }
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	// Check for url.Error which wraps network/transport errors
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return true
+	}
+	// ErrBodyNotAllowed is not a network error
+	return false
 }

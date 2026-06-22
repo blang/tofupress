@@ -1,13 +1,13 @@
 # Compute module - references sibling modules
 module "shared" {
   source = "../shared"
-  
+
   environment = "compute"
 }
 
 module "storage" {
   source = "../storage"
-  
+
   environment = "compute"
   tier        = "standard"
 }

@@ -1,13 +1,13 @@
 # Network module - references sibling modules
 module "shared" {
   source = "../shared"
-  
+
   environment = "network"
 }
 
 module "monitoring" {
   source = "../monitoring"
-  
+
   environment = "network"
 }
 

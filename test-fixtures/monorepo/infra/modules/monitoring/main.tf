@@ -1,7 +1,7 @@
 # Monitoring module - references shared
 module "shared" {
   source = "../shared"
-  
+
   environment = "monitoring"
 }
 

@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -82,7 +83,7 @@ func (r *Resolver) downloadPackagesParallel(ctx context.Context, requests []down
 	}
 
 	results := make([]downloadResult, len(requests))
-	errors := make([]error, len(requests))
+	fetchErrors := make([]error, len(requests))
 
 	var wg sync.WaitGroup
 	semaphore := make(chan struct{}, concurrency)
@@ -102,7 +103,7 @@ func (r *Resolver) downloadPackagesParallel(ctx context.Context, requests []down
 			})
 
 			if err := r.fetcher.Fetch(ctx, request.localPath, request.packageAddr); err != nil {
-				errors[idx] = fmt.Errorf("failed to fetch %s: %w", request.packageAddr, err)
+				fetchErrors[idx] = fmt.Errorf("failed to fetch %s: %w", request.packageAddr, err)
 				return
 			}
 
@@ -116,7 +117,7 @@ func (r *Resolver) downloadPackagesParallel(ctx context.Context, requests []down
 			// Compute content hash for content-based deduplication
 			contentHash, err := HashModule(request.localPath)
 			if err != nil {
-				errors[idx] = fmt.Errorf("failed to hash %s: %w", request.packageAddr, err)
+				fetchErrors[idx] = fmt.Errorf("failed to hash %s: %w", request.packageAddr, err)
 				return
 			}
 
@@ -130,7 +131,7 @@ func (r *Resolver) downloadPackagesParallel(ctx context.Context, requests []down
 	wg.Wait()
 
 	// Check for errors
-	for _, err := range errors {
+	for _, err := range fetchErrors {
 		if err != nil {
 			return nil, err
 		}
@@ -433,7 +434,8 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 				return nil, err
 			}
 
-			// Process download results
+			// Process download results, collecting limit violations
+			var errs []error
 			for _, result := range results {
 				infos := downloadInfoMap[result.request.packageAddr]
 				if len(infos) == 0 {
@@ -449,7 +451,17 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 				existingPath, contentExists := contentHashes[result.contentHash]
 				if contentExists {
 					// Duplicate content - remove the download and reuse existing path
-					os.RemoveAll(localPath) //nolint:errcheck,gosec // best-effort cleanup
+					if removeErr := os.RemoveAll(localPath); removeErr != nil {
+						r.report(&ProgressEvent{
+							Type:       "warning",
+							ModuleKey:  result.request.uniqueID,
+							ModuleName: result.request.packageAddr,
+							Source: fmt.Sprintf(
+								"failed to remove duplicate download %s: %v",
+								localPath, removeErr,
+							),
+						})
+					}
 					localPath = existingPath
 					downloadedPackages[result.request.packageAddr] = localPath
 				} else {
@@ -484,12 +496,14 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 
 					// Check depth limit
 					if r.MaxDepth > 0 && info.child.Depth() > r.MaxDepth {
-						return nil, fmt.Errorf("maximum depth %d exceeded at module %s", r.MaxDepth, info.child.Key)
+						errs = append(errs, fmt.Errorf("maximum depth %d exceeded at module %s", r.MaxDepth, info.child.Key))
+						continue
 					}
 
 					// Check module count limit
 					if r.MaxModules > 0 && len(tree.AllModules) >= r.MaxModules {
-						return nil, fmt.Errorf("module limit %d exceeded at module %s", r.MaxModules, info.child.Key)
+						errs = append(errs, fmt.Errorf("module limit %d exceeded at module %s", r.MaxModules, info.child.Key))
+						continue
 					}
 
 					// Cycle detection by module key
@@ -501,6 +515,11 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 					// Add to queue for processing
 					queue = append(queue, queueItem{node: info.child, dir: installDir})
 				}
+			}
+
+			// Report all limit violations from this batch
+			if len(errs) > 0 {
+				return nil, fmt.Errorf("resolution limits exceeded: %w", errors.Join(errs...))
 			}
 		}
 	}

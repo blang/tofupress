@@ -76,6 +76,8 @@ func runBundle(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(os.Stderr, "  ⬇ Downloading: %s from %s\n", event.ModuleName, event.Source)
 		case "downloaded":
 			fmt.Fprintf(os.Stderr, "  ✓ Downloaded: %s\n", event.ModuleName)
+		case "warning":
+			fmt.Fprintf(os.Stderr, "  ⚠ Warning: %s\n", event.Source)
 		}
 	}
 	tree, err := resolver.Resolve(cmd.Context(), workDir)

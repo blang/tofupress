@@ -48,6 +48,8 @@ func runResolve(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(cmd.ErrOrStderr(), "  ⬇ Downloading: %s from %s\n", event.ModuleName, event.Source) //nolint:errcheck // stderr writes are best-effort
 		case "downloaded":
 			fmt.Fprintf(cmd.ErrOrStderr(), "  ✓ Downloaded: %s\n", event.ModuleName) //nolint:errcheck // stderr writes are best-effort
+		case "warning":
+			fmt.Fprintf(cmd.ErrOrStderr(), "  ⚠ Warning: %s\n", event.Source) //nolint:errcheck // stderr writes are best-effort
 		}
 	}
 	tree, err := resolver.Resolve(cmd.Context(), workDir)

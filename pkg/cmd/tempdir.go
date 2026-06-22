@@ -176,7 +176,9 @@ func splitPackageSubdir(src string) (packageAddr, subDir string) {
 }
 
 // copyDir recursively copies a directory from src to dst.
-// It preserves file permissions and skips symlinks to avoid infinite loops.
+// It preserves file permissions and resolves symlinks to avoid infinite loops.
+//
+//nolint:gocognit // symlink resolution adds necessary complexity
 func copyDir(src, dst string) error {
 	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -191,9 +193,32 @@ func copyDir(src, dst string) error {
 
 		dstPath := filepath.Join(dst, relPath)
 
-		// Skip symlinks to avoid infinite loops and broken references
+		// Handle symlinks: resolve the target and copy the real content.
+		// Symlinks in Terraform module directories are commonly used to share
+		// modules across projects (monorepos, multi-environment setups).
 		if d.Type()&fs.ModeSymlink != 0 {
-			return nil
+			target, readErr := os.Readlink(path)
+			if readErr != nil {
+				return fmt.Errorf("failed to read symlink %s: %w", relPath, readErr)
+			}
+			// Resolve the target relative to the symlink's directory
+			resolvedPath := filepath.Join(filepath.Dir(path), target)
+			info, statErr := os.Stat(resolvedPath)
+			if statErr != nil {
+				// Self-referencing or dangling symlinks cannot be resolved.
+				// Skip them instead of failing — the symlink target may not
+				// be relevant to Terraform module resolution.
+				return nil //nolint:nilerr // intentionally skipping unresolvable symlinks
+			}
+			if info.IsDir() {
+				// Symlink to a directory: create the directory and copy contents
+				if mkdirErr := os.MkdirAll(dstPath, info.Mode()); mkdirErr != nil {
+					return mkdirErr
+				}
+				return copyDir(resolvedPath, dstPath)
+			}
+			// Symlink to a regular file: copy the target file
+			return copyFile(resolvedPath, dstPath, info.Mode())
 		}
 
 		// Get full file info for directories and regular files

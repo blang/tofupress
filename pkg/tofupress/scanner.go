@@ -14,9 +14,10 @@ import (
 
 // ModuleBlock represents a Terraform module block extracted from an HCL file.
 type ModuleBlock struct {
-	Name    string
-	Source  string
-	Version string
+	Name          string
+	Source        string
+	Version       string
+	MissingSource bool // true when the module block has no source attribute
 }
 
 // String returns a string representation of the module block.
@@ -115,8 +116,9 @@ func ExtractModuleBlocks(filePath string) ([]ModuleBlock, error) {
 		if !exists {
 			// Module without source attribute
 			modules = append(modules, ModuleBlock{
-				Name:   moduleName,
-				Source: "",
+				Name:          moduleName,
+				Source:        "",
+				MissingSource: true,
 			})
 			continue
 		}

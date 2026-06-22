@@ -613,3 +613,21 @@ module "child" {
 	assert.ErrorIs(t, err, context.Canceled,
 		"expected context.Canceled, got %v", err)
 }
+
+func TestResolve_MissingSourceAttribute(t *testing.T) {
+	rootDir := t.TempDir()
+	writeTerraformFile(t, rootDir, "main.tf", `
+module "broken" {
+  # source attribute intentionally omitted
+}
+`)
+
+	resolver := NewResolver()
+	_, err := resolver.Resolve(context.Background(), rootDir)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing the required 'source' attribute")
+	assert.Contains(t, err.Error(), "broken")
+	assert.Contains(t, err.Error(), "main.tf")
+	assert.NotContains(t, err.Error(), "cycle detected",
+		"error should not mention cycles for a missing source attribute")
+}

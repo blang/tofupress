@@ -244,6 +244,12 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 
 				// Process each module
 				for _, mod := range modules {
+					// Check for missing source attribute
+					if mod.MissingSource {
+						return nil, fmt.Errorf("module %q in %s is missing the required 'source' attribute",
+							mod.Name, tfFile)
+					}
+
 					// Classify the source
 					source := ClassifySource(mod.Source, item.dir)
 

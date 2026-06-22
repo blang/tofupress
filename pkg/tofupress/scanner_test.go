@@ -258,6 +258,7 @@ module "no_source" {
 	assert.Len(t, modules, 1)
 	assert.Equal(t, "no_source", modules[0].Name)
 	assert.Empty(t, modules[0].Source)
+	assert.True(t, modules[0].MissingSource, "module without source should have MissingSource=true")
 }
 
 func TestExtractModuleBlocks_VariableSource(t *testing.T) {

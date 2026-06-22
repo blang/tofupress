@@ -18,6 +18,7 @@ type ModuleBlock struct {
 	Source        string
 	Version       string
 	MissingSource bool // true when the module block has no source attribute
+	DynamicSource bool // true when the source attribute exists but is a dynamic expression (e.g., variable reference)
 }
 
 // String returns a string representation of the module block.
@@ -127,12 +128,22 @@ func ExtractModuleBlocks(filePath string) ([]ModuleBlock, error) {
 		val, diags := sourceAttr.Expr.Value(nil)
 		if diags.HasErrors() {
 			// Source is not a simple literal (could be a variable reference)
-			// Skip this module
+			// Include the module with a flag so the resolver can warn
+			modules = append(modules, ModuleBlock{
+				Name:          moduleName,
+				Source:        "",
+				DynamicSource: true,
+			})
 			continue
 		}
 
 		if val.Type() != cty.String {
-			// Source is not a string
+			// Source is not a string - treat as dynamic
+			modules = append(modules, ModuleBlock{
+				Name:          moduleName,
+				Source:        "",
+				DynamicSource: true,
+			})
 			continue
 		}
 

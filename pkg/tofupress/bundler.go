@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/ulikunitz/xz"
 )
@@ -608,10 +609,13 @@ func (b *Bundler) bundleZipFromDir(srcDir, outputPath string) (err error) {
 			return walkErr
 		}
 
-		// Skip .terraform, .git, and sourcetree directories
+		// Skip .terraform, .git, and the configured vendor directory
 		if info.IsDir() {
 			switch info.Name() {
-			case dirNameTerraform, dirNameGit, dirNameSourceTree:
+			case dirNameTerraform, dirNameGit:
+				return filepath.SkipDir
+			}
+			if info.Name() == b.VendorDir {
 				return filepath.SkipDir
 			}
 		}
@@ -804,12 +808,13 @@ func rewriteOCISources(tree *ResolvedTree, stagingDir string) error {
 	return nil
 }
 
-// aggregatePressedModules finds local modules that are pressed bundles (have their own sourcetree)
-// and flattens their packages into the root sourcetree.
+// aggregatePressedModules finds local modules that are pressed bundles (have their own vendor dir)
+// and flattens their packages into the root vendor dir.
 //
 //nolint:gocyclo,gocognit // complex but straightforward aggregation logic
 func (b *Bundler) aggregatePressedModules(tree *ResolvedTree) error {
-	rootSourcetree := filepath.Join(tree.Root.InstallDir, dirNameSourceTree)
+	vDir := vendorDirName(tree)
+	rootSourcetree := filepath.Join(tree.Root.InstallDir, vDir)
 
 	for _, module := range tree.AllModules {
 		// Skip remote modules and the root module itself
@@ -817,8 +822,8 @@ func (b *Bundler) aggregatePressedModules(tree *ResolvedTree) error {
 			continue
 		}
 
-		// Check if this module has its own sourcetree (it's a pressed module)
-		moduleSourcetree := filepath.Join(module.InstallDir, dirNameSourceTree)
+		// Check if this module has its own vendor dir (it's a pressed module)
+		moduleSourcetree := filepath.Join(module.InstallDir, vDir)
 		if _, err := os.Stat(moduleSourcetree); os.IsNotExist(err) {
 			continue
 		}
@@ -857,12 +862,12 @@ func (b *Bundler) aggregatePressedModules(tree *ResolvedTree) error {
 			}
 
 			// Rewrite source in the pressed module
-			oldSource := "./" + dirNameSourceTree + "/" + packageID
+			oldSource := "./" + vDir + "/" + packageID
 			// Calculate relative path based on bundle structure, not filesystem
-			// In the bundle, the pressed module is at <module.Key>/ and the package is at sourcetree/<packageID>/
-			// So we need to go up from the module to the root, then into sourcetree
+			// In the bundle, the pressed module is at <module.Key>/ and the package is at <vendorDir>/<packageID>/
+			// So we need to go up from the module to the root, then into vendorDir
 			moduleBundlePath := module.Key
-			packageBundlePath := filepath.Join(dirNameSourceTree, packageID)
+			packageBundlePath := filepath.Join(vDir, packageID)
 			relPath, err := filepath.Rel(moduleBundlePath, packageBundlePath)
 			if err != nil {
 				return fmt.Errorf("failed to calculate relative path: %w", err)
@@ -909,15 +914,20 @@ func metadataJSON(metadata *ArtifactMetadata) ([]byte, error) {
 	return append(data, '\n'), nil
 }
 
+// bundleNow returns the current time, overridable in tests.
+var bundleNow = time.Now
+
 func (b *Bundler) addMetadataToTar(tw *tar.Writer) error {
 	data, err := metadataJSON(b.Metadata)
 	if err != nil || data == nil {
 		return err
 	}
+	now := bundleNow()
 	header := &tar.Header{
-		Name: MetadataFileName,
-		Mode: 0o644,
-		Size: int64(len(data)),
+		Name:    MetadataFileName,
+		Mode:    0o644,
+		Size:    int64(len(data)),
+		ModTime: now,
 	}
 	if err := tw.WriteHeader(header); err != nil {
 		return fmt.Errorf("failed to write metadata tar header: %w", err)
@@ -933,7 +943,13 @@ func (b *Bundler) addMetadataToZip(zw *zip.Writer) error {
 	if err != nil || data == nil {
 		return err
 	}
-	writer, err := zw.Create(MetadataFileName)
+	now := bundleNow()
+	header := &zip.FileHeader{
+		Name:     MetadataFileName,
+		Modified: now,
+	}
+	header.SetMode(0o644)
+	writer, err := zw.CreateHeader(header)
 	if err != nil {
 		return fmt.Errorf("failed to create metadata zip entry: %w", err)
 	}

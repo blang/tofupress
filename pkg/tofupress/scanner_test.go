@@ -275,8 +275,11 @@ module "dynamic" {
 	modules, err := ExtractModuleBlocks(tfFile)
 	require.NoError(t, err)
 
-	// Should skip modules with variable sources
-	assert.Empty(t, modules)
+	// Should return modules with DynamicSource flag set
+	require.Len(t, modules, 1)
+	assert.True(t, modules[0].DynamicSource, "module with variable source should have DynamicSource=true")
+	assert.Equal(t, "dynamic", modules[0].Name)
+	assert.Empty(t, modules[0].Source)
 }
 
 func TestModuleBlock_String(t *testing.T) {

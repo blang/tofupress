@@ -476,7 +476,7 @@ module "a_back" {
 	resolver.PackageRoot = tmpDir // Allow cross-sibling references within the same package
 	_, err := resolver.Resolve(context.Background(), tmpDir)
 	require.Error(t, err, "cycle detection should reject circular module references")
-	assert.Contains(t, err.Error(), "cycle")
+	assert.Contains(t, err.Error(), "circular")
 }
 
 func TestResolver_MaxDepth(t *testing.T) {

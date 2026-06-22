@@ -19,7 +19,11 @@ var versionCmd = &cobra.Command{
 	Use:   "version",
 	Short: "Print version information",
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Printf("tofupress %s\n", BuildVersion)
+		version := BuildVersion
+		if version == "" {
+			version = "(development build; use 'just build' for versioned builds)"
+		}
+		fmt.Printf("tofupress %s\n", version)
 		if BuildCommit != "" {
 			fmt.Printf("  commit: %s\n", BuildCommit)
 		}

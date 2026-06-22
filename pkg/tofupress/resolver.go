@@ -55,6 +55,7 @@ type Resolver struct {
 	MaxDepth    int              // 0 = unlimited, max depth of module tree
 	MaxModules  int              // 0 = unlimited, max number of modules
 	VendorDir   string           // Custom vendored directory name (default: "sourcetree")
+	RootDir     string           // Root directory for display path computation (set by CLI)
 }
 
 // NewResolver creates a new Resolver with default configuration.
@@ -70,6 +71,19 @@ func (r *Resolver) report(event *ProgressEvent) {
 	if r.Progress != nil {
 		r.Progress(event)
 	}
+}
+
+// displayPath computes a user-friendly display path relative to the root directory.
+// Falls back to the base name if the path doesn't start with the root dir.
+func (r *Resolver) displayPath(p string) string {
+	if r.RootDir == "" {
+		return filepath.Base(p)
+	}
+	rel, err := filepath.Rel(r.RootDir, p)
+	if err != nil {
+		return filepath.Base(p)
+	}
+	return rel
 }
 
 // downloadPackagesParallel downloads multiple packages concurrently using a worker pool.
@@ -233,22 +247,33 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 			// Find all .tf files in this directory
 			tfFiles, err := FindTerraformFiles(item.dir)
 			if err != nil {
-				return nil, fmt.Errorf("failed to find terraform files in %s: %w", item.dir, err)
+				return nil, fmt.Errorf("failed to find terraform files in %s: %w", r.displayPath(item.dir), err)
 			}
 
 			// Extract module blocks from all .tf files
 			for _, tfFile := range tfFiles {
 				modules, err := ExtractModuleBlocks(tfFile)
 				if err != nil {
-					return nil, fmt.Errorf("failed to extract module blocks from %s: %w", tfFile, err)
+					return nil, fmt.Errorf("failed to extract module blocks from %s: %w", r.displayPath(tfFile), err)
 				}
 
 				// Process each module
 				for _, mod := range modules {
+					// Check for dynamic (variable) source — warn and skip
+					if mod.DynamicSource {
+						r.report(&ProgressEvent{
+							Type:       "warning",
+							ModuleKey:  MakeKey(item.node.Key, mod.Name),
+							ModuleName: mod.Name,
+							Source:     fmt.Sprintf("module %q has a dynamic (variable) source — cannot resolve", mod.Name),
+						})
+						continue
+					}
+
 					// Check for missing source attribute
 					if mod.MissingSource {
 						return nil, fmt.Errorf("module %q in %s is missing the required 'source' attribute",
-							mod.Name, tfFile)
+							mod.Name, r.displayPath(tfFile))
 					}
 
 					// Classify the source
@@ -281,33 +306,21 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 							return nil, fmt.Errorf("module %s has invalid subdirectory %q: %w", mod.Name, source.SubDir, err)
 						}
 
-						if item.node.PackageRoot != "" {
-							boundaryTarget := packageRoot
-							if source.SubDir == "" {
-								boundaryTarget = installDir
-							}
-							if err := ensureWithinPackage(item.node.PackageRoot, boundaryTarget); err != nil {
-								return nil, fmt.Errorf("module %s at %s escapes package boundary: source %s resolves to %s, which is outside package root %s",
-									mod.Name, item.dir, source.Raw, boundaryTarget, item.node.PackageRoot)
-							}
-							if source.SubDir == "" {
-								packageRoot = item.node.PackageRoot
-							}
-						}
-
 						child.InstallDir = installDir
 						child.PackageRoot = packageRoot
 						child.IsLocal = true
 						child.IsRemote = false
 
-						// Cycle detection: check if child's install dir matches any ancestor
+						// Cycle detection: check if child's install dir matches any ancestor.
+						// MUST run BEFORE boundary check for accurate error messages.
 						for ancestor := item.node; ancestor != nil; ancestor = ancestor.Parent {
 							if ancestor.InstallDir == installDir {
-								return nil, fmt.Errorf("cycle detected: module %q references ancestor module %q", child.Key, ancestor.Key)
+								return nil, fmt.Errorf("circular dependency detected: module %q references ancestor module %q", child.Key, ancestor.Key)
 							}
 						}
 
-						// Deduplication: skip if already visited (shared module, not a cycle)
+						// Deduplication: skip if already visited (shared module, not a cycle).
+						// MUST run BEFORE boundary check to avoid false boundary errors on shared modules.
 						if visitedPaths[installDir] {
 							// Add child to parent and tree but don't process again
 							item.node.Children = append(item.node.Children, child)
@@ -328,9 +341,25 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 
 						// Cycle detection by module key
 						if visitedModules[child.Key] {
-							return nil, fmt.Errorf("cycle detected: module %q appears multiple times in the dependency tree", child.Key)
+							return nil, fmt.Errorf("circular dependency detected: module %q appears multiple times in the dependency tree", child.Key)
 						}
 						visitedModules[child.Key] = true
+
+						// Boundary check: ensure module stays within the package root.
+						// MUST run AFTER cycle detection to avoid false boundary errors.
+						if item.node.PackageRoot != "" {
+							boundaryTarget := packageRoot
+							if source.SubDir == "" {
+								boundaryTarget = installDir
+							}
+							if err := ensureWithinPackage(item.node.PackageRoot, boundaryTarget); err != nil {
+								return nil, fmt.Errorf("module %s at %s escapes package boundary: source %s resolves to %s, which is outside package root %s",
+									mod.Name, r.displayPath(item.dir), source.Raw, r.displayPath(boundaryTarget), r.displayPath(item.node.PackageRoot))
+							}
+							if source.SubDir == "" {
+								child.PackageRoot = item.node.PackageRoot
+							}
+						}
 
 						// Add to queue for processing
 						queue = append(queue, queueItem{node: child, dir: installDir})

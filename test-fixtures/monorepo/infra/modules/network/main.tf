@@ -1,23 +1,15 @@
-# Network module - references sibling modules
-module "shared" {
-  source = "../shared"
-
-  environment = "network"
-}
-
-module "monitoring" {
-  source = "../monitoring"
-
-  environment = "network"
-}
+# Network module — references sibling modules within the same monorepo
+# Demonstrates cross-module dependencies within a monorepo structure
 
 variable "app_name" {
-  type = string
+  description = "Name of the application using this network"
+  type        = string
 }
 
-output "network_config" {
-  value = {
-    app    = var.app_name
-    shared = module.shared.config
-  }
+module "shared" {
+  source = "../shared"
+}
+
+output "vpc_id" {
+  value = "vpc-${var.app_name}"
 }

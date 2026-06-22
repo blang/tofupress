@@ -1,4 +1,6 @@
-# Dev overlay - references parent and sibling
+# Dev overlay — references parent platform/base and cross-references infra modules
+# Tests the most extreme ../ nesting in the monorepo (../../base and ../../../infra/...)
+
 module "base" {
   source = "../../base"
 }

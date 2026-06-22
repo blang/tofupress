@@ -508,7 +508,7 @@ func TestBinary_ResolveRemoteGitJSON(t *testing.T) {
 
 	cmd := exec.Command(binary, "resolve", "--json", //nolint:gosec // G204: subprocess is intentional for testing binary
 		"git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git?ref=master")
-	out, err := cmd.CombinedOutput()
+	out, err := cmd.Output()
 	require.NoError(t, err, "resolve remote git failed: %s", string(out))
 
 	// Must produce valid JSON with module tree

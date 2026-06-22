@@ -1,6 +1,9 @@
 package cmd
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -12,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/hashicorp/go-getter"
+	"github.com/ulikunitz/xz"
 )
 
 // resolveSource prepares a working directory from a go-getter compatible source.
@@ -108,6 +112,14 @@ func resolveSource(ctx context.Context, source string) (workDir, packageRoot str
 	gitDir := filepath.Join(packageDir, ".git")
 	if _, err := os.Stat(gitDir); err == nil {
 		os.RemoveAll(gitDir) //nolint:errcheck,gosec // best effort cleanup
+	}
+
+	// Detect and extract archives: go-getter may copy a zip/tar.gz/tar.xz file
+	// to packageDir without extracting it for local file:// sources.
+	// Check if packageDir is a regular file or contains only an archive.
+	if err := extractArchiveIfNeeded(packageDir); err != nil {
+		cleanup()
+		return "", "", nil, fmt.Errorf("failed to extract archive: %w", err)
 	}
 
 	// Package root is the package directory (everything downloaded is within this boundary)
@@ -219,4 +231,205 @@ func copyFile(src, dst string, mode fs.FileMode) error {
 		err = closeErr
 	}
 	return err
+}
+
+// extractArchiveIfNeeded detects if packageDir is a regular file (not a directory)
+// or contains only an archive file, and extracts it in place.
+// This handles the case where go-getter copies a local archive file (e.g., .zip, .tar.gz)
+// without decompressing it.
+//
+//nolint:gocognit // straightforward branching for archive detection
+func extractArchiveIfNeeded(packageDir string) error {
+	// Check if packageDir is a regular file (go-getter may copy it directly)
+	info, statErr := os.Stat(packageDir)
+	if statErr != nil {
+		if os.IsNotExist(statErr) {
+			return nil // path doesn't exist yet, nothing to do
+		}
+		return statErr
+	}
+
+	if info.IsDir() {
+		// It's a directory — check if it contains a single archive file
+		entries, readErr := os.ReadDir(packageDir)
+		if readErr != nil {
+			return nil //nolint:nilerr // best-effort; if we can't read the dir, assume it's not an archive
+		}
+		if len(entries) != 1 || entries[0].IsDir() {
+			return nil
+		}
+		archiveFile := filepath.Join(packageDir, entries[0].Name())
+		archiveName := entries[0].Name()
+		lower := strings.ToLower(archiveName)
+		if !strings.HasSuffix(lower, ".zip") && !strings.HasSuffix(lower, ".tar.gz") && !strings.HasSuffix(lower, ".tgz") && !strings.HasSuffix(lower, ".tar.xz") && !strings.HasSuffix(lower, ".txz") {
+			return nil
+		}
+		return extractArchiveToDir(archiveFile, packageDir)
+	}
+
+	// It's a regular file — extract it
+	archiveFile := packageDir
+	parentDir := filepath.Dir(packageDir)
+	extractedDir := filepath.Join(parentDir, "extracted")
+
+	if err := extractArchiveToDir(archiveFile, extractedDir); err != nil {
+		return err
+	}
+
+	// Remove the original file
+	os.Remove(archiveFile) //nolint:errcheck,gosec // best-effort cleanup
+
+	// Rename extracted directory to packageDir
+	if err := os.Rename(extractedDir, packageDir); err != nil {
+		return fmt.Errorf("failed to rename extracted directory: %w", err)
+	}
+
+	return nil
+}
+
+// extractArchiveToDir extracts an archive file to the destination directory.
+// Supports .zip, .tar.gz/.tgz, and .tar.xz/.txz formats.
+func extractArchiveToDir(archiveFile, destDir string) error {
+	lower := strings.ToLower(archiveFile)
+
+	switch {
+	case strings.HasSuffix(lower, ".zip"):
+		return extractZip(archiveFile, destDir)
+	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"):
+		return extractTarGz(archiveFile, destDir)
+	case strings.HasSuffix(lower, ".tar.xz"), strings.HasSuffix(lower, ".txz"):
+		return extractTarXz(archiveFile, destDir)
+	default:
+		return fmt.Errorf("unsupported archive format: %s", archiveFile)
+	}
+}
+
+func extractZip(src, dst string) error {
+	r, err := zip.OpenReader(src)
+	if err != nil {
+		return fmt.Errorf("failed to open zip: %w", err)
+	}
+	defer r.Close() //nolint:errcheck // best effort
+
+	for _, f := range r.File {
+		//nolint:gosec // G305: zipslip prevention checked below
+		targetPath := filepath.Join(dst, f.Name)
+
+		// Prevent zip slip
+		if !strings.HasPrefix(filepath.Clean(targetPath), filepath.Clean(dst)+string(os.PathSeparator)) {
+			return fmt.Errorf("illegal file path in zip: %s", f.Name)
+		}
+
+		if f.FileInfo().IsDir() {
+			if err := os.MkdirAll(targetPath, 0o755); err != nil { //nolint:gosec // G301: standard permissions
+				return err
+			}
+			continue
+		}
+
+		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil { //nolint:gosec // G301: standard permissions
+			return err
+		}
+
+		out, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode()) //nolint:gosec // G304: sanitized above
+		if err != nil {
+			return err
+		}
+		rc, openErr := f.Open()
+		if openErr != nil {
+			//nolint:errcheck,gosec // best effort on error path
+			out.Close()
+			return openErr
+		}
+		//nolint:gosec // decompression bomb: archive sources are trusted (user-supplied modules)
+		_, copyErr := io.Copy(out, rc)
+		//nolint:errcheck,gosec // read-only close
+		rc.Close()
+		closeErr := out.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+	}
+	return nil
+}
+
+func extractTarGz(src, dst string) error {
+	f, err := os.Open(src) //nolint:gosec // G304: path from our own code
+	if err != nil {
+		return fmt.Errorf("failed to open tar.gz: %w", err)
+	}
+	defer f.Close() //nolint:errcheck // best effort
+
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("failed to create gzip reader: %w", err)
+	}
+	defer gz.Close() //nolint:errcheck // best effort
+
+	return extractTar(gz, dst)
+}
+
+func extractTarXz(src, dst string) error {
+	f, err := os.Open(src) //nolint:gosec // G304: path from our own code
+	if err != nil {
+		return fmt.Errorf("failed to open tar.xz: %w", err)
+	}
+	defer f.Close() //nolint:errcheck // best effort
+
+	xzReader, err := xz.NewReader(f)
+	if err != nil {
+		return fmt.Errorf("failed to create xz reader: %w", err)
+	}
+
+	return extractTar(xzReader, dst)
+}
+
+//nolint:gocognit,gosec // tar extraction with safety checks is inherently complex; zip slip checked above
+func extractTar(r io.Reader, dst string) error {
+	tr := tar.NewReader(r)
+	for {
+		header, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("failed to read tar entry: %w", err)
+		}
+
+		//nolint:gosec // G305: path traversal prevention checked below
+		targetPath := filepath.Join(dst, header.Name)
+
+		// Prevent path traversal
+		if !strings.HasPrefix(filepath.Clean(targetPath), filepath.Clean(dst)+string(os.PathSeparator)) {
+			return fmt.Errorf("illegal file path in tar: %s", header.Name)
+		}
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(targetPath, os.FileMode(header.Mode)); err != nil { //nolint:gosec // G115: mode from trusted archive
+				return err
+			}
+		case tar.TypeReg:
+			if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil { //nolint:gosec // G301: standard permissions
+				return err
+			}
+			out, createErr := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, os.FileMode(header.Mode)) //nolint:gosec // G304: sanitized above
+			if createErr != nil {
+				return createErr
+			}
+			//nolint:gosec // decompression bomb: archive sources are trusted
+			if _, cpErr := io.Copy(out, tr); cpErr != nil {
+				//nolint:errcheck,gosec // best effort on error path
+				out.Close()
+				return cpErr
+			}
+			if err := out.Close(); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }

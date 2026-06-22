@@ -61,6 +61,7 @@ func runBundle(cmd *cobra.Command, args []string) error {
 	// Resolve modules in temp directory
 	resolver := tofupress.NewResolver()
 	resolver.PackageRoot = packageRoot // Set package boundary for local path enforcement
+	resolver.RootDir = workDir         // Set root dir for user-friendly error message paths
 	vendorDir, _ := cmd.Flags().GetString("vendor-dir")
 	if vendorDir != "" {
 		resolver.VendorDir = vendorDir
@@ -83,6 +84,12 @@ func runBundle(cmd *cobra.Command, args []string) error {
 	tree, err := resolver.Resolve(cmd.Context(), workDir)
 	if err != nil {
 		return fmt.Errorf("failed to resolve modules: %w", err)
+	}
+
+	// Check for empty root module (no .tf/.tofu files)
+	tfFiles, err := tofupress.FindTerraformFiles(workDir)
+	if err == nil && len(tfFiles) == 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: root module contains no .tf or .tofu files\n") //nolint:errcheck // stderr writes are best-effort
 	}
 
 	fmt.Fprintf(stdout, "Found %d modules and %d packages\n", len(tree.AllModules), len(tree.Packages)) //nolint:errcheck // stdout writes are best-effort

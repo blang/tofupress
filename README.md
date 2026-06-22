@@ -36,6 +36,21 @@ Resolve and create a self-contained archive:
 tofupress bundle ./my-infra bundle.zip
 ```
 
+#### Monorepo support
+
+For monorepo layouts where Terraform root modules live deep inside a repository, use the `//` syntax to separate the package root from the entry subdirectory:
+
+```bash
+# The monorepo root is the package; infra/environments/prod is the entry point
+# All ../ references resolve relative to the monorepo root
+tofupress bundle ./my-monorepo//infra/environments/prod bundle.zip
+
+# Same syntax works with resolve
+tofupress resolve ./my-monorepo//infra/environments/prod --json
+```
+
+Without `//`, TofuPress only copies the specified directory. With `//`, the entire repository is the package root, so sibling and parent directory references (e.g., `../../modules/network`) resolve correctly.
+
 #### Bundle formats
 
 TofuPress supports multiple archive formats for different distribution channels:

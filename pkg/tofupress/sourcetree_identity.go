@@ -129,7 +129,7 @@ func BuildSourcetreeIdentityPlan(tree *ResolvedTree, stripPlan *StripPlan) (*Sou
 	if tree == nil || tree.Root == nil {
 		return nil, fmt.Errorf("cannot build sourcetree identity plan for empty tree")
 	}
-	rootSourcetreeDir := filepath.Join(rootArchiveDir(tree), dirNameSourceTree)
+	rootSourcetreeDir := filepath.Join(rootArchiveDir(tree), vendorDirName(tree))
 	plan := &SourcetreeIdentityPlan{
 		RootSourcetreeDir: rootSourcetreeDir,
 		Packages:          make(map[string]*PackageIdentity),

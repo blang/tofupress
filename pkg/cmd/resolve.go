@@ -21,6 +21,8 @@ var resolveCmd = &cobra.Command{
 
 func init() {
 	resolveCmd.Flags().Bool("json", false, "Output in JSON format")
+	resolveCmd.Flags().String("vendor-dir", "sourcetree", "Vendored modules directory name")
+	resolveCmd.Flags().String("strip", "module-dir", "Strip mode: none, module-dir (safe default), config-only, or tf-only (alias for config-only)")
 }
 
 //nolint:gocognit // JSON and text output branching is straightforward
@@ -29,7 +31,7 @@ func runResolve(cmd *cobra.Command, args []string) error {
 	stdout := cmd.OutOrStdout()
 
 	// Resolve source (local or remote) to a working directory
-	workDir, _, cleanup, err := resolveSource(cmd.Context(), dir)
+	workDir, packageRoot, cleanup, err := resolveSource(cmd.Context(), dir)
 	if err != nil {
 		return err
 	}
@@ -37,6 +39,12 @@ func runResolve(cmd *cobra.Command, args []string) error {
 
 	// Resolve modules in temp directory
 	resolver := tofupress.NewResolver()
+	resolver.PackageRoot = packageRoot // Set package boundary for local path enforcement
+	resolver.RootDir = workDir         // Set root dir for user-friendly error message paths
+	vendorDir, _ := cmd.Flags().GetString("vendor-dir")
+	if vendorDir != "" {
+		resolver.VendorDir = vendorDir
+	}
 	resolver.Progress = func(event *tofupress.ProgressEvent) {
 		if event == nil {
 			return
@@ -55,6 +63,12 @@ func runResolve(cmd *cobra.Command, args []string) error {
 	tree, err := resolver.Resolve(cmd.Context(), workDir)
 	if err != nil {
 		return fmt.Errorf("failed to resolve modules: %w", err)
+	}
+
+	// Check for empty root module (no .tf/.tofu files)
+	tfFiles, err := tofupress.FindTerraformFiles(workDir)
+	if err == nil && len(tfFiles) == 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: root module contains no .tf or .tofu files\n") //nolint:errcheck // stderr writes are best-effort
 	}
 
 	// Check if JSON output requested

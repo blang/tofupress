@@ -61,6 +61,18 @@ test:
 integration-test:
     go test -count=1 -v -tags=integration ./...
 
+# Run fast acceptance tests (local only, no network)
+acceptance:
+    go test -tags=integration -short -v -parallel=4 -timeout=10m ./pkg/tofupress/
+
+# Run full acceptance test suite (includes network + OCI)
+acceptance-full:
+    go test -tags=integration -v -timeout=60m ./pkg/tofupress/
+
+# Run a specific acceptance test category
+acceptance-cat cat:
+    go test -tags=integration -v -timeout=15m ./pkg/tofupress/ -run 'TestAcceptance_{{cat}}'
+
 tidy:
     go mod tidy
 

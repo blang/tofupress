@@ -14,62 +14,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// testBinaryPath holds the path to the pre-compiled test binary.
-// Built once in TestMain to avoid recompilation per test.
-var testBinaryPath string
-
-// TestMain builds the binary once before all tests to avoid per-test recompilation.
-func TestMain(m *testing.M) {
-	// Create a shared temp directory for the binary
-	testDir, err := os.MkdirTemp("", "tofupress-test-*")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to create test temp dir: %v\n", err) //nolint:errcheck // stderr is best-effort
-		os.Exit(1)
-	}
-	defer os.RemoveAll(testDir) //nolint:errcheck,gosec // cleanup failures are acceptable
-
-	// Build binary once
-	binaryName := "tofupress"
-	if runtime.GOOS == "windows" {
-		binaryName += ".exe"
-	}
-	testBinaryPath = filepath.Join(testDir, binaryName)
-
-	// Get the project root directory (3 levels up from this test file)
-	_, filename, _, ok := runtime.Caller(0)
-	if !ok {
-		fmt.Fprintln(os.Stderr, "failed to determine test file location")
-		os.Exit(1)
-	}
-	projectRoot := filepath.Dir(filepath.Dir(filepath.Dir(filename)))
-
-	cmd := exec.Command("go", "build", "-o", testBinaryPath, "./cmd/tofupress") //nolint:gosec // G204: subprocess is intentional for building test binary
-	cmd.Dir = projectRoot
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to build test binary: %v\n%s\n", err, output) //nolint:errcheck // stderr is best-effort
-		os.Exit(1)
-	}
-
-	os.Exit(m.Run())
-}
-
-// buildBinary returns the path to the pre-compiled test binary.
-// The binary is built once in TestMain to avoid recompilation per test.
-func buildBinary(t *testing.T) string {
-	t.Helper()
-	require.NotEmpty(t, testBinaryPath, "test binary path should be set by TestMain")
-	_, err := os.Stat(testBinaryPath)
-	require.NoError(t, err, "test binary should exist at %s", testBinaryPath)
-	return testBinaryPath
-}
 
 // createSimpleFixture creates a minimal Terraform module with one local dependency.
 // Returns the path to the fixture directory.

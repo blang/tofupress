@@ -168,6 +168,14 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 		return nil, fmt.Errorf("failed to create sourcetree directory: %w", err)
 	}
 
+	// Respect context cancellation immediately
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	// Track downloaded packages for deduplication
 	downloadedPackages := make(map[string]string) // packageAddr -> localPath
 	contentHashes := make(map[string]string)      // contentHash -> localPath
@@ -194,6 +202,13 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 
 	// Process modules in BFS order (level by level for parallel downloads)
 	for len(queue) > 0 {
+		// Respect context cancellation between BFS levels
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
 		// Process current level
 		currentLevel := queue
 		queue = nil
@@ -203,6 +218,11 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 		downloadInfoMap := make(map[string][]*downloadInfo)
 
 		for _, item := range currentLevel {
+			// Check cancellation before scanning each module's directory
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+
 			r.report(&ProgressEvent{
 				Type:       "resolving",
 				ModuleKey:  item.node.Key,

@@ -591,3 +591,25 @@ module "nested" {
 	// Should have root + a + a.nested + b + b.nested = 5 modules
 	assert.Len(t, tree.AllModules, 5)
 }
+
+func TestResolve_ContextCancellation(t *testing.T) {
+	rootDir := t.TempDir()
+	writeTerraformFile(t, rootDir, "main.tf", `
+module "child" {
+  source = "./child"
+}
+`)
+	childDir := filepath.Join(rootDir, "child")
+	require.NoError(t, os.MkdirAll(childDir, 0o755))
+	writeTerraformFile(t, childDir, "main.tf", `variable "name" { type = string }`)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	resolver := NewResolver()
+	_, err := resolver.Resolve(ctx, rootDir)
+	require.Error(t, err, "expected error for cancelled context")
+	// The resolver should return context.Canceled when given a cancelled context
+	assert.ErrorIs(t, err, context.Canceled,
+		"expected context.Canceled, got %v", err)
+}

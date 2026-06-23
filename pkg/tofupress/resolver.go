@@ -365,8 +365,15 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 								boundaryTarget = installDir
 							}
 							if err := ensureWithinPackage(item.node.PackageRoot, boundaryTarget); err != nil {
-								return nil, fmt.Errorf("module %s at %s escapes package boundary: source %s resolves to %s, which is outside package root %s",
+								errMsg := fmt.Sprintf(
+									"module %s at %s escapes package boundary: source %s resolves to %s, which is outside package root %s",
 									mod.Name, r.displayPath(item.dir), source.Raw, r.displayPath(boundaryTarget), r.displayPath(item.node.PackageRoot))
+								if source.Type == SourceLocal {
+									errMsg += "\n\nHint: Use // to set the package boundary. " +
+										"For example, run from the repository root and use \".//live/myapp\" " +
+										"instead of \"./live/myapp\" to include parent directories."
+								}
+								return nil, fmt.Errorf("%s", errMsg)
 							}
 							if source.SubDir == "" {
 								child.PackageRoot = item.node.PackageRoot

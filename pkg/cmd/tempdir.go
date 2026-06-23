@@ -24,7 +24,16 @@ import (
 // It uses go-getter to handle ALL source types uniformly (local, git, http, s3, etc.).
 // The // separator defines the package boundary: everything before is the package,
 // everything after is the subdirectory within the package.
+//
+// For local filesystem sources without an explicit // separator, resolveSource
+// automatically expands the package boundary to the nearest git repository root
+// (detected via a .git directory walk-up). This ensures that ../ references from
+// the root module stay within the package — matching OpenTofu/Terraform's
+// behaviour where the entire filesystem is available to local modules.
+//
 // Returns the work directory, package root (for boundary enforcement), and cleanup function.
+//
+//nolint:gocognit,gocyclo // local source boundary expansion adds minor complexity
 func resolveSource(ctx context.Context, source string) (workDir, packageRoot string, cleanup func(), err error) {
 	// Get current working directory for relative path resolution
 	pwd, err := os.Getwd()
@@ -35,6 +44,17 @@ func resolveSource(ctx context.Context, source string) (workDir, packageRoot str
 	// Split package address from subdirectory using // separator FIRST
 	// This must happen before detection, as go-getter doesn't understand //
 	packageAddr, subDir := splitPackageSubdir(source)
+
+	// For local filesystem sources without explicit //, expand the package
+	// boundary to the nearest git repository root so that ../ references
+	// from the root module are included. This matches OpenTofu/Terraform's
+	// behaviour where local modules have access to the entire filesystem.
+	if subDir == "" {
+		if repoRoot, expandedSubdir, ok := detectRepoRoot(packageAddr, pwd); ok {
+			packageAddr = repoRoot
+			subDir = expandedSubdir
+		}
+	}
 
 	// Detect and normalize the package source using go-getter
 	// pwd is required for resolving relative paths
@@ -177,6 +197,46 @@ func splitPackageSubdir(src string) (packageAddr, subDir string) {
 	}
 
 	return src, path.Clean(subdir)
+}
+
+// detectRepoRoot walks up from a directory path to find a git repository root
+// (detected by the presence of a .git directory). Returns the repo root path,
+// the subdirectory relative to the repo root, and whether a git repo was found.
+//
+// When path is relative, it is resolved against pwd first. The returned repoRoot
+// is an absolute path so that go-getter can locate it correctly.
+func detectRepoRoot(packagePath, pwd string) (repoRoot, subDir string, ok bool) {
+	absPath := packagePath
+	if !filepath.IsAbs(absPath) {
+		absPath = filepath.Join(pwd, absPath)
+	}
+	absPath = filepath.Clean(absPath)
+
+	// Verify the source path exists on the filesystem.
+	// If it doesn't, it's not a local directory — don't expand.
+	if info, err := os.Stat(absPath); err != nil || !info.IsDir() {
+		return "", "", false
+	}
+
+	// Walk up the directory tree looking for a .git directory.
+	dir := absPath
+	for {
+		gitPath := filepath.Join(dir, ".git")
+		if info, err := os.Stat(gitPath); err == nil && info.IsDir() {
+			rel, err := filepath.Rel(dir, absPath)
+			if err != nil {
+				return "", "", false
+			}
+			return dir, rel, true
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			// Reached filesystem root (/) — no .git found
+			return "", "", false
+		}
+		dir = parent
+	}
 }
 
 // copyDir recursively copies a directory from src to dst.

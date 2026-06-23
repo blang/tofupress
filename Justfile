@@ -99,6 +99,7 @@ build platform="linux/amd64/-":
 build-all:
     #!/usr/bin/env sh
     mkdir -p "{{dist_dir}}"
+    version="{{version}}"
     for platform in \
         "linux/amd64/-" \
         "linux/arm64/-" \
@@ -107,17 +108,19 @@ build-all:
         os=$(echo $platform | cut -d/ -f1)
         arch=$(echo $platform | cut -d/ -f2)
         arm=$(echo $platform | cut -d/ -f3)
-        binary="tofupress-${os}-${arch}"
-        output="{{dist_dir}}/tofupress-${os}-${arch}"
+        staging="tofupress-${version}-${os}-${arch}"
+        staging_dir="{{dist_dir}}/${staging}"
 
+        mkdir -p "$staging_dir"
         CGO_ENABLED=0 GOOS=$os GOARCH=$arch $([ "$arm" != "-" ] && echo "GOARM=$arm") \
         go build \
             -trimpath \
             -ldflags '{{ld_flags}}' \
-            -o "$output" \
+            -o "$staging_dir/tofupress" \
             ./cmd/tofupress
 
-        tar -C "{{dist_dir}}" -czf "$output.tar.gz" "$binary"
+        tar -C "{{dist_dir}}" -czf "{{dist_dir}}/${staging}.tar.gz" "$staging"
+        rm -rf "$staging_dir"
     done
 
 qa:

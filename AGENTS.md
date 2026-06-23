@@ -36,6 +36,7 @@ just prek-run     # run all pre-commit hooks on all files
 | golangci-lint | 2.11.4 | `.golangci.yml` |
 | goimports | 0.44.0 | `go:golang.org/x/tools/cmd/goimports` |
 | prek | 0.3.8 | `prek.toml` |
+| trufflehog | 3.95.6 | secret detection in pre-commit |
 | yamllint | 1.38.0 | `.yamllint.yml` |
 
 `mise activate` auto-installs pre-commit hooks via the `enter` hook.
@@ -46,7 +47,7 @@ just prek-run     # run all pre-commit hooks on all files
 
 **YAML**: yamllint (`.yamllint.yml`, strict mode, 120-column width, excludes `dist/`).
 
-Pre-commit hooks (prek): builtin file checks + local hooks for Go (gofmt, goimports, golangci-lint, go-mod-tidy) and YAML (yamllint).
+Pre-commit hooks (prek): builtin file checks + local hooks for Go (gofmt, goimports, golangci-lint, go-mod-tidy), YAML (yamllint), and secret detection (trufflehog).
 
 ## Build
 

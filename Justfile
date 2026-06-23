@@ -50,7 +50,10 @@ lint-ci:
 lint-yaml:
     yamllint -s .
 
-lint-all: lint lint-yaml
+lint-all: lint lint-yaml trufflehog
+
+trufflehog:
+    mise exec github:trufflesecurity/trufflehog -- trufflehog git file://. --fail --no-update
 
 vet:
     go vet ./...

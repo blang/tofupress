@@ -85,3 +85,13 @@ language = "system"
 types = ["yaml"]
 args = ["-s", "."]
 pass_filenames = false
+
+[[repos.hooks]]
+id = "trufflehog"
+name = "trufflehog (detect secrets)"
+entry = "mise"
+language = "system"
+args = ["exec", "github:trufflesecurity/trufflehog", "--", "trufflehog", "git", "file://.", "--fail", "--no-update"]
+env = { TRUFFLEHOG_PRE_COMMIT = "1" }
+pass_filenames = false
+always_run = true

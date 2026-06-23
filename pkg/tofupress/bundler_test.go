@@ -10,6 +10,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -728,6 +730,163 @@ func TestBundlerDefaultModuleDirStrippingDropsIrrelevantPackageFilesWhenReadsAre
 	assert.Contains(t, names, "templates/userdata.tftpl")
 	assert.NotContains(t, names, "templates/unused.tftpl")
 	assert.NotContains(t, names, "README.md")
+}
+
+// TestBundler_NestedRootWithRemoteModules_AllPackagesInZip reproduces the user-reported bug:
+// bundling a root module at a nested path (live/network/infratest/) with remote git-sourced
+// modules should include ALL package directories in the ZIP, not just rewrite source references.
+func TestBundler_NestedRootWithRemoteModules_AllPackagesInZip(t *testing.T) {
+	// Simulate a git repo root containing a nested root module at live/network/infratest/
+	// and two remote modules from different packages.
+	repoRoot := t.TempDir()
+	rootWorkDir := filepath.Join(repoRoot, "live", "network", "infratest")
+	require.NoError(t, os.MkdirAll(rootWorkDir, 0o755))
+
+	// Create two distinct remote packages (simulating downloaded git repos)
+	pkg1Dir := t.TempDir()
+	writeTerraformFile(t, pkg1Dir, "main.tf", `output "pkg1" { value = "one" }`)
+	pkg2Dir := t.TempDir()
+	writeTerraformFile(t, pkg2Dir, "main.tf", `output "pkg2" { value = "two" }`)
+
+	// Root module references both packages
+	writeTerraformFile(t, rootWorkDir, "ssm_outputs.tf", `
+module "pkg_one" {
+  source = "git::https://github.com/example/pkg-one.git?ref=v1.0.0"
+}
+
+module "pkg_two" {
+  source = "git::https://github.com/example/pkg-two.git?ref=v2.0.0"
+}
+`)
+
+	// Build resolved tree: root module, two remote children, two packages
+	modPkg1 := &ModuleNode{
+		Parent:      nil, // set below
+		Key:         "root.pkg_one",
+		Name:        "pkg_one",
+		Source:      ModuleSource{Raw: "git::https://github.com/example/pkg-one.git?ref=v1.0.0", PackageAddr: "git::https://github.com/example/pkg-one.git", Type: SourceGit},
+		InstallDir:  pkg1Dir,
+		PackageRoot: pkg1Dir,
+		IsRemote:    true,
+	}
+	modPkg2 := &ModuleNode{
+		Parent:      nil, // set below
+		Key:         "root.pkg_two",
+		Name:        "pkg_two",
+		Source:      ModuleSource{Raw: "git::https://github.com/example/pkg-two.git?ref=v2.0.0", PackageAddr: "git::https://github.com/example/pkg-two.git", Type: SourceGit},
+		InstallDir:  pkg2Dir,
+		PackageRoot: pkg2Dir,
+		IsRemote:    true,
+	}
+	rootModule := &ModuleNode{
+		Key:         "root",
+		Name:        "root",
+		InstallDir:  rootWorkDir,
+		PackageRoot: repoRoot, // repo root is the package root (simulating detectRepoRoot)
+		IsLocal:     true,
+		Children:    []*ModuleNode{modPkg1, modPkg2},
+	}
+	modPkg1.Parent = rootModule
+	modPkg2.Parent = rootModule
+
+	tree := &ResolvedTree{
+		Root:       rootModule,
+		AllModules: []*ModuleNode{rootModule, modPkg1, modPkg2},
+		Packages: map[string]*DownloadedPackage{
+			"pkg-one": {PackageAddr: "git::https://github.com/example/pkg-one.git", LocalDir: pkg1Dir},
+			"pkg-two": {PackageAddr: "git::https://github.com/example/pkg-two.git", LocalDir: pkg2Dir},
+		},
+	}
+
+	// Apply sourcetree identity planning (non-OCI flow)
+	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+	identityPlan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	require.NoError(t, err)
+	require.NoError(t, ApplySourcetreeIdentityPlan(tree, identityPlan))
+
+	// Re-plan stripping after identity
+	stripPlan, err = PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+
+	// Bundle to ZIP
+	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
+	bundler := NewBundler(BundleFormatZIP)
+	bundler.StripPlan = stripPlan
+	require.NoError(t, bundler.Bundle(tree, archivePath))
+
+	// Extract and verify
+	extractDir := t.TempDir()
+	extractZip(t, archivePath, extractDir)
+
+	// Verify root module files are at the nested path relative to package root
+	rootFile := filepath.Join(extractDir, "live", "network", "infratest", "ssm_outputs.tf")
+	require.FileExists(t, rootFile, "root ssm_outputs.tf must be in the archive at its nested path")
+
+	// Read the rewritten source
+	content, err := os.ReadFile(rootFile)
+	require.NoError(t, err)
+	contentStr := string(content)
+
+	// Sources must be rewritten to relative paths pointing to the vendor dir.
+	// Since the .tf file is at live/network/infratest/ (3 levels below the package root),
+	// the relative path goes up 3 levels then into modules/.
+	assert.Contains(t, contentStr, "modules/",
+		"remote module sources must be rewritten to point to vendor dir")
+	assert.NotContains(t, contentStr, "git::",
+		"remote module sources must not contain original git:: references")
+
+	// Find ALL package directories in the archive
+	names := zipFileNames(t, archivePath)
+	t.Logf("Archive contents: %v", names)
+
+	// Count how many unique package directories exist under modules/
+	packageDirs := make(map[string]bool)
+	for _, name := range names {
+		if after, ok := strings.CutPrefix(name, "modules/"); ok {
+			// Extract the package ID (first path component after modules/)
+			if part, _, found := strings.Cut(after, "/"); found && part != "" {
+				packageDirs[part] = true
+			}
+		}
+	}
+
+	// BOTH packages must be present
+	assert.GreaterOrEqual(t, len(packageDirs), 2,
+		"archive must contain both package directories under modules/, found: %v", packageDirs)
+
+	// Each package must have at least one .tf file
+	for pkgID := range packageDirs {
+		found := false
+		for _, name := range names {
+			if strings.HasPrefix(name, "modules/"+pkgID+"/") && strings.HasSuffix(name, ".tf") {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "package %s must contain .tf files", pkgID)
+	}
+
+	// Verify the rewritten source paths actually resolve to existing directories
+	// Extract the source path from ssm_outputs.tf
+	sourceRe := regexp.MustCompile(`source\s*=\s*"([^"]+)"`)
+	matches := sourceRe.FindAllStringSubmatch(contentStr, -1)
+	for _, match := range matches {
+		sourcePath := match[1]
+		// Resolve relative to the .tf file's location
+		tfDir := filepath.Join(extractDir, "live", "network", "infratest")
+		resolved := filepath.Join(tfDir, sourcePath)
+		// Normalize to archive-relative path
+		rel, err := filepath.Rel(extractDir, resolved)
+		require.NoError(t, err)
+		t.Logf("Rewritten source %q resolves to %q in archive", sourcePath, rel)
+
+		// The directory must exist in the archive
+		absInExtract := filepath.Join(extractDir, rel)
+		assert.DirExists(t, absInExtract,
+			"rewritten source %q must resolve to existing directory %q in archive",
+			sourcePath, rel)
+	}
 }
 
 func TestBundler_RejectsVendorDirConflict(t *testing.T) {

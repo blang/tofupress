@@ -193,14 +193,14 @@ func runBundle(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	fmt.Fprintf(stdout, "Module references: %d\n", metadata.Stats.ModuleReferences)         //nolint:errcheck // stdout writes are best-effort
-	fmt.Fprintf(stdout, "Unique packages: %d\n", metadata.Stats.UniquePackages)             //nolint:errcheck // stdout writes are best-effort
-	fmt.Fprintf(stdout, "Deduplicated packages: %d\n", metadata.Stats.DeduplicatedPackages) //nolint:errcheck // stdout writes are best-effort
-	fmt.Fprintf(stdout, "Source types: %v\n", metadata.Stats.SourceTypes)                   //nolint:errcheck // stdout writes are best-effort
-	fmt.Fprintf(stdout, "Original bytes: %d\n", metadata.Stats.OriginalBytes)               //nolint:errcheck // stdout writes are best-effort
-	fmt.Fprintf(stdout, "Final bytes: %d\n", metadata.Stats.FinalBytes)                     //nolint:errcheck // stdout writes are best-effort
-	fmt.Fprintf(stdout, "Stripped bytes: %d\n", metadata.Stats.StrippedBytes)               //nolint:errcheck // stdout writes are best-effort
-	fmt.Fprintf(stdout, "Metadata: %s\n", tofupress.MetadataFileName)                       //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Module references: %d\n", metadata.Stats.ModuleReferences)                    //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Unique packages: %d\n", metadata.Stats.UniquePackages)                        //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Deduplicated packages: %d\n", metadata.Stats.DeduplicatedPackages)            //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Source types: %s\n", tofupress.FormatSourceTypes(metadata.Stats.SourceTypes)) //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Original bytes: %d\n", metadata.Stats.OriginalBytes)                          //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Final bytes: %d\n", metadata.Stats.FinalBytes)                                //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Stripped bytes: %d\n", metadata.Stats.StrippedBytes)                          //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Metadata: %s\n", tofupress.MetadataFileName)                                  //nolint:errcheck // stdout writes are best-effort
 	if metadataOut != "" {
 		fmt.Fprintf(stdout, "Metadata: %s\n", metadataOut) //nolint:errcheck // stdout writes are best-effort
 	}

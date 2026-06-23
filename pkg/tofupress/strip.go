@@ -3,6 +3,7 @@ package tofupress
 import (
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -337,6 +338,14 @@ func isGeneratedOrVCSPath(absPath string) bool {
 //nolint:gocognit // directory walking with stats accounting requires branching
 func (p *StripPlan) computeStats() error {
 	for _, pkgPlan := range p.Packages {
+		// Guard against directories that may have been removed during identity
+		// planning (e.g., superseded package temp dirs). Skip gracefully.
+		if _, statErr := os.Stat(pkgPlan.PackageRoot); statErr != nil {
+			if os.IsNotExist(statErr) {
+				continue
+			}
+			return fmt.Errorf("failed to stat package root %s: %w", pkgPlan.PackageRoot, statErr)
+		}
 		if err := filepath.WalkDir(pkgPlan.PackageRoot, func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
 				return err

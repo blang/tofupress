@@ -74,16 +74,13 @@ func TestPrintModuleTree_Nested(t *testing.T) {
 	out := buf.String()
 
 	lines := strings.Split(strings.TrimSpace(out), "\n")
-	require.GreaterOrEqual(t, len(lines), 5, "expected at least 5 lines, got: %q", out)
+	require.GreaterOrEqual(t, len(lines), 3, "expected at least 3 lines, got: %q", out)
 
-	// Output format: name line, then optional Path line
+	// Output format: name line (no Path/Source lines since none are set in fixture)
 	assert.Contains(t, lines[0], "root")
 	assert.Contains(t, lines[0], "local")
-	// lines[1] is "Path: ..." for root
-	// lines[2] is "- mod_a (local)"
-	assert.Contains(t, lines[2], "mod_a")
-	// lines[4] is "- mod_b (local)"
-	assert.Contains(t, lines[4], "mod_b")
+	assert.Contains(t, lines[1], "mod_a")
+	assert.Contains(t, lines[2], "mod_b")
 }
 
 func TestOutputJSON_RootOnly(t *testing.T) {

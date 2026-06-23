@@ -123,6 +123,82 @@ func TestWriteMetadataFileWritesIndentedJSON(t *testing.T) {
 	assert.Contains(t, string(data), "\n  \"schema_version\":")
 }
 
+func TestRelPathNoLeak(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		rootDir string
+		want    string
+	}{
+		// Path under rootDir — should return relative path
+		{"under root", "/tmp/abc/package/main.tf", "/tmp/abc/package", "main.tf"},
+		{"nested under root", "/tmp/abc/package/sub/file.tf", "/tmp/abc/package", "sub/file.tf"},
+		// Path outside rootDir — must NOT leak the absolute temp path
+		// Remote packages are in different temp dirs, so rel starts with ".."
+		{"outside root (different temp dir)", "/tmp/xyz/download/module", "/tmp/abc/package", "module"},
+		{"empty path", "", "/tmp/abc", ""},
+		{"empty rootDir", "/tmp/abc/path", "", "/tmp/abc/path"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := relPathNoLeak(tt.path, tt.rootDir)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestBuildArtifactMetadata_OutputPathIsRelative(t *testing.T) {
+	rootDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(rootDir, "main.tf"), []byte("# empty"), 0o644))
+
+	tree := &ResolvedTree{
+		Root:       &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true},
+		AllModules: []*ModuleNode{{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}},
+		Packages:   map[string]*DownloadedPackage{},
+	}
+
+	// Pass an absolute output path — metadata should store it relative to cwd
+	absPath := filepath.Join(rootDir, "bundle.zip")
+	metadata, err := BuildArtifactMetadata(tree, &MetadataRequest{
+		Build:      BuildInfo{Version: "test"},
+		Command:    "bundle",
+		Args:       []string{".", absPath},
+		Options:    BundleOptions{Format: "zip", StripMode: string(StripModeNone)},
+		OutputPath: absPath,
+		CreatedAt:  time.Now(),
+	})
+	require.NoError(t, err)
+
+	// Output path must not be absolute
+	assert.False(t, filepath.IsAbs(metadata.Artifact.OutputPath),
+		"output_path in metadata must not be an absolute path (leaks host info): got %q", metadata.Artifact.OutputPath)
+
+	// Command args must not contain absolute paths
+	for _, arg := range metadata.Command.Args {
+		assert.False(t, filepath.IsAbs(arg),
+			"command args in metadata must not contain absolute paths (leaks host info): got %q", arg)
+	}
+}
+
+func TestFormatSourceTypes(t *testing.T) {
+	tests := []struct {
+		name   string
+		counts map[string]int
+		want   string
+	}{
+		{"empty", map[string]int{}, ""},
+		{"single", map[string]int{"git": 22}, "git: 22"},
+		{"multiple", map[string]int{"git": 22, "local": 4}, "git: 22, local: 4"},
+		{"three", map[string]int{"git": 5, "local": 3, "registry": 1}, "git: 5, local: 3, registry: 1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatSourceTypes(tt.counts)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestBuildArtifactMetadataIncludesSourcetreeDedupGroups(t *testing.T) {
 	root := t.TempDir()
 	finalDir := filepath.Join(root, "modules", "pkg-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")

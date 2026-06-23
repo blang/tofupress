@@ -82,12 +82,14 @@ func runResolve(cmd *cobra.Command, args []string) error {
 
 //nolint:gocognit // JSON marshaling with cycle detection is complex but clear
 func outputJSON(stdout io.Writer, tree *tofupress.ResolvedTree) error {
-	// Output as JSON - use a cycle-safe representation
+	// Output as JSON - use a cycle-safe representation with paths made relative
+	// to avoid leaking ephemeral temp directory paths.
 	type jsonModule struct {
 		Key        string   `json:"key"`
 		Name       string   `json:"name"`
 		Source     string   `json:"source"`
-		InstallDir string   `json:"install_dir"`
+		SourceType string   `json:"source_type"`
+		InstallDir string   `json:"install_dir,omitempty"`
 		Children   []string `json:"children"`
 		IsLocal    bool     `json:"is_local"`
 		IsRemote   bool     `json:"is_remote"`
@@ -95,9 +97,10 @@ func outputJSON(stdout io.Writer, tree *tofupress.ResolvedTree) error {
 
 	type jsonPackage struct {
 		PackageAddr string `json:"package_addr"`
-		LocalDir    string `json:"local_dir"`
+		LocalDir    string `json:"local_dir,omitempty"`
 	}
 
+	rootDir := tree.Root.InstallDir
 	modules := make([]jsonModule, 0, len(tree.AllModules))
 	for _, mod := range tree.AllModules {
 		childNames := make([]string, 0, len(mod.Children))
@@ -107,10 +110,11 @@ func outputJSON(stdout io.Writer, tree *tofupress.ResolvedTree) error {
 		modules = append(modules, jsonModule{
 			Key:        mod.Key,
 			Name:       mod.Name,
-			Source:     mod.Source.Raw,
+			Source:     mod.Source.PackageAddr,
+			SourceType: mod.Source.Type.String(),
 			IsLocal:    mod.IsLocal,
 			IsRemote:   mod.IsRemote,
-			InstallDir: mod.InstallDir,
+			InstallDir: tofupress.FormatInstallDir(mod.InstallDir, rootDir),
 			Children:   childNames,
 		})
 	}
@@ -119,7 +123,7 @@ func outputJSON(stdout io.Writer, tree *tofupress.ResolvedTree) error {
 	for _, pkg := range tree.Packages {
 		packages = append(packages, jsonPackage{
 			PackageAddr: pkg.PackageAddr,
-			LocalDir:    pkg.LocalDir,
+			LocalDir:    tofupress.FormatInstallDir(pkg.LocalDir, rootDir),
 		})
 	}
 
@@ -165,9 +169,6 @@ func printModuleTree(w io.Writer, node *tofupress.ModuleNode, depth int) {
 	fmt.Fprintf(w, "%s- %s (%s)\n", indent.String(), node.Name, moduleType) //nolint:errcheck // writer writes are best-effort
 	if node.Source.PackageAddr != "" {
 		fmt.Fprintf(w, "%s  Source: %s\n", indent.String(), node.Source.PackageAddr) //nolint:errcheck // writer writes are best-effort
-	}
-	if node.InstallDir != "" {
-		fmt.Fprintf(w, "%s  Path: %s\n", indent.String(), node.InstallDir) //nolint:errcheck // writer writes are best-effort
 	}
 
 	// Print children

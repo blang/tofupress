@@ -181,11 +181,11 @@ func BuildArtifactMetadata(tree *ResolvedTree, req *MetadataRequest) (*ArtifactM
 		TofuPress:     req.Build,
 		Command: MetadataCommand{
 			Name:    req.Command,
-			Args:    append([]string(nil), req.Args...),
+			Args:    safeArgs(req.Args),
 			Options: req.Options,
 		},
 		Artifact: MetadataArtifact{
-			OutputPath:   req.OutputPath,
+			OutputPath:   safeOutputPath(req.OutputPath),
 			Format:       req.Options.Format,
 			OCICompliant: req.Options.OCICompliant,
 			MetadataPath: MetadataFileName,
@@ -282,6 +282,32 @@ func countSourceTypes(nodes []*ModuleNode) map[string]int {
 	return counts
 }
 
+// FormatSourceTypes formats a source type count map as a human-readable string.
+// Returns an empty string for an empty map.
+// Keys are sorted alphabetically for deterministic output.
+func FormatSourceTypes(counts map[string]int) string {
+	if len(counts) == 0 {
+		return ""
+	}
+	keys := make([]string, 0, len(counts))
+	for k := range counts {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s: %d", k, counts[k]))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// FormatInstallDir returns a stable display path for an install directory.
+// When the path is under rootDir, it returns the relative path.
+// Otherwise, it returns only the last component to avoid leaking temp paths.
+func FormatInstallDir(path, rootDir string) string {
+	return relPathNoLeak(path, rootDir)
+}
+
 // buildDedupGroupMetadata converts internal dedup groups to their metadata representation.
 func buildDedupGroupMetadata(groups []DedupGroup) []DedupGroupMetadata {
 	out := make([]DedupGroupMetadata, 0, len(groups))
@@ -297,18 +323,49 @@ func buildDedupGroupMetadata(groups []DedupGroup) []DedupGroupMetadata {
 	return out
 }
 
-// relPathNoLeak returns path as a relative path under rootDir, or the original
-// path if rootDir is not a prefix (e.g., for separately-downloaded packages).
-// This prevents temporary build directory paths from leaking into metadata.
+// relPathNoLeak returns path as a relative path under rootDir.
+// When path is outside rootDir (e.g., a remote package in a separate temp
+// directory), returns only the last path component to avoid leaking temporary
+// build directory paths into metadata.
 func relPathNoLeak(path, rootDir string) string {
 	if path == "" || rootDir == "" {
 		return path
 	}
 	rel, err := filepath.Rel(filepath.Clean(rootDir), filepath.Clean(path))
 	if err != nil || strings.HasPrefix(rel, "..") {
-		return path
+		return filepath.Base(path)
 	}
 	return rel
+}
+
+// safeOutputPath makes an absolute output path relative to the current working
+// directory to avoid leaking host filesystem details into metadata. If the path
+// cannot be relativized, only the base filename is stored.
+func safeOutputPath(p string) string {
+	if !filepath.IsAbs(p) {
+		return p
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return filepath.Base(p)
+	}
+	rel, err := filepath.Rel(cwd, p)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return filepath.Base(p)
+	}
+	return rel
+}
+
+// safeArgs copies args, replacing absolute paths with paths relative to CWD.
+func safeArgs(args []string) []string {
+	if len(args) == 0 {
+		return nil
+	}
+	out := make([]string, len(args))
+	for i, a := range args {
+		out[i] = safeOutputPath(a)
+	}
+	return out
 }
 
 // WriteMetadataFile writes metadata as indented JSON to the given path.

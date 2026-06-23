@@ -8,9 +8,27 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 
 	"github.com/ulikunitz/xz"
 )
+
+// ReadMetadataFromDir reads metadata from an extracted artifact directory.
+// The directory should contain a meta.json file at its root.
+func ReadMetadataFromDir(dir string) (*ArtifactMetadata, error) {
+	metaPath := filepath.Join(dir, MetadataFileName)
+	data, err := os.ReadFile(metaPath) //nolint:gosec // path is constructed from user input
+	if err != nil {
+		return nil, fmt.Errorf("metadata file not found in %s: %w", dir, err)
+	}
+
+	var metadata ArtifactMetadata
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return nil, fmt.Errorf("invalid metadata in %s: %w", dir, err)
+	}
+
+	return &metadata, nil
+}
 
 // ReadMetadataFromArtifact reads metadata from a supported archive format.
 func ReadMetadataFromArtifact(path string) (*ArtifactMetadata, error) {

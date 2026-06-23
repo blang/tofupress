@@ -16,6 +16,8 @@ import (
 
 	"github.com/hashicorp/go-getter"
 	"github.com/ulikunitz/xz"
+
+	"github.com/blang/tofupress/pkg/tofupress"
 )
 
 // resolveSource prepares a working directory from a go-getter compatible source.
@@ -62,6 +64,8 @@ func resolveSource(ctx context.Context, source string) (workDir, packageRoot str
 	getters["file"] = &getter.FileGetter{
 		Copy: true,
 	}
+	// Add OCI getter for oci:// scheme support
+	getters["oci"] = &tofupress.OCIGetter{}
 
 	// Download/copy the package using go-getter
 	client := &getter.Client{

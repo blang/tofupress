@@ -3,6 +3,7 @@ package tofupress
 import (
 	"context"
 	"fmt"
+	"maps"
 
 	"github.com/hashicorp/go-getter"
 )
@@ -14,15 +15,20 @@ type Fetcher struct {
 }
 
 // NewFetcher creates a new Fetcher with default configuration.
+// Includes the OCI getter for oci:// scheme support.
 func NewFetcher() *Fetcher {
+	getters := make(map[string]getter.Getter)
+	maps.Copy(getters, getter.Getters)
+	getters["oci"] = &OCIGetter{}
+
 	return &Fetcher{
 		detectors: getter.Detectors,
-		getters:   getter.Getters,
+		getters:   getters,
 	}
 }
 
 // Fetch downloads a module from the given source to the destination directory.
-// The source can be a git repo, HTTP URL, S3 bucket, GCS bucket, or local path.
+// The source can be a git repo, HTTP URL, S3 bucket, GCS bucket, OCI registry, or local path.
 // Query parameters in the source are preserved and passed through.
 //
 // Examples:
@@ -30,6 +36,7 @@ func NewFetcher() *Fetcher {
 //   - https://example.com/module.tar.gz
 //   - s3::https://bucket.s3.amazonaws.com/module.zip
 //   - gcs::https://www.googleapis.com/storage/v1/bucket/module.tar.gz
+//   - oci://registry.example.com/repo?tag=v1.0.0
 //   - /local/path/to/module
 func (f *Fetcher) Fetch(ctx context.Context, dst, src string) error {
 	client := &getter.Client{

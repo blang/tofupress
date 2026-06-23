@@ -6,10 +6,12 @@ require (
 	github.com/golang-cz/devslog v0.0.13
 	github.com/hashicorp/go-getter v1.8.6
 	github.com/hashicorp/hcl/v2 v2.24.0
+	github.com/opencontainers/image-spec v1.1.1
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.11.1
 	github.com/ulikunitz/xz v0.5.15
 	github.com/zclconf/go-cty v1.18.1
+	oras.land/oras-go/v2 v2.6.1
 )
 
 require (
@@ -67,6 +69,7 @@ require (
 	github.com/klauspost/compress v1.18.5 // indirect
 	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/mitchellh/go-wordwrap v1.0.1 // indirect
+	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/planetscale/vtprotobuf v0.6.1-0.20240319094008-0393e58bdf10 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
 	github.com/spf13/pflag v1.0.6 // indirect

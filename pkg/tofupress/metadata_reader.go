@@ -16,6 +16,9 @@ import (
 // ReadMetadataFromDir reads metadata from an extracted artifact directory.
 // The directory should contain a meta.json file at its root.
 func ReadMetadataFromDir(dir string) (*ArtifactMetadata, error) {
+	if dir == "" {
+		return nil, fmt.Errorf("directory path is empty")
+	}
 	metaPath := filepath.Join(dir, MetadataFileName)
 	data, err := os.ReadFile(metaPath) //nolint:gosec // path is constructed from user input
 	if err != nil {

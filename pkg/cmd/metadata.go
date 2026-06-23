@@ -35,13 +35,7 @@ func runMetadata(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	data, err := json.MarshalIndent(metadata, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to encode metadata: %w", err)
-	}
-	data = append(data, '\n')
-	_, err = cmd.OutOrStdout().Write(data)
-	return err
+	return writeMetadataOutput(cmd, metadata)
 }
 
 // runMetadataOCI pulls an OCI artifact and reads its embedded metadata.
@@ -59,6 +53,11 @@ func runMetadataOCI(cmd *cobra.Command, sourceURL string) error {
 		return fmt.Errorf("failed to read metadata from OCI artifact: %w", err)
 	}
 
+	return writeMetadataOutput(cmd, metadata)
+}
+
+// writeMetadataOutput marshals metadata as indented JSON and writes it to the command output.
+func writeMetadataOutput(cmd *cobra.Command, metadata *tofupress.ArtifactMetadata) error {
 	data, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to encode metadata: %w", err)

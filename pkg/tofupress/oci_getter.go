@@ -2,26 +2,39 @@ package tofupress
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
-	"path/filepath"
 	"slices"
-	"strings"
+	"sync"
 
 	"github.com/hashicorp/go-getter"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"oras.land/oras-go/v2/registry"
 	"oras.land/oras-go/v2/registry/remote"
 	"oras.land/oras-go/v2/registry/remote/auth"
+	"oras.land/oras-go/v2/registry/remote/credentials"
 )
 
 // OCIGetter implements go-getter's Getter interface for OCI registries.
 // It supports the oci:// URL scheme for fetching OpenTofu module packages.
 type OCIGetter struct{}
+
+// Lazy-initialized Docker credentials store (handles auths, credsStore, and credHelpers).
+var (
+	credStore     *credentials.DynamicStore
+	errCredStore  error
+	credStoreOnce sync.Once
+)
+
+func getCredentialsStore() (*credentials.DynamicStore, error) {
+	credStoreOnce.Do(func() {
+		credStore, errCredStore = credentials.NewStoreFromDocker(credentials.StoreOptions{})
+	})
+	return credStore, errCredStore
+}
 
 // Get downloads the OCI artifact and decompresses it into dst.
 func (g *OCIGetter) Get(dst string, u *url.URL) error {
@@ -40,7 +53,7 @@ func (g *OCIGetter) Get(dst string, u *url.URL) error {
 	}
 
 	// Configure auth
-	repo.Client = g.authClient(ref.Registry)
+	repo.Client = g.authClient()
 
 	// Determine the reference (tag or digest) to use
 	reference := ref.Reference
@@ -152,111 +165,38 @@ func (g *OCIGetter) fetchAndDecompress(ctx context.Context, repo *remote.Reposit
 	return nil
 }
 
-// authClient creates an authenticated HTTP client for the given registry.
-func (g *OCIGetter) authClient(registryHost string) remote.Client {
-	cred := g.resolveCredential(registryHost)
-	if cred.Username == "" && cred.Password == "" {
-		// No credentials found, use default unauthenticated client
-		return auth.DefaultClient
-	}
-
+// authClient creates an authenticated HTTP client.
+func (g *OCIGetter) authClient() remote.Client {
 	return &auth.Client{
-		Client: auth.DefaultClient.Client,
-		Header: auth.DefaultClient.Header,
-		Cache:  auth.DefaultCache,
-		Credential: func(ctx context.Context, hostport string) (auth.Credential, error) {
-			return cred, nil
-		},
+		Client:     auth.DefaultClient.Client,
+		Header:     auth.DefaultClient.Header,
+		Cache:      auth.DefaultCache,
+		Credential: g.resolveCredential(),
 	}
 }
 
-// resolveCredential finds credentials for the given registry host.
-// Priority: env vars → docker config file.
-func (g *OCIGetter) resolveCredential(registryHost string) auth.Credential {
-	// 1. Check environment variables
-	if user := os.Getenv("OCI_USERNAME"); user != "" {
-		return auth.Credential{Username: user, Password: os.Getenv("OCI_PASSWORD")}
-	}
-	if user := os.Getenv("DOCKER_USERNAME"); user != "" {
-		return auth.Credential{Username: user, Password: os.Getenv("DOCKER_PASSWORD")}
-	}
-	if user := os.Getenv("ORAS_USER"); user != "" {
-		return auth.Credential{Username: user, Password: os.Getenv("ORAS_PASS")}
-	}
+// resolveCredential returns a credential callback that resolves credentials.
+// Priority: env vars → Docker credentials store (handles auths, credsStore, credHelpers).
+func (g *OCIGetter) resolveCredential() auth.CredentialFunc {
+	return func(ctx context.Context, hostport string) (auth.Credential, error) {
+		// 1. Check environment variables (highest priority)
+		if user := os.Getenv("OCI_USERNAME"); user != "" {
+			return auth.Credential{Username: user, Password: os.Getenv("OCI_PASSWORD")}, nil
+		}
+		if user := os.Getenv("DOCKER_USERNAME"); user != "" {
+			return auth.Credential{Username: user, Password: os.Getenv("DOCKER_PASSWORD")}, nil
+		}
+		if user := os.Getenv("ORAS_USER"); user != "" {
+			return auth.Credential{Username: user, Password: os.Getenv("ORAS_PASS")}, nil
+		}
 
-	// 2. Check ~/.docker/config.json
-	return g.dockerConfigCredential(registryHost)
-}
-
-// dockerConfigCredential reads credentials from ~/.docker/config.json.
-func (g *OCIGetter) dockerConfigCredential(registryHost string) auth.Credential {
-	configPath := filepath.Join(os.Getenv("HOME"), ".docker", "config.json")
-	if envPath := os.Getenv("DOCKER_CONFIG"); envPath != "" {
-		configPath = filepath.Join(envPath, "config.json")
-	}
-
-	data, err := os.ReadFile(configPath) //nolint:gosec // user's own config file
-	if err != nil {
-		return auth.EmptyCredential
-	}
-
-	var cfg dockerConfig
-	//nolint:musttag // simple JSON parsing for auth
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return auth.EmptyCredential
-	}
-
-	// Try exact host match first, then normalize
-	authEntry, ok := cfg.AuthConfigs[registryHost]
-	if !ok {
-		// Try without scheme prefix
-		authEntry, ok = cfg.AuthConfigs["https://"+registryHost]
-	}
-	if !ok {
-		authEntry, ok = cfg.AuthConfigs["http://"+registryHost]
-	}
-	if !ok {
-		return auth.EmptyCredential
-	}
-
-	// Decode base64 auth if present (legacy format: "username:password")
-	if authEntry.Auth != "" && authEntry.Username == "" {
-		decoded, err := base64.StdEncoding.DecodeString(authEntry.Auth)
+		// 2. Use Docker credentials store (supports auths, credsStore, and credHelpers)
+		store, err := getCredentialsStore()
 		if err != nil {
-			// Try without padding
-			decoded, err = base64.RawStdEncoding.DecodeString(authEntry.Auth)
+			return auth.Credential{}, err
 		}
-		if err == nil {
-			parts := strings.SplitN(string(decoded), ":", 2)
-			if len(parts) == 2 {
-				return auth.Credential{Username: parts[0], Password: parts[1]}
-			}
-		}
+		return store.Get(ctx, hostport)
 	}
-
-	if authEntry.Username != "" {
-		return auth.Credential{
-			Username:     authEntry.Username,
-			Password:     authEntry.Password,
-			RefreshToken: authEntry.IdentityToken,
-			AccessToken:  authEntry.RegistryToken,
-		}
-	}
-
-	return auth.EmptyCredential
-}
-
-// dockerConfig is a minimal subset of the Docker config file format.
-type dockerConfig struct {
-	AuthConfigs map[string]dockerAuthEntry `json:"auths"`
-}
-
-type dockerAuthEntry struct {
-	Username      string `json:"username"`
-	Password      string `json:"password"`
-	Auth          string `json:"auth"`
-	IdentityToken string `json:"identitytoken"`
-	RegistryToken string `json:"registrytoken"`
 }
 
 // parseOCIRef parses an oci:// URL into a registry.Reference.

@@ -8,7 +8,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -730,6 +732,230 @@ func TestBundlerDefaultModuleDirStrippingDropsIrrelevantPackageFilesWhenReadsAre
 	assert.Contains(t, names, "templates/userdata.tftpl")
 	assert.NotContains(t, names, "templates/unused.tftpl")
 	assert.NotContains(t, names, "README.md")
+}
+
+// TestBundler_LocalModulesOutsideRootWithRemote_AllIncluded reproduces the user-reported
+// bug: when a root module references both remote modules AND local modules via ../ paths
+// (outside the root module directory but within the package boundary), the local ../
+// modules were not being included in the bundle.
+func TestBundler_LocalModulesOutsideRootWithRemote_AllIncluded(t *testing.T) {
+	// Layout mimics a real repo:
+	//   repo/
+	//     live/network/
+	//       shared-a/           ← local module at ../shared-a (one level up)
+	//       shared-b/           ← local module at ../shared-b
+	//       shared-c/           ← local module at ../shared-c
+	//       infratest/          ← root module
+	//         main.tf           ← references ../shared-a, ../shared-b, ../shared-c, remote
+
+	repoRoot := t.TempDir()
+	networkDir := filepath.Join(repoRoot, "live", "network")
+	rootDir := filepath.Join(networkDir, "infratest")
+	require.NoError(t, os.MkdirAll(rootDir, 0o755))
+
+	// Create three local modules one level up from root (live/network/shared-*)
+	sharedA := filepath.Join(networkDir, "shared-a")
+	sharedB := filepath.Join(networkDir, "shared-b")
+	sharedC := filepath.Join(networkDir, "shared-c")
+	require.NoError(t, os.MkdirAll(sharedA, 0o755))
+	require.NoError(t, os.MkdirAll(sharedB, 0o755))
+	require.NoError(t, os.MkdirAll(sharedC, 0o755))
+	writeTerraformFile(t, sharedA, "main.tf", `output "a" { value = "alpha" }`)
+	writeTerraformFile(t, sharedB, "main.tf", `output "b" { value = "beta" }`)
+	writeTerraformFile(t, sharedC, "main.tf", `output "c" { value = "gamma" }`)
+
+	// Root module: references all 3 local ../ modules (no remote — resolver needs network for that)
+	writeTerraformFile(t, rootDir, "main.tf", `
+module "shared_a" {
+  source = "../shared-a"
+}
+
+module "shared_b" {
+  source = "../shared-b"
+}
+
+module "shared_c" {
+  source = "../shared-c"
+}
+`)
+
+	// Use the real resolver to resolve modules from the filesystem.
+	// Only resolve local modules — the remote reference will fail without network.
+	// The key question: are the local ../ modules in the resolved tree?
+	resolver := NewResolver()
+	resolver.PackageRoot = repoRoot
+	resolver.RootDir = rootDir
+	tree, err := resolver.Resolve(context.Background(), rootDir)
+	require.NoError(t, err)
+	require.NotNil(t, tree)
+
+	t.Logf("Resolved tree: %d modules, %d packages", len(tree.AllModules), len(tree.Packages))
+	for _, mod := range tree.AllModules {
+		t.Logf("  module: key=%s name=%s local=%v remote=%v install=%s pkgRoot=%s",
+			mod.Key, mod.Name, mod.IsLocal, mod.IsRemote, mod.InstallDir, mod.PackageRoot)
+	}
+
+	// There should be at least 4 modules: root + 3 local
+	require.GreaterOrEqual(t, len(tree.AllModules), 4,
+		"expected at least 4 modules (root + 3 local)")
+
+	// Apply sourcetree identity planning (non-OCI flow)
+	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+	identityPlan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	require.NoError(t, err)
+	require.NoError(t, ApplySourcetreeIdentityPlan(tree, identityPlan))
+
+	// Re-plan stripping
+	stripPlan, err = PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+
+	// Bundle to ZIP
+	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
+	bundler := NewBundler(BundleFormatZIP)
+	bundler.StripPlan = stripPlan
+	require.NoError(t, bundler.Bundle(tree, archivePath))
+
+	// List all files in the archive
+	names := zipFileNames(t, archivePath)
+	t.Logf("Archive contents (%d entries):", len(names))
+	for _, n := range names {
+		t.Logf("  %s", n)
+	}
+
+	// All three local modules must be present
+	localModules := []string{"shared-a", "shared-b", "shared-c"}
+	for _, modName := range localModules {
+		found := false
+		for _, name := range names {
+			if strings.Contains(name, modName+"/") && strings.HasSuffix(name, ".tf") {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "local module %s must be present in archive", modName)
+	}
+
+	// Remote package must be present under modules/ (none in this local-only test)
+	// Total expected: root main.tf + 3 local main.tf = 4 .tf files
+	tfCount := 0
+	for _, name := range names {
+		if strings.HasSuffix(name, ".tf") {
+			tfCount++
+		}
+	}
+	assert.Equal(t, 4, tfCount, "archive must contain exactly 4 .tf files (root + 3 local)")
+}
+
+// TestBundler_LocalModulesOutsideRootWithRemote_RealResolver uses a local git file source
+// for the remote module so the test can run offline. This exactly reproduces the user's
+// scenario: nested root with ../ local references + a remote (git) module.
+func TestBundler_LocalModulesOutsideRootWithRemote_RealResolver(t *testing.T) {
+	// Create a local git repo for the remote module
+	remoteRepo := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(remoteRepo, "main.tf"),
+		[]byte(`output "remote" { value = "ok" }`), 0o644))
+	git := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = remoteRepo
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, string(out))
+	}
+	git("init")
+	git("config", "user.email", "test@example.invalid")
+	git("config", "user.name", "TofuPress Test")
+	git("add", ".")
+	git("commit", "-m", "initial")
+	git("tag", "v1.0.0")
+	remoteSource := "git::" + (&url.URL{Scheme: "file", Path: remoteRepo}).String() + "?ref=v1.0.0"
+
+	// Layout:
+	//   repo/
+	//     live/network/
+	//       shared-a/           ← ../shared-a
+	//       shared-b/           ← ../shared-b
+	//       infratest/          ← root module
+	//         main.tf           ← references ../shared-a, ../shared-b, remote
+	repoRoot := t.TempDir()
+	networkDir := filepath.Join(repoRoot, "live", "network")
+	rootDir := filepath.Join(networkDir, "infratest")
+	require.NoError(t, os.MkdirAll(rootDir, 0o755))
+
+	sharedA := filepath.Join(networkDir, "shared-a")
+	sharedB := filepath.Join(networkDir, "shared-b")
+	require.NoError(t, os.MkdirAll(sharedA, 0o755))
+	require.NoError(t, os.MkdirAll(sharedB, 0o755))
+	writeTerraformFile(t, sharedA, "main.tf", `output "a" { value = "alpha" }`)
+	writeTerraformFile(t, sharedB, "main.tf", `output "b" { value = "beta" }`)
+
+	writeTerraformFile(t, rootDir, "main.tf", fmt.Sprintf(`
+module "shared_a" {
+  source = "../shared-a"
+}
+
+module "remote_mod" {
+  source = %q
+}
+`, remoteSource))
+
+	resolver := NewResolver()
+	resolver.PackageRoot = repoRoot
+	resolver.RootDir = rootDir
+	tree, err := resolver.Resolve(context.Background(), rootDir)
+	require.NoError(t, err)
+
+	t.Logf("Resolved: %d modules, %d packages", len(tree.AllModules), len(tree.Packages))
+	for _, mod := range tree.AllModules {
+		t.Logf("  %s: local=%v remote=%v", mod.Key, mod.IsLocal, mod.IsRemote)
+	}
+
+	require.GreaterOrEqual(t, len(tree.AllModules), 3,
+		"expected at least 3 modules (root + 2 local + 1 remote)")
+	require.GreaterOrEqual(t, len(tree.Packages), 1,
+		"expected at least 1 remote package")
+
+	// Apply sourcetree identity planning
+	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+	identityPlan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	require.NoError(t, err)
+	require.NoError(t, ApplySourcetreeIdentityPlan(tree, identityPlan))
+
+	stripPlan, err = PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+
+	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
+	bundler := NewBundler(BundleFormatZIP)
+	bundler.StripPlan = stripPlan
+	require.NoError(t, bundler.Bundle(tree, archivePath))
+
+	names := zipFileNames(t, archivePath)
+	t.Logf("Archive contents (%d entries):", len(names))
+	for _, n := range names {
+		t.Logf("  %s", n)
+	}
+
+	// All local modules must be present
+	for _, modName := range []string{"shared-a"} {
+		found := false
+		for _, name := range names {
+			if strings.Contains(name, modName+"/") && strings.HasSuffix(name, ".tf") {
+				found = true
+				break
+			}
+		}
+		assert.True(t, found, "local module %s must be present in archive", modName)
+	}
+
+	// Remote package must be present under modules/
+	foundRemote := false
+	for _, name := range names {
+		if strings.HasPrefix(name, "modules/") && strings.HasSuffix(name, ".tf") {
+			foundRemote = true
+			break
+		}
+	}
+	assert.True(t, foundRemote, "remote package must be present under modules/ in archive")
 }
 
 // TestBundler_NestedRootWithRemoteModules_AllPackagesInZip reproduces the user-reported bug:

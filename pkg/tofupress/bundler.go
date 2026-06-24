@@ -754,6 +754,100 @@ func copyFileOCI(src, dst string, mode os.FileMode) error {
 	return copyErr
 }
 
+// stageBundle creates a staging directory and copies the root module,
+// local modules outside root, and all packages into it, applying the
+// strip plan during copy. The staging dir is populated so that a single
+// walk can create the archive without any vendor-dir skip logic.
+//
+// The caller is responsible for removing the staging directory.
+func stageBundle(tree *ResolvedTree, vendorDir string, stripPlan *StripPlan, metadata *ArtifactMetadata) (string, error) {
+	if tree == nil || tree.Root == nil {
+		return "", fmt.Errorf("cannot stage bundle for nil tree")
+	}
+
+	stagingDir, err := os.MkdirTemp("", "tofupress-stage-*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create staging directory: %w", err)
+	}
+	cleanup := func() { _ = os.RemoveAll(stagingDir) }
+
+	// 1. Copy root module from archive root to staging root
+	archiveRoot := rootArchiveDir(tree)
+	if err := copyDirOCI(archiveRoot, stagingDir, stripPlan); err != nil {
+		cleanup()
+		return "", fmt.Errorf("failed to copy root module to staging: %w", err)
+	}
+
+	// 2. Copy local modules that live outside the archive root
+	if err := stageLocalModules(tree, archiveRoot, stagingDir, stripPlan); err != nil {
+		cleanup()
+		return "", err
+	}
+
+	// 3. Populate vendor directory with packages
+	if err := stagePackages(tree, filepath.Join(stagingDir, vendorDir), stripPlan); err != nil {
+		cleanup()
+		return "", err
+	}
+
+	// 4. Write metadata file if provided
+	if metadata != nil {
+		if err := WriteMetadataFile(filepath.Join(stagingDir, MetadataFileName), metadata); err != nil {
+			cleanup()
+			return "", fmt.Errorf("failed to write metadata: %w", err)
+		}
+	}
+
+	return stagingDir, nil
+}
+
+// stageLocalModules copies local modules that live outside the archive root into
+// the staging directory at their module-key path. Modules inside the archive root
+// are already copied by the root module walk and are skipped here.
+func stageLocalModules(tree *ResolvedTree, archiveRoot, stagingDir string, stripPlan *StripPlan) error {
+	for _, module := range tree.AllModules {
+		if module == tree.Root {
+			continue
+		}
+		// Skip remote packages (added separately from tree.Packages)
+		if _, isPackage := tree.Packages[module.Source.PackageAddr]; isPackage {
+			continue
+		}
+		if !module.IsLocal || module.InstallDir == "" {
+			continue
+		}
+		relPath, err := filepath.Rel(archiveRoot, module.InstallDir)
+		if err != nil || !strings.HasPrefix(relPath, "..") {
+			continue
+		}
+		// Use module's key as the archive path to maintain structure
+		archivePath := strings.ReplaceAll(module.Key, ".", "/")
+		targetPath := filepath.Join(stagingDir, archivePath)
+		if err := copyDirOCI(module.InstallDir, targetPath, stripPlan); err != nil {
+			return fmt.Errorf("failed to copy local module %s: %w", module.Key, err)
+		}
+	}
+	return nil
+}
+
+// stagePackages copies each downloaded package into the staging vendor directory,
+// keyed by its package ID. The vendor directory is created only when packages exist.
+func stagePackages(tree *ResolvedTree, packagesDir string, stripPlan *StripPlan) error {
+	if len(tree.Packages) == 0 {
+		return nil
+	}
+	if err := os.MkdirAll(packagesDir, 0o755); err != nil { //nolint:gosec // G301: standard permissions
+		return fmt.Errorf("failed to create vendor directory: %w", err)
+	}
+	for pkgID, pkg := range tree.Packages {
+		targetPath := filepath.Join(packagesDir, pkgID)
+		if err := copyDirOCI(pkg.LocalDir, targetPath, stripPlan); err != nil {
+			return fmt.Errorf("failed to copy package %s: %w", pkg.PackageAddr, err)
+		}
+	}
+	return nil
+}
+
 // rewriteOCISources rewrites all module sources to point to the OCI-compliant structure.
 //
 //nolint:gocognit,unparam // source rewriting requires complex conditional logic; always returns nil by design (best-effort)

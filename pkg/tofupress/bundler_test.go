@@ -1915,3 +1915,20 @@ func TestBundler_TarGzFromDir_EmbedsMetadata(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(data), `"schema_version": "1"`)
 }
+
+func TestBundler_TarXzFromDir_Basic(t *testing.T) {
+	srcDir := t.TempDir()
+	writeTerraformFile(t, srcDir, "main.tf", `output "name" { value = "root" }`)
+	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, "modules", "pkg-abc"), 0o755))
+	writeTerraformFile(t, filepath.Join(srcDir, "modules", "pkg-abc"), "main.tf", `output "ok" { value = "1" }`)
+
+	archivePath := filepath.Join(t.TempDir(), "bundle.tar.xz")
+	bundler := NewBundler(BundleFormatTarXZ)
+	err := bundler.bundleTarXzFromDir(srcDir, archivePath)
+	require.NoError(t, err)
+
+	extractDir := t.TempDir()
+	extractTarXZ(t, archivePath, extractDir)
+	assert.FileExists(t, filepath.Join(extractDir, "main.tf"))
+	assert.FileExists(t, filepath.Join(extractDir, "modules", "pkg-abc", "main.tf"))
+}

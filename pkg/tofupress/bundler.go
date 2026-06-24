@@ -691,6 +691,93 @@ func (b *Bundler) bundleZipFromDir(srcDir, outputPath string) (err error) {
 	return //nolint:nakedret // named return needed to propagate deferred close errors
 }
 
+// bundleTarGzFromDir creates a tar.gz archive from a directory.
+// Unlike the legacy bundleTarGZ, this walks the directory once
+// with no vendor-dir skip logic — the directory content is assumed
+// to be pre-staged.
+//
+//nolint:gocognit,gocyclo // directory walking and tar creation is inherently complex
+func (b *Bundler) bundleTarGzFromDir(srcDir, outputPath string) (err error) {
+	outFile, err := os.Create(outputPath) //nolint:gosec // G304: path is provided by user
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer func() {
+		if closeErr := outFile.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
+
+	gzWriter := gzip.NewWriter(outFile)
+	defer func() {
+		if closeErr := gzWriter.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
+
+	tarWriter := tar.NewWriter(gzWriter)
+	defer func() {
+		if closeErr := tarWriter.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
+
+	//nolint:nakedret // named return needed to propagate deferred close errors
+	err = filepath.Walk(srcDir, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+
+		if info.IsDir() {
+			switch info.Name() {
+			case dirNameTerraform, dirNameGit:
+				return filepath.SkipDir
+			}
+		}
+
+		// Apply strip plan if present (defensive — files should already be stripped)
+		if b.StripPlan != nil && !b.StripPlan.IncludePath(path, info.IsDir()) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+
+		relPath, relErr := filepath.Rel(srcDir, path)
+		if relErr != nil {
+			return relErr
+		}
+		if relPath == "." {
+			return nil
+		}
+
+		header, headerErr := tar.FileInfoHeader(info, "")
+		if headerErr != nil {
+			return headerErr
+		}
+		header.Name = relPath
+
+		if writeErr := tarWriter.WriteHeader(header); writeErr != nil {
+			return writeErr
+		}
+
+		if !info.IsDir() {
+			file, openErr := os.Open(path) //nolint:gosec // G304: path comes from own tree
+			if openErr != nil {
+				return openErr
+			}
+			defer file.Close() //nolint:errcheck // read-only close
+
+			if _, copyErr := io.Copy(tarWriter, file); copyErr != nil {
+				return copyErr
+			}
+		}
+
+		return nil
+	})
+	return //nolint:nakedret // named return needed to propagate deferred close errors
+}
+
 // copyDirOCI copies a directory recursively for OCI bundling, skipping
 // .terraform, .git, and sourcetree directories.
 func copyDirOCI(src, dst string, stripPlan *StripPlan) error {

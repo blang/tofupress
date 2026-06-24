@@ -1856,3 +1856,62 @@ func TestBundler_VendorDirSkippingInternalModulesDir(t *testing.T) {
 		"package content with internal modules/ directory must be in archive at %s",
 		expectedEntry)
 }
+
+func TestBundler_TarGzFromDir_Basic(t *testing.T) {
+	srcDir := t.TempDir()
+	writeTerraformFile(t, srcDir, "main.tf", `output "name" { value = "root" }`)
+	writeTerraformFile(t, srcDir, "variables.tf", `variable "env" { type = string }`)
+	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, "modules", "pkg-abc123"), 0o755))
+	writeTerraformFile(t, filepath.Join(srcDir, "modules", "pkg-abc123"), "main.tf", `output "pkg" { value = "yes" }`)
+
+	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
+	bundler := NewBundler(BundleFormatTarGZ)
+	err := bundler.bundleTarGzFromDir(srcDir, archivePath)
+	require.NoError(t, err)
+
+	names := tarGzFileNames(t, archivePath)
+	assert.Contains(t, names, "main.tf")
+	assert.Contains(t, names, "variables.tf")
+	assert.Contains(t, names, "modules/pkg-abc123/main.tf")
+	// modules/ directory must be included (no vendor-dir skip)
+	t.Logf("Archive: %v", names)
+}
+
+func TestBundler_TarGzFromDir_SkipsTerraformAndGitDirs(t *testing.T) {
+	srcDir := t.TempDir()
+	writeTerraformFile(t, srcDir, "main.tf", `# root`)
+	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, ".terraform", "modules"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, ".terraform", "terraform.tfstate"), []byte("state"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, ".git"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, ".git", "HEAD"), []byte("ref"), 0o644))
+
+	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
+	bundler := NewBundler(BundleFormatTarGZ)
+	err := bundler.bundleTarGzFromDir(srcDir, archivePath)
+	require.NoError(t, err)
+
+	names := tarGzFileNames(t, archivePath)
+	assert.Contains(t, names, "main.tf")
+	for _, name := range names {
+		assert.NotContains(t, name, ".terraform/")
+		assert.NotContains(t, name, ".git/")
+	}
+}
+
+func TestBundler_TarGzFromDir_EmbedsMetadata(t *testing.T) {
+	srcDir := t.TempDir()
+	writeTerraformFile(t, srcDir, "main.tf", `# root`)
+	meta := &ArtifactMetadata{SchemaVersion: MetadataSchemaVersion, CreatedAt: "2026-06-24T00:00:00Z"}
+	require.NoError(t, WriteMetadataFile(filepath.Join(srcDir, MetadataFileName), meta))
+
+	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
+	bundler := NewBundler(BundleFormatTarGZ)
+	err := bundler.bundleTarGzFromDir(srcDir, archivePath)
+	require.NoError(t, err)
+
+	extractDir := t.TempDir()
+	extractTarGz(t, archivePath, extractDir)
+	data, err := os.ReadFile(filepath.Join(extractDir, MetadataFileName))
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `"schema_version": "1"`)
+}

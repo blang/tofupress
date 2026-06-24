@@ -1746,8 +1746,14 @@ module "nacl_private" {
 		}
 	}
 
-	assert.Len(t, packageDirs, len(identityPlan.ByFinalID),
-		"archive must contain all unique packages from identity plan (bug: vendor dir skip in addDirectoryToZip)")
+	// Every unique identity package must be present under modules/. The
+	// archive may also legitimately contain sibling local modules colocated
+	// in the vendor dir (e.g. account_config, account_index), which the
+	// staged bundler now preserves instead of silently dropping.
+	for finalID := range identityPlan.ByFinalID {
+		assert.True(t, packageDirs[finalID],
+			"identity package %s must be present under modules/ in archive", finalID)
+	}
 
 	// Verify metadata matches
 	metadata, err := BuildArtifactMetadata(tree, &MetadataRequest{

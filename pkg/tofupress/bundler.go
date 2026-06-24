@@ -4,14 +4,12 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/ulikunitz/xz"
 )
@@ -86,11 +84,6 @@ type Bundler struct {
 	Metadata     *ArtifactMetadata // Optional metadata to embed in the archive
 	StripPlan    *StripPlan        // Optional include/exclude plan for safe stripping
 	VendorDir    string            // Vendored modules directory name (from tree.VendorDir)
-
-	// rootVendorDir is the absolute path of the tree's vendor directory.
-	// Only this specific directory is skipped during bundling (packages added separately).
-	// It prevents false-positive skips of packages that contain their own modules/ subdir.
-	rootVendorDir string
 }
 
 // NewBundler creates a new Bundler with the specified format.
@@ -106,11 +99,6 @@ func (b *Bundler) Bundle(tree *ResolvedTree, outputPath string) error {
 
 	// Use the tree's vendor dir, falling back to default
 	b.VendorDir = vendorDirName(tree)
-
-	// Pre-compute the tree root's absolute vendor directory path so that
-	// addDirectoryToZip/Tar skip only this specific directory (not any
-	// nested modules/ subdirectory inside a package).
-	b.rootVendorDir = filepath.Join(rootArchiveDir(tree), b.VendorDir)
 
 	// Aggregate pressed modules before creating the bundle
 	if err := b.aggregatePressedModules(tree); err != nil {
@@ -154,379 +142,49 @@ func rootArchiveDir(tree *ResolvedTree) string {
 	return ""
 }
 
-// bundleTarGZ creates a tar.gz archive.
-//
-//nolint:gocognit,gocyclo // complex but straightforward bundling logic
+// bundleTarGZ creates a tar.gz archive via staged bundling.
 func (b *Bundler) bundleTarGZ(tree *ResolvedTree, outputPath string) (err error) {
-	outFile, err := os.Create(outputPath) //nolint:gosec // G304: path is provided by user
+	stagingDir, err := stageBundle(tree, b.VendorDir, b.StripPlan, b.Metadata)
 	if err != nil {
-		return fmt.Errorf("failed to create output file: %w", err)
-	}
-	defer func() {
-		if closeErr := outFile.Close(); closeErr != nil {
-			err = errors.Join(err, closeErr)
-		}
-	}()
-
-	gzWriter := gzip.NewWriter(outFile)
-	defer func() {
-		if closeErr := gzWriter.Close(); closeErr != nil {
-			err = errors.Join(err, closeErr)
-		}
-	}()
-
-	tarWriter := tar.NewWriter(gzWriter)
-	defer func() {
-		if closeErr := tarWriter.Close(); closeErr != nil {
-			err = errors.Join(err, closeErr)
-		}
-	}()
-
-	if err := b.addDirectoryToTar(tarWriter, rootArchiveDir(tree), "", tree.Packages); err != nil {
-		return fmt.Errorf("failed to add root module: %w", err)
-	}
-
-	// Walk the tree and add all local modules that are outside the root directory
-	for _, module := range tree.AllModules {
-		if module == tree.Root {
-			continue // Already added
-		}
-
-		// Skip remote packages (they're in tree.Packages and added separately)
-		if _, isPackage := tree.Packages[module.Source.PackageAddr]; isPackage {
-			continue
-		}
-
-		// For local modules, check if they're outside the root directory
-		if module.IsLocal && module.InstallDir != "" {
-			// Calculate relative path from root to this module
-			relPath, err := filepath.Rel(rootArchiveDir(tree), module.InstallDir)
-			if err != nil {
-				continue
-			}
-
-			// If the module is outside the root directory (path starts with ..), add it
-			if strings.HasPrefix(relPath, "..") {
-				// Use the module's key as the archive path to maintain structure
-				archivePath := strings.ReplaceAll(module.Key, ".", "/")
-				if err := b.addDirectoryToTar(tarWriter, module.InstallDir, archivePath, tree.Packages); err != nil {
-					return fmt.Errorf("failed to add module %s: %w", module.Key, err)
-				}
-			}
-		}
-	}
-
-	for _, pkg := range tree.Packages {
-		uniqueID := filepath.Base(pkg.LocalDir)
-		prefix := filepath.Join(vendorDirName(tree), uniqueID)
-		if err := b.addDirectoryToTar(tarWriter, pkg.LocalDir, prefix, tree.Packages); err != nil {
-			return fmt.Errorf("failed to add package %s: %w", pkg.PackageAddr, err)
-		}
-	}
-
-	if err := b.addMetadataToTar(tarWriter); err != nil {
 		return err
 	}
+	defer func() {
+		if rmErr := os.RemoveAll(stagingDir); rmErr != nil {
+			err = errors.Join(err, rmErr)
+		}
+	}()
 
-	return //nolint:nakedret // named return needed to propagate deferred close errors
+	return b.bundleTarGzFromDir(stagingDir, outputPath)
 }
 
-// bundleTarXZ creates a tar.xz archive.
-//
-//nolint:gocognit,gocyclo // complex but straightforward bundling logic
+// bundleTarXZ creates a tar.xz archive via staged bundling.
 func (b *Bundler) bundleTarXZ(tree *ResolvedTree, outputPath string) (err error) {
-	outFile, err := os.Create(outputPath) //nolint:gosec // G304: path is provided by user
+	stagingDir, err := stageBundle(tree, b.VendorDir, b.StripPlan, b.Metadata)
 	if err != nil {
-		return fmt.Errorf("failed to create output file: %w", err)
-	}
-	defer func() {
-		if closeErr := outFile.Close(); closeErr != nil {
-			err = errors.Join(err, closeErr)
-		}
-	}()
-
-	xzWriter, err := xz.NewWriter(outFile)
-	if err != nil {
-		return fmt.Errorf("failed to create xz writer: %w", err)
-	}
-	defer func() {
-		if closeErr := xzWriter.Close(); closeErr != nil {
-			err = errors.Join(err, closeErr)
-		}
-	}()
-
-	tarWriter := tar.NewWriter(xzWriter)
-	defer func() {
-		if closeErr := tarWriter.Close(); closeErr != nil {
-			err = errors.Join(err, closeErr)
-		}
-	}()
-
-	if err := b.addDirectoryToTar(tarWriter, rootArchiveDir(tree), "", tree.Packages); err != nil {
-		return fmt.Errorf("failed to add root module: %w", err)
-	}
-
-	// Walk the tree and add all local modules that are outside the root directory
-	for _, module := range tree.AllModules {
-		if module == tree.Root {
-			continue // Already added
-		}
-
-		// Skip remote packages (they're in tree.Packages and added separately)
-		if _, isPackage := tree.Packages[module.Source.PackageAddr]; isPackage {
-			continue
-		}
-
-		// For local modules, check if they're outside the root directory
-		if module.IsLocal && module.InstallDir != "" {
-			// Calculate relative path from root to this module
-			relPath, err := filepath.Rel(rootArchiveDir(tree), module.InstallDir)
-			if err != nil {
-				continue
-			}
-
-			// If the module is outside the root directory (path starts with ..), add it
-			if strings.HasPrefix(relPath, "..") {
-				// Use the module's key as the archive path to maintain structure
-				archivePath := strings.ReplaceAll(module.Key, ".", "/")
-				if err := b.addDirectoryToTar(tarWriter, module.InstallDir, archivePath, tree.Packages); err != nil {
-					return fmt.Errorf("failed to add module %s: %w", module.Key, err)
-				}
-			}
-		}
-	}
-
-	for _, pkg := range tree.Packages {
-		uniqueID := filepath.Base(pkg.LocalDir)
-		prefix := filepath.Join(vendorDirName(tree), uniqueID)
-		if err := b.addDirectoryToTar(tarWriter, pkg.LocalDir, prefix, tree.Packages); err != nil {
-			return fmt.Errorf("failed to add package %s: %w", pkg.PackageAddr, err)
-		}
-	}
-
-	if err := b.addMetadataToTar(tarWriter); err != nil {
 		return err
 	}
+	defer func() {
+		if rmErr := os.RemoveAll(stagingDir); rmErr != nil {
+			err = errors.Join(err, rmErr)
+		}
+	}()
 
-	return //nolint:nakedret // named return needed to propagate deferred close errors
+	return b.bundleTarXzFromDir(stagingDir, outputPath)
 }
 
-// bundleZIP creates a ZIP archive.
-//
-//nolint:gocognit,gocyclo // complex but straightforward bundling logic
+// bundleZIP creates a ZIP archive via staged bundling.
 func (b *Bundler) bundleZIP(tree *ResolvedTree, outputPath string) (err error) {
-	outFile, err := os.Create(outputPath) //nolint:gosec // G304: path is provided by user
+	stagingDir, err := stageBundle(tree, b.VendorDir, b.StripPlan, b.Metadata)
 	if err != nil {
-		return fmt.Errorf("failed to create output file: %w", err)
-	}
-	defer func() {
-		if closeErr := outFile.Close(); closeErr != nil {
-			err = errors.Join(err, closeErr)
-		}
-	}()
-
-	zipWriter := zip.NewWriter(outFile)
-	defer func() {
-		if closeErr := zipWriter.Close(); closeErr != nil {
-			err = errors.Join(err, closeErr)
-		}
-	}()
-
-	if err := b.addDirectoryToZip(zipWriter, rootArchiveDir(tree), "", tree.Packages); err != nil {
-		return fmt.Errorf("failed to add root module: %w", err)
-	}
-
-	// Walk the tree and add all local modules that are outside the root directory
-	for _, module := range tree.AllModules {
-		if module == tree.Root {
-			continue // Already added
-		}
-
-		// Skip remote packages (they're in tree.Packages and added separately)
-		if _, isPackage := tree.Packages[module.Source.PackageAddr]; isPackage {
-			continue
-		}
-
-		// For local modules, check if they're outside the root directory
-		if module.IsLocal && module.InstallDir != "" {
-			// Calculate relative path from root to this module
-			relPath, err := filepath.Rel(rootArchiveDir(tree), module.InstallDir)
-			if err != nil {
-				continue
-			}
-
-			// If the module is outside the root directory (path starts with ..), add it
-			if strings.HasPrefix(relPath, "..") {
-				// Use the module's key as the archive path to maintain structure
-				archivePath := strings.ReplaceAll(module.Key, ".", "/")
-				if err := b.addDirectoryToZip(zipWriter, module.InstallDir, archivePath, tree.Packages); err != nil {
-					return fmt.Errorf("failed to add module %s: %w", module.Key, err)
-				}
-			}
-		}
-	}
-
-	for _, pkg := range tree.Packages {
-		uniqueID := filepath.Base(pkg.LocalDir)
-		prefix := filepath.Join(vendorDirName(tree), uniqueID)
-		if err := b.addDirectoryToZip(zipWriter, pkg.LocalDir, prefix, tree.Packages); err != nil {
-			return fmt.Errorf("failed to add package %s: %w", pkg.PackageAddr, err)
-		}
-	}
-
-	if err := b.addMetadataToZip(zipWriter); err != nil {
 		return err
 	}
-
-	return //nolint:nakedret // named return needed to propagate deferred close errors
-}
-
-// addDirectoryToTar recursively adds a directory to a tar archive.
-//
-//nolint:gocyclo,gocognit // tar/zip walking with many conditionals is inherently complex
-func (b *Bundler) addDirectoryToTar(tw *tar.Writer, srcDir, prefix string, packages map[string]*DownloadedPackage) error {
-	return filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
+	defer func() {
+		if rmErr := os.RemoveAll(stagingDir); rmErr != nil {
+			err = errors.Join(err, rmErr)
 		}
+	}()
 
-		if info.IsDir() && (info.Name() == ".terraform" || info.Name() == ".git") {
-			return filepath.SkipDir
-		}
-
-		// Only skip the tree-root vendor dir when packages will be added separately.
-		// Use the absolute path to avoid skipping user-created modules/ directories
-		// inside downloaded packages (e.g. terraform-modules-base has modules/helper/...).
-		if info.IsDir() && b.rootVendorDir != "" && path == b.rootVendorDir && len(packages) > 0 {
-			return filepath.SkipDir
-		}
-
-		if b.StripPlan != nil && !b.StripPlan.IncludePath(path, info.IsDir()) {
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		relPath, err := filepath.Rel(srcDir, path)
-		if err != nil {
-			return err
-		}
-
-		if relPath == "." {
-			return nil
-		}
-
-		archivePath := relPath
-		if prefix != "" {
-			archivePath = filepath.Join(prefix, relPath)
-		}
-
-		header, err := tar.FileInfoHeader(info, "")
-		if err != nil {
-			return err
-		}
-		header.Name = archivePath
-
-		if err := tw.WriteHeader(header); err != nil {
-			return err
-		}
-
-		if !info.IsDir() {
-			file, err := os.Open(path) //nolint:gosec // G304: path comes from our own tree
-			if err != nil {
-				return err
-			}
-			defer func() {
-				_ = file.Close()
-			}()
-
-			if _, err := io.Copy(tw, file); err != nil {
-				return err
-			}
-		}
-
-		return nil
-	})
-}
-
-// addDirectoryToZip recursively adds a directory to a ZIP archive.
-//
-//nolint:gocyclo,gocognit // zip walking with many conditionals is inherently complex
-func (b *Bundler) addDirectoryToZip(zw *zip.Writer, srcDir, prefix string, packages map[string]*DownloadedPackage) error {
-	err := filepath.Walk(srcDir, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		if info.IsDir() && (info.Name() == ".terraform" || info.Name() == ".git") {
-			return filepath.SkipDir
-		}
-
-		// Only skip the tree-root vendor dir when packages will be added separately.
-		// Use the absolute path to avoid skipping user-created modules/ directories
-		// inside downloaded packages (e.g. terraform-modules-base has modules/helper/...).
-		if info.IsDir() && b.rootVendorDir != "" && path == b.rootVendorDir && len(packages) > 0 {
-			return filepath.SkipDir
-		}
-
-		if b.StripPlan != nil && !b.StripPlan.IncludePath(path, info.IsDir()) {
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		relPath, err := filepath.Rel(srcDir, path)
-		if err != nil {
-			return err
-		}
-
-		if relPath == "." {
-			return nil
-		}
-
-		archivePath := relPath
-		if prefix != "" {
-			archivePath = filepath.Join(prefix, relPath)
-		}
-
-		// ZIP uses forward slashes for paths
-		archivePath = filepath.ToSlash(archivePath)
-
-		if info.IsDir() {
-			archivePath += "/"
-		}
-
-		header, err := zip.FileInfoHeader(info)
-		if err != nil {
-			return err
-		}
-		header.Name = archivePath
-		header.Method = zip.Deflate
-
-		writer, err := zw.CreateHeader(header)
-		if err != nil {
-			return err
-		}
-
-		if !info.IsDir() {
-			file, err := os.Open(path) //nolint:gosec // G304: path comes from our own tree
-			if err != nil {
-				return err
-			}
-			defer func() {
-				_ = file.Close()
-			}()
-
-			if _, err := io.Copy(writer, file); err != nil {
-				return err
-			}
-		}
-
-		return nil
-	})
-	return err
+	return b.bundleZipFromDir(stagingDir, outputPath)
 }
 
 // bundleOCICompliant creates an OCI-compliant ZIP bundle by inlining all packages
@@ -627,16 +285,10 @@ func (b *Bundler) bundleZipFromDir(srcDir, outputPath string) (err error) {
 			return walkErr
 		}
 
-		// Skip .terraform, .git, and the configured vendor directory
-		if info.IsDir() {
-			switch info.Name() {
-			case dirNameTerraform, dirNameGit:
-				return filepath.SkipDir
-			}
-			// Only skip the vendor dir by exact path (not just basename)
-			if b.VendorDir != "" && path == filepath.Join(srcDir, b.VendorDir) {
-				return filepath.SkipDir
-			}
+		// Skip .terraform and .git directories. Content is pre-staged, so no
+		// vendor-dir skip is needed or correct here.
+		if info.IsDir() && (info.Name() == dirNameTerraform || info.Name() == dirNameGit) {
+			return filepath.SkipDir
 		}
 
 		if b.StripPlan != nil && !b.StripPlan.IncludePath(path, info.IsDir()) {
@@ -1187,62 +839,6 @@ func (b *Bundler) aggregatePressedModules(tree *ResolvedTree) error {
 		}
 	}
 
-	return nil
-}
-
-func metadataJSON(metadata *ArtifactMetadata) ([]byte, error) {
-	if metadata == nil {
-		return nil, nil
-	}
-	data, err := json.MarshalIndent(metadata, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("failed to encode metadata: %w", err)
-	}
-	return append(data, '\n'), nil
-}
-
-// bundleNow returns the current time, overridable in tests.
-var bundleNow = time.Now
-
-func (b *Bundler) addMetadataToTar(tw *tar.Writer) error {
-	data, err := metadataJSON(b.Metadata)
-	if err != nil || data == nil {
-		return err
-	}
-	now := bundleNow()
-	header := &tar.Header{
-		Name:    MetadataFileName,
-		Mode:    0o644,
-		Size:    int64(len(data)),
-		ModTime: now,
-	}
-	if err := tw.WriteHeader(header); err != nil {
-		return fmt.Errorf("failed to write metadata tar header: %w", err)
-	}
-	if _, err := tw.Write(data); err != nil {
-		return fmt.Errorf("failed to write metadata tar content: %w", err)
-	}
-	return nil
-}
-
-func (b *Bundler) addMetadataToZip(zw *zip.Writer) error {
-	data, err := metadataJSON(b.Metadata)
-	if err != nil || data == nil {
-		return err
-	}
-	now := bundleNow()
-	header := &zip.FileHeader{
-		Name:     MetadataFileName,
-		Modified: now,
-	}
-	header.SetMode(0o644)
-	writer, err := zw.CreateHeader(header)
-	if err != nil {
-		return fmt.Errorf("failed to create metadata zip entry: %w", err)
-	}
-	if _, err := writer.Write(data); err != nil {
-		return fmt.Errorf("failed to write metadata zip content: %w", err)
-	}
 	return nil
 }
 

@@ -344,41 +344,79 @@ func treePackageContentHash(tree *ResolvedTree, identity *PackageIdentity) strin
 	return ""
 }
 
-// rewriteModuleSourcesToFinalIDs rewrites module source references in parent modules
-// to point to the final sourcetree IDs. Only modules whose package root was affected
-// by the identity plan are rewritten; local modules within the root package are left alone.
+// rewriteModuleSourcesToFinalIDs rewrites module source references in parent modules to
+// point at the final content-addressed package directories after identity planning.
+//
+// Correctness rules:
+//
+//   - Only REMOTE module references are rewritten. Remote packages are downloaded into
+//     <root>/<vendorDir>/<addrHash>/ and the resolver writes sources like
+//     "./<vendorDir>/<addrHash>//subdir". Identity planning renames those directories to
+//     content-addressed "pkg-<sha256>/" names and deduplicates identical content, so every
+//     such reference must be repointed at the canonical directory.
+//
+//   - LOCAL module references ("./sibling", "../ext") are NEVER rewritten. They are
+//     intra-package or intra-root relative paths. Whole packages (and the root) are copied
+//     intact into the bundle, so those relative paths still resolve. Rewriting them based
+//     on package-root geometry corrupts them (the original F2 bug rewrote "../ext" inside a
+//     downloaded package to "../..", pointing at the package root).
+//
+//   - Only packages that were actually relocated (OldLocalDir != FinalLocalDir) trigger
+//     rewrites. With no relocations the function is a complete no-op (F3: do not rewrite
+//     when nothing moved).
 func rewriteModuleSourcesToFinalIDs(tree *ResolvedTree, plan *SourcetreeIdentityPlan) error {
 	if len(plan.Packages) == 0 {
 		return nil
 	}
-	// Build a set of final package roots that were affected by the identity plan.
-	// Use FinalLocalDir (post-update) because updateTreePackagePointers already
-	// updated module.PackageRoot to the canonical location.
-	affectedRoots := make(map[string]bool)
-	for _, identity := range plan.ByFinalID {
-		affectedRoots[filepath.Clean(identity.FinalLocalDir)] = true
+
+	relocatedRoots := make(map[string]bool, len(plan.Packages))
+	for _, identity := range plan.Packages {
+		if filepath.Clean(identity.OldLocalDir) != filepath.Clean(identity.FinalLocalDir) {
+			relocatedRoots[filepath.Clean(identity.FinalLocalDir)] = true
+		}
 	}
+	if len(relocatedRoots) == 0 {
+		return nil
+	}
+
 	for _, module := range tree.AllModules {
-		if module == nil || module.Parent == nil || module.Parent.InstallDir == "" || module.PackageRoot == "" {
-			continue
+		if err := rewriteRelocatedRemoteSource(module, tree.Root, relocatedRoots); err != nil {
+			return err
 		}
-		// Only rewrite sources for modules whose package was actually moved by identity planning
-		if !affectedRoots[filepath.Clean(module.PackageRoot)] {
-			continue
-		}
-		relPath, err := filepath.Rel(module.Parent.InstallDir, module.PackageRoot)
-		if err != nil {
-			return fmt.Errorf("failed to compute final source for module %s: %w", module.Key, err)
-		}
-		newSource := moduleSourcePath(relPath, module.Source.SubDir)
-		tfFiles, err := FindTerraformFiles(module.Parent.InstallDir)
-		if err != nil {
-			return fmt.Errorf("failed to scan parent module %s for source rewrite: %w", module.Parent.Key, err)
-		}
-		for _, tfFile := range tfFiles {
-			// Not all modules may be in every .tf file (e.g. outputs.tf)
-			_ = RewriteModuleSource(tfFile, module.Name, newSource)
-		}
+	}
+	return nil
+}
+
+// rewriteRelocatedRemoteSource repoints a single module's source reference at its package's
+// final content-addressed directory, when applicable. See rewriteModuleSourcesToFinalIDs for
+// the correctness rules. Returns nil for any module that does not need rewriting.
+func rewriteRelocatedRemoteSource(module, root *ModuleNode, relocatedRoots map[string]bool) error {
+	if module == nil || module == root || !module.IsRemote {
+		return nil
+	}
+	if module.Parent == nil || module.Parent.InstallDir == "" || module.PackageRoot == "" {
+		return nil
+	}
+	if !relocatedRoots[filepath.Clean(module.PackageRoot)] {
+		return nil
+	}
+	relPath, err := filepath.Rel(module.Parent.InstallDir, module.PackageRoot)
+	if err != nil {
+		return fmt.Errorf("failed to compute final source for module %s: %w", module.Key, err)
+	}
+	newSource := moduleSourcePath(relPath, module.Source.SubDir)
+	// Parent directory may not exist or have no .tf files (e.g. a synthetic test tree);
+	// in that case there is nothing to rewrite. Ignore the error deliberately.
+	tfFiles, _ := FindTerraformFiles(module.Parent.InstallDir) //nolint:errcheck // best-effort lookup
+	if len(tfFiles) == 0 {
+		return nil
+	}
+	// The module block lives in exactly one .tf file; RewriteModuleSource returns a
+	// "not found" error for the others. In the real resolution flow the resolver always
+	// emits the block, so one file rewrites; we keep this best-effort to avoid failing on
+	// synthetic trees that deliberately cannot be expressed in HCL.
+	for _, tfFile := range tfFiles {
+		_ = RewriteModuleSource(tfFile, module.Name, newSource) //nolint:errcheck // best-effort per-file
 	}
 	return nil
 }

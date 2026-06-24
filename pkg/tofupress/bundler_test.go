@@ -1407,3 +1407,452 @@ module "remote" {
 	assert.Contains(t, mainStr, `source = "./modules/`,
 		"remote module source must point to vendor dir")
 }
+
+// TestBundler_SelfReferencingModuleDoesNotDropPackages manually constructs a tree
+// matching the customer report: a module with key X has itself listed as a child.
+// This tests that bundling includes ALL packages even with a self-referencing module.
+func TestBundler_SelfReferencingModuleDoesNotDropPackages(t *testing.T) {
+	// Create directories for 5 packages
+	pkgDirs := make([]string, 5)
+	for i := range 5 {
+		d := t.TempDir()
+		writeTerraformFile(t, d, "main.tf", fmt.Sprintf(`output "pkg" { value = "pkg-%d" }`, i))
+		pkgDirs[i] = d
+	}
+
+	// Create root module dir
+	rootWorkDir := t.TempDir()
+	writeTerraformFile(t, rootWorkDir, "main.tf", `# root`)
+
+	// Root module
+	rootModule := &ModuleNode{
+		Key:         "",
+		Name:        "root",
+		InstallDir:  rootWorkDir,
+		PackageRoot: rootWorkDir,
+		IsLocal:     true,
+	}
+
+	// account_config (local, child of root, at its own directory)
+	accConfigDir := filepath.Join(rootWorkDir, "account_config")
+	require.NoError(t, os.MkdirAll(accConfigDir, 0o755))
+	modAccountConfig := &ModuleNode{
+		Key:        "account_config",
+		Name:       "account_config",
+		InstallDir: accConfigDir,
+		Parent:     rootModule,
+		IsLocal:    true,
+	}
+
+	// account_config.accountindex (local, child of account_config, at its own dir)
+	accIndexDir := filepath.Join(rootWorkDir, "account_index")
+	require.NoError(t, os.MkdirAll(accIndexDir, 0o755))
+	modAccountIndex := &ModuleNode{
+		Key:        "account_config.accountindex",
+		Name:       "accountindex",
+		InstallDir: accIndexDir,
+		Parent:     modAccountConfig,
+		IsLocal:    true,
+	}
+
+	// account_config.accountindex.accountindex (remote, self-referencing)
+	modSelfRef := &ModuleNode{
+		Key:         "account_config.accountindex.accountindex",
+		Name:        "accountindex",
+		Source:      ModuleSource{PackageAddr: "git::https://example.com/base.git?ref=v0.0.6", Type: SourceGit},
+		InstallDir:  pkgDirs[0],
+		PackageRoot: pkgDirs[0],
+		Parent:      modAccountIndex,
+		IsRemote:    true,
+	}
+	// THE BUG: module has itself as a child
+	modSelfRef.Children = []*ModuleNode{modSelfRef}
+
+	modAccountIndex.Children = []*ModuleNode{modSelfRef}
+	modAccountConfig.Children = []*ModuleNode{modAccountIndex}
+
+	// Remote modules referencing other packages
+	modOutputs := &ModuleNode{
+		Key:         "outputs",
+		Name:        "outputs",
+		Source:      ModuleSource{PackageAddr: "git::https://example.com/base.git?ref=v0.0.6", Type: SourceGit},
+		InstallDir:  pkgDirs[1],
+		PackageRoot: pkgDirs[1],
+		Parent:      rootModule,
+		IsRemote:    true,
+	}
+	modVpc := &ModuleNode{
+		Key:         "vpc",
+		Name:        "vpc",
+		Source:      ModuleSource{PackageAddr: "git::https://example.com/base.git?ref=v0.9.0", Type: SourceGit},
+		InstallDir:  pkgDirs[2],
+		PackageRoot: pkgDirs[2],
+		Parent:      rootModule,
+		IsRemote:    true,
+	}
+	modNacl := &ModuleNode{
+		Key:         "nacl_private",
+		Name:        "nacl_private",
+		Source:      ModuleSource{PackageAddr: "git::https://example.com/base.git?ref=v0.0.33", Type: SourceGit},
+		InstallDir:  pkgDirs[3],
+		PackageRoot: pkgDirs[3],
+		Parent:      rootModule,
+		IsRemote:    true,
+	}
+	modFlowlog := &ModuleNode{
+		Key:         "flowlogs",
+		Name:        "flowlogs",
+		Source:      ModuleSource{PackageAddr: "git::https://example.com/flowlog.git?ref=v1.1.0", Type: SourceGit},
+		InstallDir:  pkgDirs[4],
+		PackageRoot: pkgDirs[4],
+		Parent:      rootModule,
+		IsRemote:    true,
+	}
+	rootModule.Children = []*ModuleNode{modAccountConfig, modOutputs, modVpc, modNacl, modFlowlog}
+
+	tree := &ResolvedTree{
+		Root: rootModule,
+		AllModules: []*ModuleNode{
+			rootModule, modAccountConfig, modAccountIndex, modSelfRef,
+			modOutputs, modVpc, modNacl, modFlowlog,
+		},
+		Packages: map[string]*DownloadedPackage{
+			"pkg-0": {PackageAddr: "git::https://example.com/base.git?ref=v0.0.6", LocalDir: pkgDirs[0]},
+			"pkg-1": {PackageAddr: "git::https://example.com/base.git?ref=v0.0.6", LocalDir: pkgDirs[1]},
+			"pkg-2": {PackageAddr: "git::https://example.com/base.git?ref=v0.9.0", LocalDir: pkgDirs[2]},
+			"pkg-3": {PackageAddr: "git::https://example.com/base.git?ref=v0.0.33", LocalDir: pkgDirs[3]},
+			"pkg-4": {PackageAddr: "git::https://example.com/flowlog.git?ref=v1.1.0", LocalDir: pkgDirs[4]},
+		},
+	}
+
+	// Verify the self-referencing module
+	bugMod := tree.Find("account_config.accountindex.accountindex")
+	require.NotNil(t, bugMod)
+	require.Len(t, bugMod.Children, 1, "self-referencing module should have 1 child")
+	assert.Same(t, bugMod, bugMod.Children[0], "module should reference itself as child")
+
+	// Apply sourcetree identity planning (same as bundle command)
+	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+
+	t.Logf("Before identity: %d packages in tree, %d packages in strip plan", len(tree.Packages), len(stripPlan.Packages))
+
+	identityPlan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	require.NoError(t, err)
+
+	t.Logf("Identity plan: %d packages, %d by final ID", len(identityPlan.Packages), len(identityPlan.ByFinalID))
+
+	require.NoError(t, ApplySourcetreeIdentityPlan(tree, identityPlan))
+
+	// After identity: verify ALL final dirs exist on disk (sanity check)
+	for id, identity := range identityPlan.ByFinalID {
+		_, statErr := os.Stat(identity.FinalLocalDir)
+		t.Logf("  final dir for %s: %s (exists=%v)", id, identity.FinalLocalDir, statErr == nil)
+	}
+
+	// Verify old dirs were removed
+	for _, pkgDir := range pkgDirs {
+		_, statErr := os.Stat(pkgDir)
+		t.Logf("  old dir %s (exists=%v)", pkgDir, statErr == nil)
+	}
+
+	// Re-plan stripping
+	stripPlan, err = PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+
+	t.Logf("After identity: %d packages in tree", len(tree.Packages))
+	for id, pkg := range tree.Packages {
+		_, statErr := os.Stat(pkg.LocalDir)
+		t.Logf("  %s: addr=%s dir=%s (exists=%v)", id, pkg.PackageAddr, pkg.LocalDir, statErr == nil)
+	}
+
+	// Bundle to ZIP
+	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
+	bundler := NewBundler(BundleFormatZIP)
+	bundler.StripPlan = stripPlan
+	err = bundler.Bundle(tree, archivePath)
+	require.NoError(t, err, "bundling should complete without errors")
+
+	// Verify ALL packages are in the archive
+	names := zipFileNames(t, archivePath)
+	packageDirs := make(map[string]bool)
+	for _, name := range names {
+		if after, ok := strings.CutPrefix(name, "modules/"); ok {
+			if part, _, found := strings.Cut(after, "/"); found && part != "" {
+				packageDirs[part] = true
+			}
+		}
+	}
+	t.Logf("Package dirs in archive: %v (total %d)", packageDirs, len(packageDirs))
+
+	assert.GreaterOrEqual(t, len(packageDirs), 5,
+		"archive must contain all 5 package directories, found %d: %v",
+		len(packageDirs), packageDirs)
+}
+
+// TestResolver_SamePkgDifferentSubdirectories_LocalChainWithSameChildName reproduces
+// the EXACT customer scenario. The terrafom-modules-base repo contains a modules/
+// subdirectory (for helper modules). The bundler's addDirectoryToZip skips ANY
+// directory named "modules" when packages are present, thinking it's the vendor dir.
+// This drops all package content from packages that internally use modules/ directories.
+func TestResolver_SamePkgDifferentSubdirectories_LocalChainWithSameChildName(t *testing.T) {
+	// Create the "remote" package (simulating terraform-modules-base at v0.0.6)
+	// It contains a modules/ directory with helper sub-modules.
+	remoteRepo := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(remoteRepo, "modules", "helper", "ssm_output"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(remoteRepo, "modules", "helper", "account_index"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(remoteRepo, "modules", "helper", "mandatory_tags"), 0o755))
+	writeTerraformFile(t, filepath.Join(remoteRepo, "modules", "helper", "ssm_output"), "main.tf",
+		`# ssm_output helper (leaf)`)
+	writeTerraformFile(t, filepath.Join(remoteRepo, "modules", "helper", "account_index"), "main.tf",
+		`# account_index helper (leaf)`)
+	writeTerraformFile(t, filepath.Join(remoteRepo, "modules", "helper", "mandatory_tags"), "main.tf",
+		`# mandatory_tags helper (leaf)`)
+
+	git := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = remoteRepo
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, string(out))
+	}
+	git("init")
+	git("config", "user.email", "test@example.invalid")
+	git("config", "user.name", "TofuPress Test")
+	git("add", ".")
+	git("commit", "-m", "initial")
+	git("tag", "v0.0.6")
+
+	remoteGitURL := "git::" + (&url.URL{Scheme: "file", Path: remoteRepo}).String()
+
+	// Second remote package (simulating a different repo/ref, like v0.0.33)
+	remoteRepo2 := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(remoteRepo2, "modules", "networking", "nacl", "default"), 0o755))
+	writeTerraformFile(t, filepath.Join(remoteRepo2, "modules", "networking", "nacl", "default"), "main.tf",
+		`# nacl default (leaf)`)
+	git2 := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = remoteRepo2
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, string(out))
+	}
+	git2("init")
+	git2("config", "user.email", "test@example.invalid")
+	git2("config", "user.name", "TofuPress Test")
+	git2("add", ".")
+	git2("commit", "-m", "initial")
+	git2("tag", "v0.0.33")
+
+	remoteGitURL2 := "git::" + (&url.URL{Scheme: "file", Path: remoteRepo2}).String()
+
+	// Build the monorepo structure matching the customer report
+	repoRoot := t.TempDir()
+	modulesDir := filepath.Join(repoRoot, "modules")
+	networkDir := filepath.Join(repoRoot, "live", "network")
+	rootDir := filepath.Join(networkDir, "infratest")
+	require.NoError(t, os.MkdirAll(rootDir, 0o755))
+
+	// Local module: account_config
+	accConfigDir := filepath.Join(modulesDir, "account_config")
+	require.NoError(t, os.MkdirAll(accConfigDir, 0o755))
+	writeTerraformFile(t, accConfigDir, "main.tf", `
+module "accountindex" {
+  source = "../account_index"
+}
+`)
+
+	// Local module: account_index (has child named "accountindex" referencing remote)
+	accIndexDir := filepath.Join(modulesDir, "account_index")
+	require.NoError(t, os.MkdirAll(accIndexDir, 0o755))
+	writeTerraformFile(t, accIndexDir, "main.tf", fmt.Sprintf(`
+module "accountindex" {
+  source = "%s//modules/helper/account_index?ref=v0.0.6"
+}
+`, remoteGitURL))
+
+	// Root module: references account_config and outputs (same pkg, diff subdir)
+	// Also references nacl_private (diff pkg)
+	writeTerraformFile(t, rootDir, "main.tf", fmt.Sprintf(`
+module "account_config" {
+  source = "../../../modules/account_config"
+}
+
+module "outputs" {
+  source = "%s//modules/helper/ssm_output?ref=v0.0.6"
+}
+
+module "nacl_private" {
+  source = "%s//modules/networking/nacl/default?ref=v0.0.33"
+}
+`, remoteGitURL, remoteGitURL2))
+
+	// Resolve
+	resolver := NewResolver()
+	resolver.PackageRoot = repoRoot
+	resolver.RootDir = rootDir
+	tree, err := resolver.Resolve(context.Background(), rootDir)
+	require.NoError(t, err)
+	require.NotNil(t, tree)
+
+	// Verify: no module has itself as a child (self-referencing bug)
+	for _, mod := range tree.AllModules {
+		for _, child := range mod.Children {
+			assert.NotEqual(t, mod.Key, child.Key,
+				"module %s must not reference itself as a child", mod.Key)
+		}
+	}
+	assert.GreaterOrEqual(t, len(tree.AllModules), 5,
+		"expected at least 5 modules")
+	assert.GreaterOrEqual(t, len(tree.Packages), 2,
+		"expected at least 2 remote packages")
+
+	// Verify the critical module doesn't self-reference
+	bugMod := tree.Find("account_config.accountindex.accountindex")
+	require.NotNil(t, bugMod)
+	assert.Empty(t, bugMod.Children,
+		"account_config.accountindex.accountindex must not self-reference")
+
+	// Run through the full bundle pipeline
+	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+
+	identityPlan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	require.NoError(t, err)
+
+	require.NoError(t, ApplySourcetreeIdentityPlan(tree, identityPlan))
+
+	// Verify all package dirs exist after identity
+	for _, pkg := range tree.Packages {
+		_, statErr := os.Stat(pkg.LocalDir)
+		require.NoError(t, statErr, "package dir must exist after identity: %s", pkg.LocalDir)
+	}
+
+	// Rebuild strip plan and bundle
+	stripPlan, err = PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+
+	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
+	bundler := NewBundler(BundleFormatZIP)
+	bundler.StripPlan = stripPlan
+	require.NoError(t, bundler.Bundle(tree, archivePath))
+
+	// Verify ALL packages are in the archive (no packages dropped due to vendor-dir skip)
+	names := zipFileNames(t, archivePath)
+	packageDirs := make(map[string]bool)
+	for _, name := range names {
+		if after, ok := strings.CutPrefix(name, "modules/"); ok {
+			if part, _, found := strings.Cut(after, "/"); found && part != "" {
+				packageDirs[part] = true
+			}
+		}
+	}
+
+	assert.Len(t, packageDirs, len(identityPlan.ByFinalID),
+		"archive must contain all unique packages from identity plan (bug: vendor dir skip in addDirectoryToZip)")
+
+	// Verify metadata matches
+	metadata, err := BuildArtifactMetadata(tree, &MetadataRequest{
+		Command:    "bundle",
+		RootSource: rootDir,
+		OutputPath: archivePath,
+		StripPlan:  stripPlan,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, len(identityPlan.ByFinalID), metadata.Stats.UniquePackages)
+}
+
+// TestBundler_VendorDirSkippingInternalModulesDir reproduces the core bug:
+// When a downloaded package contains its own modules/ directory (like
+// terraform-modules-base which has modules/helper/...), the bundler's
+// addDirectoryToZip incorrectly skips it, treating it as the vendor dir.
+//
+// This causes packages with internal modules/ structure to have all their
+// content dropped from the bundle archive.
+func TestBundler_VendorDirSkippingInternalModulesDir(t *testing.T) {
+	// Create a minimal tree where a remote package has a modules/ subdir
+	rootWorkDir := t.TempDir()
+
+	// Root module
+	rootModule := &ModuleNode{
+		Key:         "",
+		Name:        "root",
+		InstallDir:  rootWorkDir,
+		PackageRoot: rootWorkDir,
+		IsLocal:     true,
+	}
+
+	// Create root tf file
+	err := os.WriteFile(filepath.Join(rootWorkDir, "main.tf"), []byte(`# root`), 0o644)
+	require.NoError(t, err)
+
+	// Create a package with its own modules/ directory
+	pkgDir := filepath.Join(rootWorkDir, "modules", "pkg-abc123")
+	require.NoError(t, os.MkdirAll(filepath.Join(pkgDir, "modules", "helper"), 0o755))
+	err = os.WriteFile(filepath.Join(pkgDir, "modules", "helper", "main.tf"),
+		[]byte(`resource "null_resource" "helper" {}`), 0o644)
+	require.NoError(t, err)
+
+	// Child module (remote, references the package)
+	childModule := &ModuleNode{
+		Key:         "child",
+		Name:        "child",
+		InstallDir:  filepath.Join(pkgDir, "modules", "helper"),
+		PackageRoot: pkgDir,
+		Parent:      rootModule,
+		IsRemote:    true,
+		IsLocal:     false,
+	}
+	rootModule.Children = []*ModuleNode{childModule}
+
+	tree := &ResolvedTree{
+		Root:       rootModule,
+		AllModules: []*ModuleNode{rootModule, childModule},
+		Packages: map[string]*DownloadedPackage{
+			"pkg-abc123": {
+				PackageAddr: "git::https://example.com/base.git?ref=v1.0",
+				LocalDir:    pkgDir,
+			},
+		},
+		VendorDir: "modules",
+	}
+
+	// Apply identity planning (no-op since LocalDir IS the final dir)
+	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+
+	identityPlan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	require.NoError(t, err)
+
+	// In this case old==final, so materialization is a no-op
+	t.Logf("Identity: %d by final ID", len(identityPlan.ByFinalID))
+
+	// Build a fresh strip plan (after identity)
+	stripPlan, err = PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+
+	// Bundle
+	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
+	bundler := NewBundler(BundleFormatZIP)
+	bundler.StripPlan = stripPlan
+	bundler.VendorDir = "modules"
+	require.NoError(t, bundler.Bundle(tree, archivePath))
+
+	// Verify all entries in the archive
+	names := zipFileNames(t, archivePath)
+	t.Logf("Archive entries: %d", len(names))
+	for _, n := range names {
+		t.Logf("  %s", n)
+	}
+
+	// The helper module's main.tf MUST be in the archive
+	// It should be at modules/pkg-abc123/modules/helper/main.tf
+	expectedEntry := "modules/pkg-abc123/modules/helper/main.tf"
+	found := false
+	for _, n := range names {
+		if n == expectedEntry {
+			found = true
+		}
+	}
+	assert.True(t, found,
+		"package content with internal modules/ directory must be in archive at %s",
+		expectedEntry)
+}

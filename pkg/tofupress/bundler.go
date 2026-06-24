@@ -86,6 +86,11 @@ type Bundler struct {
 	Metadata     *ArtifactMetadata // Optional metadata to embed in the archive
 	StripPlan    *StripPlan        // Optional include/exclude plan for safe stripping
 	VendorDir    string            // Vendored modules directory name (from tree.VendorDir)
+
+	// rootVendorDir is the absolute path of the tree's vendor directory.
+	// Only this specific directory is skipped during bundling (packages added separately).
+	// It prevents false-positive skips of packages that contain their own modules/ subdir.
+	rootVendorDir string
 }
 
 // NewBundler creates a new Bundler with the specified format.
@@ -101,6 +106,11 @@ func (b *Bundler) Bundle(tree *ResolvedTree, outputPath string) error {
 
 	// Use the tree's vendor dir, falling back to default
 	b.VendorDir = vendorDirName(tree)
+
+	// Pre-compute the tree root's absolute vendor directory path so that
+	// addDirectoryToZip/Tar skip only this specific directory (not any
+	// nested modules/ subdirectory inside a package).
+	b.rootVendorDir = filepath.Join(rootArchiveDir(tree), b.VendorDir)
 
 	// Aggregate pressed modules before creating the bundle
 	if err := b.aggregatePressedModules(tree); err != nil {
@@ -384,9 +394,10 @@ func (b *Bundler) addDirectoryToTar(tw *tar.Writer, srcDir, prefix string, packa
 			return filepath.SkipDir
 		}
 
-		// Only skip the vendor dir when packages will be added separately.
-		// Use exact path matching to avoid skipping user-created modules/ directories.
-		if info.IsDir() && path == filepath.Join(srcDir, b.VendorDir) && len(packages) > 0 {
+		// Only skip the tree-root vendor dir when packages will be added separately.
+		// Use the absolute path to avoid skipping user-created modules/ directories
+		// inside downloaded packages (e.g. terraform-modules-base has modules/helper/...).
+		if info.IsDir() && b.rootVendorDir != "" && path == b.rootVendorDir && len(packages) > 0 {
 			return filepath.SkipDir
 		}
 
@@ -452,9 +463,10 @@ func (b *Bundler) addDirectoryToZip(zw *zip.Writer, srcDir, prefix string, packa
 			return filepath.SkipDir
 		}
 
-		// Only skip the vendor dir when packages will be added separately.
-		// Use exact path matching to avoid skipping user-created modules/ directories.
-		if info.IsDir() && path == filepath.Join(srcDir, b.VendorDir) && len(packages) > 0 {
+		// Only skip the tree-root vendor dir when packages will be added separately.
+		// Use the absolute path to avoid skipping user-created modules/ directories
+		// inside downloaded packages (e.g. terraform-modules-base has modules/helper/...).
+		if info.IsDir() && b.rootVendorDir != "" && path == b.rootVendorDir && len(packages) > 0 {
 			return filepath.SkipDir
 		}
 

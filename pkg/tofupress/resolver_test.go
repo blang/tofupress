@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -843,4 +845,124 @@ module "b" {
 
 	// Both for_each and count should not prevent module extraction.
 	assert.Len(t, tree.AllModules, 3, "root + a + b")
+}
+
+// TestResolver_SameNameChildInRemotePackageDuplicatePreventsSelfReference reproduces
+// the customer-reported bug where a module tree with nested local modules referencing
+// the same remote package (but different subdirectories) produces a self-referencing
+// module node.
+//
+// Layout mimics the customer report:
+//
+//	repo_root/                              (package root)
+//	  modules/
+//	    account_config/
+//	      main.tf → module "accountindex" { source = "../account_index" }
+//	    account_index/
+//	      main.tf → module "accountindex" { source = "git::file:///fake//helper/a?ref=v1" }
+//	  live/network/infratest/               (working directory / root module)
+//	    main.tf →
+//	      module "account_config" { source = "../../../modules/account_config" }
+//	      module "outputs" { source = "git::file:///fake//helper/o?ref=v1" }
+//
+// Key aspects:
+//   - Two modules (outputs from root, accountindex from nested chain) reference
+//     the SAME remote package (fake) but different subdirectories (//helper/o and //helper/a)
+//   - The nested local module chain has the same module name (accountindex) as its child
+//   - This creates key pattern: account_config.accountindex → account_config.accountindex.accountindex
+//   - The bug: account_config.accountindex.accountindex gets itself listed as a child
+func TestResolver_SameNameChildInRemotePackageDuplicatePreventsSelfReference(t *testing.T) {
+	// Create the fake remote package (simulating a downloaded git repo)
+	fakePkgDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(fakePkgDir, "helper", "a"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(fakePkgDir, "helper", "o"), 0o755))
+	writeTerraformFile(t, filepath.Join(fakePkgDir, "helper", "a"), "main.tf", `# account_index helper leaf module`)
+	writeTerraformFile(t, filepath.Join(fakePkgDir, "helper", "o"), "main.tf", `# ssm_output helper leaf module`)
+
+	// Initialize git repo for the fake package
+	git := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = fakePkgDir
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, string(out))
+	}
+	git("init")
+	git("config", "user.email", "test@example.invalid")
+	git("config", "user.name", "TofuPress Test")
+	git("add", ".")
+	git("commit", "-m", "initial")
+	git("tag", "v1.0.0")
+
+	fakePkgURL := (&url.URL{Scheme: "file", Path: fakePkgDir}).String()
+	// Use git::file:///path//subdir?ref=v1 convention (subdir before query string)
+	fakeSourceHelperA := fmt.Sprintf("git::%s//helper/a?ref=v1.0.0", fakePkgURL)
+	fakeSourceHelperO := fmt.Sprintf("git::%s//helper/o?ref=v1.0.0", fakePkgURL)
+
+	// Build the monorepo structure
+	repoRoot := t.TempDir()
+	modulesDir := filepath.Join(repoRoot, "modules")
+	networkDir := filepath.Join(repoRoot, "live", "network")
+	rootDir := filepath.Join(networkDir, "infratest")
+	require.NoError(t, os.MkdirAll(rootDir, 0o755))
+
+	// Local module: account_config (referenced from root as ../../../modules/account_config)
+	accountConfigDir := filepath.Join(modulesDir, "account_config")
+	require.NoError(t, os.MkdirAll(accountConfigDir, 0o755))
+	writeTerraformFile(t, accountConfigDir, "main.tf", `
+module "accountindex" {
+  source = "../account_index"
+}
+`)
+
+	// Local module: account_index (has child with same name as itself referencing remote)
+	accountIndexDir := filepath.Join(modulesDir, "account_index")
+	require.NoError(t, os.MkdirAll(accountIndexDir, 0o755))
+	writeTerraformFile(t, accountIndexDir, "main.tf", fmt.Sprintf(`
+module "accountindex" {
+  source = "%s"
+}
+`, fakeSourceHelperA))
+
+	// Root module: references account_config (local) and outputs (remote, same pkg different subdir)
+	writeTerraformFile(t, rootDir, "main.tf", fmt.Sprintf(`
+module "account_config" {
+  source = "../../../modules/account_config"
+}
+
+module "outputs" {
+  source = "%s"
+}
+`, fakeSourceHelperO))
+
+	// Resolve with package root set to repo root
+	resolver := NewResolver()
+	resolver.PackageRoot = repoRoot
+	resolver.RootDir = rootDir
+	tree, err := resolver.Resolve(context.Background(), rootDir)
+	require.NoError(t, err)
+	require.NotNil(t, tree)
+
+	t.Logf("Resolved: %d modules, %d packages", len(tree.AllModules), len(tree.Packages))
+	for _, mod := range tree.AllModules {
+		t.Logf("  %s: name=%s local=%v remote=%v install=%s children=%d",
+			mod.Key, mod.Name, mod.IsLocal, mod.IsRemote, mod.InstallDir, len(mod.Children))
+	}
+
+	// BUG REPRODUCTION: The module account_config.accountindex.accountindex MUST NOT
+	// have itself as a child (self-reference).
+	bugMod := tree.Find("account_config.accountindex.accountindex")
+	require.NotNil(t, bugMod, "account_config.accountindex.accountindex module should be in the tree")
+
+	// Check for self-referencing: no child should have the same key as the module itself.
+	for _, child := range bugMod.Children {
+		assert.NotEqual(t, bugMod.Key, child.Key,
+			"module %s must not have itself as a child (self-referencing)", bugMod.Key)
+	}
+
+	// The module should have NO children (it's a leaf module in the remote package)
+	assert.Empty(t, bugMod.Children,
+		"module %s should have no children (leaf module in remote package)", bugMod.Key)
+
+	// Verify package count: only 1 remote package (fake), both outputs and accountindex share it
+	assert.Len(t, tree.Packages, 1, "expected 1 remote package (shared by outputs and accountindex)")
 }

@@ -641,10 +641,16 @@ var testRegistryBaseURL string
 
 // queryRegistryAPI queries the Terraform Registry API to get the download URL for a module.
 // It retries transient errors (5xx status codes, network failures) with exponential backoff.
+// testRegistryBaseURL takes precedence (set by in-process tests); the TOFUPRESS_REGISTRY_BASE_URL
+// env var allows driving the CLI binary at a local httptest stub without touching the network.
 func queryRegistryAPI(ctx context.Context, namespace, name, provider, version string) (string, error) {
 	baseURL := testRegistryBaseURL
 	if baseURL == "" {
-		baseURL = "https://registry.terraform.io"
+		if env := os.Getenv("TOFUPRESS_REGISTRY_BASE_URL"); env != "" {
+			baseURL = env
+		} else {
+			baseURL = "https://registry.terraform.io"
+		}
 	}
 
 	apiURL := fmt.Sprintf("%s/v1/modules/%s/%s/%s",
@@ -686,7 +692,7 @@ func queryRegistryAPI(ctx context.Context, namespace, name, provider, version st
 
 // doRegistryQuery executes a single HTTP query to the registry API.
 func doRegistryQuery(ctx context.Context, apiURL string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, http.NoBody)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, http.NoBody) //nolint:gosec // G704: apiURL is built from registry-namespace/name/provider path-escaped inputs, not user-controlled freeform URL
 	if err != nil {
 		return "", fmt.Errorf("failed to create registry API request: %w", err)
 	}
@@ -696,7 +702,7 @@ func doRegistryQuery(ctx context.Context, apiURL string) (string, error) {
 		Timeout: 30 * time.Second,
 	}
 
-	resp, err := client.Do(req)
+	resp, err := client.Do(req) //nolint:gosec // G704: apiURL is built from trusted registry API inputs, not user-controlled freeform URL
 	if err != nil {
 		return "", fmt.Errorf("failed to query registry API: %w", err)
 	}

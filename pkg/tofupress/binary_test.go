@@ -527,9 +527,9 @@ module "remote" {
 	output, err = cmd.CombinedOutput()
 	require.NoError(t, err, "unzip failed: %s", string(output))
 
-	// Verify the extracted bundle has modules/
-	_, err = os.Stat(filepath.Join(extractDir, "modules"))
-	require.NoError(t, err, "extracted bundle should have modules/ directory")
+	// Verify the extracted bundle has the vendor directory
+	_, err = os.Stat(filepath.Join(extractDir, defaultVendorDir))
+	require.NoError(t, err, "extracted bundle should have vendor directory")
 
 	// Second bundle (bundle the extracted bundle)
 	secondBundlePath := filepath.Join(t.TempDir(), "second-bundle.zip")
@@ -538,11 +538,11 @@ module "remote" {
 	require.NoError(t, err, "second bundle failed: %s", string(output))
 	require.FileExists(t, secondBundlePath)
 
-	// Verify the second bundle also contains modules/
+	// Verify the second bundle also contains the vendor directory
 	cmd = exec.Command("unzip", "-l", secondBundlePath)
 	output, err = cmd.CombinedOutput()
 	require.NoError(t, err, "unzip -l failed: %s", string(output))
-	require.Contains(t, string(output), "modules/", "second bundle should contain modules/ directory")
+	require.Contains(t, string(output), defaultVendorDir+"/", "second bundle should contain vendor directory")
 	require.Contains(t, string(output), "main.tf", "second bundle should contain main.tf")
 }
 
@@ -573,10 +573,10 @@ module "consul" {
 	require.NoError(t, err, "registry bundle failed: %s", string(output))
 	require.FileExists(t, bundlePath)
 
-	// Verify the bundle contains modules/ with the registry module
+	// Verify the bundle contains the vendor directory with the registry module
 	cmd = exec.Command("unzip", "-l", bundlePath)
 	output, err = cmd.CombinedOutput()
 	require.NoError(t, err, "unzip -l failed: %s", string(output))
-	require.Contains(t, string(output), "modules/", "bundle should contain modules/ directory")
+	require.Contains(t, string(output), defaultVendorDir+"/", "bundle should contain vendor directory")
 	require.Contains(t, string(output), "main.tf", "bundle should contain main.tf")
 }

@@ -157,7 +157,9 @@ module "remote" {
 
 	artifact := filepath.Join(t.TempDir(), "bundle.zip")
 
-	cmd := exec.Command(bin, "bundle", src, artifact, "--format=zip") //nolint:gosec
+	// The safe default vendor dir ("_vendor") cannot collide with the user's modules/ dir,
+	// so force the legacy collision-prone name to exercise conflict detection.
+	cmd := exec.Command(bin, "bundle", src, artifact, "--format=zip", "--vendor-dir=modules") //nolint:gosec
 	out, err := cmd.CombinedOutput()
 	require.Error(t, err, "vendor dir conflict should cause error")
 	assert.Contains(t, strings.ToLower(string(out)), "conflict")

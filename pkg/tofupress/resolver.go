@@ -175,7 +175,7 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 
 	vendorDirName := r.VendorDir
 	if vendorDirName == "" {
-		vendorDirName = "modules"
+		vendorDirName = defaultVendorDir
 	}
 	sourcetreeDir := filepath.Join(rootDir, vendorDirName)
 	tree.VendorDir = vendorDirName

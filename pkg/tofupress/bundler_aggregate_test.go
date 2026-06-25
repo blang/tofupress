@@ -23,14 +23,14 @@ func TestBundler_AggregatePressedSubModules(t *testing.T) {
 	pressedMainTF := filepath.Join(pressedModuleDir, "main.tf")
 	if err := os.WriteFile(pressedMainTF, []byte(`
 module "inner" {
-  source = "./modules/abc123"
+  source = "./`+defaultVendorDir+`/abc123"
 }
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	// Create sourcetree with an inner package
-	innerPackageDir := filepath.Join(pressedModuleDir, "modules", "abc123")
+	// Create the pressed module's own vendor dir with an inner package
+	innerPackageDir := filepath.Join(pressedModuleDir, defaultVendorDir, "abc123")
 	if err := os.MkdirAll(innerPackageDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -96,17 +96,17 @@ module "pressed" {
 		t.Fatalf("Failed to walk extracted directory: %v", walkErr)
 	}
 
-	// Verify that the inner package is in the root sourcetree (flattened)
-	// The inner package should NOT be in a nested sourcetree
-	flattenedPackageDir := filepath.Join(extractDir, "modules", "abc123")
+	// Verify that the inner package is flattened into the root vendor dir
+	// The inner package should NOT remain in a nested vendor dir.
+	flattenedPackageDir := filepath.Join(extractDir, defaultVendorDir, "abc123")
 	if _, statErr := os.Stat(flattenedPackageDir); os.IsNotExist(statErr) {
-		t.Errorf("Inner package should be flattened to root sourcetree at %s", flattenedPackageDir)
+		t.Errorf("Inner package should be flattened to root vendor dir at %s", flattenedPackageDir)
 	}
 
-	// Verify that there's no nested sourcetree
-	nestedSourcetreePath := filepath.Join(extractDir, "pressed", "modules")
+	// Verify that there's no nested vendor dir inside the pressed module
+	nestedSourcetreePath := filepath.Join(extractDir, "pressed", defaultVendorDir)
 	if _, statErr := os.Stat(nestedSourcetreePath); !os.IsNotExist(statErr) {
-		t.Errorf("Should not have nested sourcetree at %s", nestedSourcetreePath)
+		t.Errorf("Should not have nested vendor dir at %s", nestedSourcetreePath)
 	}
 
 	// Verify that the pressed module's source was rewritten to point to the flattened location
@@ -116,8 +116,8 @@ module "pressed" {
 		t.Fatalf("Failed to read pressed module main.tf: %v", readErr)
 	}
 
-	// The source should be rewritten to point to the flattened sourcetree
-	if !strings.Contains(string(content), "./../modules/abc123") {
-		t.Errorf("Pressed module source should be rewritten to point to flattened sourcetree, got: %s", string(content))
+	// The source should be rewritten to point to the flattened vendor dir
+	if !strings.Contains(string(content), "./../"+defaultVendorDir+"/abc123") {
+		t.Errorf("Pressed module source should be rewritten to point to flattened vendor dir, got: %s", string(content))
 	}
 }

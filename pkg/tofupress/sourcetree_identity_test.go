@@ -134,6 +134,7 @@ module "b" { source = "./modules/old-b" }
 		Root:       &ModuleNode{Key: "root", Name: "root", InstallDir: root, PackageRoot: root, Children: []*ModuleNode{modA, modB}},
 		Packages:   map[string]*DownloadedPackage{"old-a": {PackageAddr: "git::file:///repo-a", LocalDir: pkgA}, "old-b": {PackageAddr: "git::file:///repo-b", LocalDir: pkgB}},
 		AllModules: []*ModuleNode{modA, modB},
+		VendorDir:  "modules", // this test deliberately vendors packages under modules/ (matching the .tf sources)
 	}
 	modA.Parent = tree.Root
 	modB.Parent = tree.Root

@@ -23,6 +23,11 @@ import (
 
 const testCustomVendorDir = "_vendor"
 
+// testLegacyVendorDir is the collision-prone vendor name tests deliberately
+// force to exercise the conflict regression path that the safe `_vendor`
+// default now avoids.
+const testLegacyVendorDir = "modules"
+
 func TestBundler_BundleLocalModulesOnly(t *testing.T) {
 	// Create a simple module structure
 	tmpDir := t.TempDir()
@@ -104,16 +109,16 @@ module "vpc" {
 
 	mainContent, err := os.ReadFile(mainFile)
 	require.NoError(t, err)
-	assert.Contains(t, string(mainContent), "source = \"./modules/")
+	assert.Contains(t, string(mainContent), "source = \"./"+defaultVendorDir+"/")
 
-	// Verify sourcetree directory exists
-	sourcetreeDir := filepath.Join(extractDir, "modules")
+	// Verify vendor directory exists
+	sourcetreeDir := filepath.Join(extractDir, defaultVendorDir)
 	assert.DirExists(t, sourcetreeDir)
 
 	// Verify at least one package was bundled
 	entries, err := os.ReadDir(sourcetreeDir)
 	require.NoError(t, err)
-	assert.Greater(t, len(entries), 0, "sourcetree should contain at least one package")
+	assert.Greater(t, len(entries), 0, "vendor dir should contain at least one package")
 }
 
 func TestBundler_BundlePreservesFilePermissions(t *testing.T) {
@@ -270,10 +275,10 @@ module "b" { source = "./modules/old-b" }
 	for id := range identityPlan.ByFinalID {
 		finalID = id
 	}
-	assert.Contains(t, names, "modules/"+finalID+"/main.tf")
-	assert.NotContains(t, names, "modules/old-a/main.tf")
-	assert.NotContains(t, names, "modules/old-b/main.tf")
-	assert.NotContains(t, names, "modules/"+finalID+"/README.md")
+	assert.Contains(t, names, defaultVendorDir+"/"+finalID+"/main.tf")
+	assert.NotContains(t, names, defaultVendorDir+"/old-a/main.tf")
+	assert.NotContains(t, names, defaultVendorDir+"/old-b/main.tf")
+	assert.NotContains(t, names, defaultVendorDir+"/"+finalID+"/README.md")
 }
 
 func TestBundler_BundleNestedModules(t *testing.T) {
@@ -319,7 +324,7 @@ module "remote" {
 	assert.FileExists(t, level1File)
 
 	// Verify remote module was bundled
-	sourcetreeDir := filepath.Join(extractDir, "modules")
+	sourcetreeDir := filepath.Join(extractDir, defaultVendorDir)
 	assert.DirExists(t, sourcetreeDir)
 }
 
@@ -947,15 +952,15 @@ module "remote_mod" {
 		assert.True(t, found, "local module %s must be present in archive", modName)
 	}
 
-	// Remote package must be present under modules/
+	// Remote package must be present under the vendor dir
 	foundRemote := false
 	for _, name := range names {
-		if strings.HasPrefix(name, "modules/") && strings.HasSuffix(name, ".tf") {
+		if strings.HasPrefix(name, defaultVendorDir+"/") && strings.HasSuffix(name, ".tf") {
 			foundRemote = true
 			break
 		}
 	}
-	assert.True(t, foundRemote, "remote package must be present under modules/ in archive")
+	assert.True(t, foundRemote, "remote package must be present under the vendor dir in archive")
 }
 
 // TestBundler_NestedRootWithRemoteModules_AllPackagesInZip reproduces the user-reported bug:
@@ -1057,7 +1062,7 @@ module "pkg_two" {
 	// Sources must be rewritten to relative paths pointing to the vendor dir.
 	// Since the .tf file is at live/network/infratest/ (3 levels below the package root),
 	// the relative path goes up 3 levels then into modules/.
-	assert.Contains(t, contentStr, "modules/",
+	assert.Contains(t, contentStr, defaultVendorDir+"/",
 		"remote module sources must be rewritten to point to vendor dir")
 	assert.NotContains(t, contentStr, "git::",
 		"remote module sources must not contain original git:: references")
@@ -1066,11 +1071,11 @@ module "pkg_two" {
 	names := zipFileNames(t, archivePath)
 	t.Logf("Archive contents: %v", names)
 
-	// Count how many unique package directories exist under modules/
+	// Count how many unique package directories exist under the vendor dir
 	packageDirs := make(map[string]bool)
 	for _, name := range names {
-		if after, ok := strings.CutPrefix(name, "modules/"); ok {
-			// Extract the package ID (first path component after modules/)
+		if after, ok := strings.CutPrefix(name, defaultVendorDir+"/"); ok {
+			// Extract the package ID (first path component after the vendor dir)
 			if part, _, found := strings.Cut(after, "/"); found && part != "" {
 				packageDirs[part] = true
 			}
@@ -1079,13 +1084,13 @@ module "pkg_two" {
 
 	// BOTH packages must be present
 	assert.GreaterOrEqual(t, len(packageDirs), 2,
-		"archive must contain both package directories under modules/, found: %v", packageDirs)
+		"archive must contain both package directories under the vendor dir, found: %v", packageDirs)
 
 	// Each package must have at least one .tf file
 	for pkgID := range packageDirs {
 		found := false
 		for _, name := range names {
-			if strings.HasPrefix(name, "modules/"+pkgID+"/") && strings.HasSuffix(name, ".tf") {
+			if strings.HasPrefix(name, defaultVendorDir+"/"+pkgID+"/") && strings.HasSuffix(name, ".tf") {
 				found = true
 				break
 			}
@@ -1138,6 +1143,7 @@ module "remote" {
 	writeTerraformFile(t, localDir, "main.tf", `# local module`)
 
 	resolver := NewResolver()
+	resolver.VendorDir = testLegacyVendorDir // force the legacy collision with the user's modules/ dir
 	tree, err := resolver.Resolve(context.Background(), rootDir)
 	require.NoError(t, err)
 	require.NotEmpty(t, tree.Packages, "must have remote packages for the conflict scenario")
@@ -1248,15 +1254,16 @@ output "out" { value = "%s-${var.input}" }
 `, name))
 	}
 
-	// Phase 1: Default vendor dir must error (conflict)
+	// Phase 1: A vendor dir colliding with the user's modules/ dir must error.
 	resolver := NewResolver()
+	resolver.VendorDir = testLegacyVendorDir // force the collision the safe default now avoids
 	tree, err := resolver.Resolve(context.Background(), rootDir)
 	require.NoError(t, err)
 	require.NotEmpty(t, tree.Packages)
 
 	bundler := NewBundler(BundleFormatTarGZ)
 	err = bundler.Bundle(tree, filepath.Join(t.TempDir(), "conflict.tar.gz"))
-	require.Error(t, err, "default vendor dir must detect conflict")
+	require.Error(t, err, "modules vendor dir must detect conflict")
 	assert.Contains(t, err.Error(), "conflicts with existing content")
 
 	// Phase 2: Re-resolve and bundle with custom vendor dir (fresh root to avoid resolver state)
@@ -1390,11 +1397,11 @@ module "remote" {
 	assert.FileExists(t, filepath.Join(extractDir, "local_modules", "app", "main.tf"),
 		"user local module missing")
 
-	// Remote packages must be present in vendor dir
-	assert.DirExists(t, filepath.Join(extractDir, "modules"),
-		"vendor dir (modules/) missing")
+	// Remote packages must be present in the vendor dir
+	assert.DirExists(t, filepath.Join(extractDir, defaultVendorDir),
+		"vendor dir missing")
 
-	entries, err := os.ReadDir(filepath.Join(extractDir, "modules"))
+	entries, err := os.ReadDir(filepath.Join(extractDir, defaultVendorDir))
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(entries), 1, "vendor dir must contain packages")
 
@@ -1404,7 +1411,7 @@ module "remote" {
 	mainStr := string(mainContent)
 	assert.Contains(t, mainStr, `source = "./local_modules/app"`,
 		"user module source must be preserved")
-	assert.Contains(t, mainStr, `source = "./modules/`,
+	assert.Contains(t, mainStr, `source = "./`+defaultVendorDir+`/`,
 		"remote module source must point to vendor dir")
 }
 
@@ -1577,7 +1584,7 @@ func TestBundler_SelfReferencingModuleDoesNotDropPackages(t *testing.T) {
 	names := zipFileNames(t, archivePath)
 	packageDirs := make(map[string]bool)
 	for _, name := range names {
-		if after, ok := strings.CutPrefix(name, "modules/"); ok {
+		if after, ok := strings.CutPrefix(name, defaultVendorDir+"/"); ok {
 			if part, _, found := strings.Cut(after, "/"); found && part != "" {
 				packageDirs[part] = true
 			}
@@ -1739,20 +1746,20 @@ module "nacl_private" {
 	names := zipFileNames(t, archivePath)
 	packageDirs := make(map[string]bool)
 	for _, name := range names {
-		if after, ok := strings.CutPrefix(name, "modules/"); ok {
+		if after, ok := strings.CutPrefix(name, defaultVendorDir+"/"); ok {
 			if part, _, found := strings.Cut(after, "/"); found && part != "" {
 				packageDirs[part] = true
 			}
 		}
 	}
 
-	// Every unique identity package must be present under modules/. The
+	// Every unique identity package must be present under the vendor dir. The
 	// archive may also legitimately contain sibling local modules colocated
 	// in the vendor dir (e.g. account_config, account_index), which the
 	// staged bundler now preserves instead of silently dropping.
 	for finalID := range identityPlan.ByFinalID {
 		assert.True(t, packageDirs[finalID],
-			"identity package %s must be present under modules/ in archive", finalID)
+			"identity package %s must be present under the vendor dir in archive", finalID)
 	}
 
 	// Verify metadata matches
@@ -1818,7 +1825,7 @@ func TestBundler_VendorDirSkippingInternalModulesDir(t *testing.T) {
 				LocalDir:    pkgDir,
 			},
 		},
-		VendorDir: "modules",
+		VendorDir: testLegacyVendorDir,
 	}
 
 	// Apply identity planning (no-op since LocalDir IS the final dir)
@@ -1839,7 +1846,7 @@ func TestBundler_VendorDirSkippingInternalModulesDir(t *testing.T) {
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
 	bundler := NewBundler(BundleFormatZIP)
 	bundler.StripPlan = stripPlan
-	bundler.VendorDir = "modules"
+	bundler.VendorDir = testLegacyVendorDir
 	require.NoError(t, bundler.Bundle(tree, archivePath))
 
 	// Verify all entries in the archive

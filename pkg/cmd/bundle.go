@@ -33,7 +33,7 @@ func init() {
 	bundleCmd.Flags().Bool("oci-compliant", false, "Generate OCI-compliant bundle (no sourcetree metadata, inlined modules)")
 	bundleCmd.Flags().String("metadata-out", "", "Write bundle metadata JSON to a separate path")
 	bundleCmd.Flags().String("strip", "module-dir", "Strip mode: none, module-dir (safe default), config-only, or tf-only (alias for config-only)")
-	bundleCmd.Flags().String("vendor-dir", "modules", "Vendored modules directory name")
+	bundleCmd.Flags().String("vendor-dir", "_vendor", "Vendored modules directory name (remote dependencies are rooted here in the bundle)")
 }
 
 //

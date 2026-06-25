@@ -41,27 +41,26 @@ module "vpc" {
 	extractDir := t.TempDir()
 	extractZipOCI(t, archivePath, extractDir)
 
-	// Verify modules/ directory exists (inlined packages)
-	sourcetreePath := filepath.Join(extractDir, "modules")
-	assert.DirExists(t, sourcetreePath, "OCI bundle should contain modules/ for inlined packages")
+	// Remote packages are vendored under the private default vendor dir (_vendor).
+	vendorPath := filepath.Join(extractDir, defaultVendorDir)
+	assert.DirExists(t, vendorPath, "OCI bundle should contain the vendor dir for inlined packages")
 
 	// Verify root module exists
 	mainFile := filepath.Join(extractDir, "main.tf")
 	assert.FileExists(t, mainFile)
 
-	// Verify main.tf has rewritten sources pointing to modules/ directory
+	// Verify main.tf has rewritten sources pointing to the vendor dir
 	mainContent, err := os.ReadFile(mainFile)
 	require.NoError(t, err)
-	assert.Contains(t, string(mainContent), "source = \"./modules/")
+	assert.Contains(t, string(mainContent), "source = \"./"+defaultVendorDir+"/")
 
-	// Verify modules/ directory exists and contains the remote module
-	modulesDir := filepath.Join(extractDir, "modules")
-	assert.DirExists(t, modulesDir)
+	// Verify vendor dir exists and contains the remote package
+	assert.DirExists(t, vendorPath)
 
-	// Verify at least one module was inlined
-	entries, err := os.ReadDir(modulesDir)
+	// Verify at least one package was inlined
+	entries, err := os.ReadDir(vendorPath)
 	require.NoError(t, err)
-	assert.Greater(t, len(entries), 0, "modules/ should contain at least one inlined package")
+	assert.Greater(t, len(entries), 0, "vendor dir should contain at least one inlined package")
 }
 
 func TestBundler_BundleOCICompliantWithLocalModules(t *testing.T) {
@@ -100,19 +99,18 @@ module "remote" {
 	extractDir := t.TempDir()
 	extractZipOCI(t, archivePath, extractDir)
 
-	// Verify modules/ directory exists (inlined packages)
-	sourcetreePath := filepath.Join(extractDir, "modules")
-	assert.DirExists(t, sourcetreePath, "OCI bundle should contain modules/ for inlined packages")
+	// Remote packages are vendored under the private default vendor dir (_vendor).
+	vendorPath := filepath.Join(extractDir, defaultVendorDir)
+	assert.DirExists(t, vendorPath, "vendor dir should contain the inlined remote package")
 
-	// Verify local module is preserved in its relative location
+	// Local modules are preserved at their original relative location (modules/local).
 	localModulePath := filepath.Join(extractDir, "modules", "local", "main.tf")
 	assert.FileExists(t, localModulePath)
 
-	// Verify remote module is inlined in modules/ directory
-	modulesDir := filepath.Join(extractDir, "modules")
-	entries, err := os.ReadDir(modulesDir)
+	// Verify the remote package is inlined under the vendor dir.
+	entries, err := os.ReadDir(vendorPath)
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, len(entries), 2, "should have local and remote modules")
+	assert.GreaterOrEqual(t, len(entries), 1, "vendor dir should contain the remote package")
 }
 
 func TestBundler_BundleOCICompliantOnlyZIP(t *testing.T) {

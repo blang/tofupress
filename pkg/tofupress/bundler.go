@@ -32,8 +32,11 @@ const (
 	dirNameSourceTree = "sourcetree" // legacy vendor dir name (pre-rename)
 )
 
-// defaultVendorDir is the fallback vendor directory name.
-const defaultVendorDir = "modules"
+// defaultVendorDir is the fallback vendor directory name. It is a private name that
+// cannot collide with the conventional Terraform "modules/" directory where users
+// keep their own local modules. Running tofupress with the default must never fail due
+// to a vendor-dir collision with user content (review finding F1).
+const defaultVendorDir = "_vendor"
 
 // vendorDirName returns the vendored modules directory name for a tree.
 func vendorDirName(tree *ResolvedTree) string {
@@ -91,32 +94,49 @@ func NewBundler(format BundleFormat) *Bundler {
 	return &Bundler{Format: format}
 }
 
-// Bundle creates an archive containing all modules in the resolved tree.
+// Bundle creates a single self-contained archive containing the root module together
+// with every reachable local and remote module. Remote packages are vendored under
+// <vendorDir>/<pkgID>/ and the resolver has already rewritten the referencing module
+// sources to point there; local module references (./sibling, ../ext) are preserved
+// verbatim because whole packages are copied intact.
+//
+// OCI-compliant and non-OCI bundles now share ONE staging pipeline (review F4/F5/F12).
+// They differ only in archive format: OCI requires zip. Every format is produced from
+// the same staged directory, so the same tree always yields a consistent layout.
 func (b *Bundler) Bundle(tree *ResolvedTree, outputPath string) error {
 	if tree == nil {
 		return fmt.Errorf("tree is nil")
 	}
 
-	// Use the tree's vendor dir, falling back to default
+	// Resolve the format eagerly so BundleFormatAuto never reaches the writers (F11).
+	format := b.Format
+	if format == BundleFormatAuto {
+		detected, ok := DetectFormatFromPath(outputPath)
+		if !ok {
+			return fmt.Errorf("could not infer bundle format from output path %q; "+
+				"pass --format=zip, --format=tar.gz, or --format=tar.xz", outputPath)
+		}
+		format = detected
+	}
+	if b.OCICompliant && format != BundleFormatZIP {
+		return fmt.Errorf("--oci-compliant requires zip format (got %s)", format)
+	}
+
+	// Use the tree's vendor dir, falling back to the private default.
 	b.VendorDir = vendorDirName(tree)
 
-	// Aggregate pressed modules before creating the bundle
+	// Aggregate pressed modules before creating the bundle.
 	if err := b.aggregatePressedModules(tree); err != nil {
 		return fmt.Errorf("failed to aggregate pressed modules: %w", err)
 	}
 
-	// Use OCI-compliant mode if enabled and format is ZIP
-	if b.OCICompliant && b.Format == BundleFormatZIP {
-		b.VendorDir = "" // OCI inlines everything; no vendor dir to skip during zip creation
-		return b.bundleOCICompliant(tree, outputPath)
-	}
-
-	// Non-OCI mode: validate vendor directory doesn't conflict with user content
+	// Guard against a vendor directory that already contains user content; bundling
+	// would otherwise silently drop that content (or mix it with vendored packages).
 	if err := b.validateVendorDir(tree); err != nil {
 		return err
 	}
 
-	switch b.Format {
+	switch format {
 	case BundleFormatZIP:
 		return b.bundleZIP(tree, outputPath)
 	case BundleFormatTarGZ:
@@ -124,7 +144,7 @@ func (b *Bundler) Bundle(tree *ResolvedTree, outputPath string) error {
 	case BundleFormatTarXZ:
 		return b.bundleTarXZ(tree, outputPath)
 	default:
-		return fmt.Errorf("unsupported format: %s", b.Format)
+		return fmt.Errorf("unsupported format: %s", format)
 	}
 }
 
@@ -184,77 +204,6 @@ func (b *Bundler) bundleZIP(tree *ResolvedTree, outputPath string) (err error) {
 		}
 	}()
 
-	return b.bundleZipFromDir(stagingDir, outputPath)
-}
-
-// bundleOCICompliant creates an OCI-compliant ZIP bundle by inlining all packages
-// directly into the module tree without sourcetree metadata.
-//
-//nolint:gocyclo,gocognit // OCI bundling requires complex directory structure manipulation
-func (b *Bundler) bundleOCICompliant(tree *ResolvedTree, outputPath string) error {
-	// Create a temporary staging directory
-	stagingDir, err := os.MkdirTemp("", "tofupress-oci-*")
-	if err != nil {
-		return fmt.Errorf("failed to create staging directory: %w", err)
-	}
-	defer os.RemoveAll(stagingDir) //nolint:errcheck // best-effort cleanup
-
-	// Copy root module files to staging root
-	if copyErr := copyDirOCI(tree.Root.InstallDir, stagingDir, b.StripPlan); copyErr != nil {
-		return fmt.Errorf("failed to copy root module: %w", copyErr)
-	}
-
-	// Copy local modules to their relative positions
-	for _, module := range tree.AllModules {
-		if module == tree.Root || !module.IsLocal {
-			continue
-		}
-
-		// Calculate relative path from root to this module
-		relPath, relErr := filepath.Rel(tree.Root.InstallDir, module.InstallDir)
-		if relErr != nil {
-			continue
-		}
-
-		// If module is within root directory, it's already copied
-		if !strings.HasPrefix(relPath, "..") {
-			continue
-		}
-
-		// Module is outside root, copy it to staging
-		// Use the relative path structure, converting ../ to modules/
-		targetPath := filepath.Join(stagingDir, "modules", filepath.Base(module.InstallDir))
-		if copyErr := copyDirOCI(module.InstallDir, targetPath, b.StripPlan); copyErr != nil {
-			return fmt.Errorf("failed to copy local module %s: %w", module.Key, copyErr)
-		}
-	}
-
-	// Copy remote packages to modules/<uniqueid>
-	modulesDir := filepath.Join(stagingDir, "modules")
-	if mkErr := os.MkdirAll(modulesDir, 0o755); mkErr != nil { //nolint:gosec // G301: standard permissions
-		return fmt.Errorf("failed to create modules directory: %w", mkErr)
-	}
-
-	for _, pkg := range tree.Packages {
-		uniqueID := filepath.Base(pkg.LocalDir)
-		targetPath := filepath.Join(modulesDir, uniqueID)
-		if copyErr := copyDirOCI(pkg.LocalDir, targetPath, b.StripPlan); copyErr != nil {
-			return fmt.Errorf("failed to inline package %s: %w", pkg.PackageAddr, copyErr)
-		}
-	}
-
-	// Rewrite all module sources to point to the new structure
-	if rewriteErr := rewriteOCISources(tree, stagingDir); rewriteErr != nil {
-		return fmt.Errorf("failed to rewrite sources: %w", rewriteErr)
-	}
-
-	if b.Metadata != nil {
-		if err := WriteMetadataFile(filepath.Join(stagingDir, MetadataFileName), b.Metadata); err != nil {
-			return fmt.Errorf("failed to stage metadata: %w", err)
-		}
-	}
-
-	// Create ZIP archive from staging directory
 	return b.bundleZipFromDir(stagingDir, outputPath)
 }
 
@@ -671,79 +620,6 @@ func stagePackages(tree *ResolvedTree, packagesDir string, stripPlan *StripPlan)
 			return fmt.Errorf("failed to copy package %s: %w", pkg.PackageAddr, err)
 		}
 	}
-	return nil
-}
-
-// rewriteOCISources rewrites all module sources to point to the OCI-compliant structure.
-//
-//nolint:gocognit,unparam // source rewriting requires complex conditional logic; always returns nil by design (best-effort)
-func rewriteOCISources(tree *ResolvedTree, stagingDir string) error {
-	// Walk through all modules and rewrite their sources
-	for _, module := range tree.AllModules {
-		if module == tree.Root {
-			continue
-		}
-
-		// Find the parent module's directory in staging
-		var parentDir string
-		switch {
-		case module.Parent == tree.Root:
-			parentDir = stagingDir
-		case module.Parent.IsLocal:
-			// Local parent: use relative path from root
-			relPath, relErr := filepath.Rel(tree.Root.InstallDir, module.Parent.InstallDir)
-			if relErr != nil {
-				continue
-			}
-			if strings.HasPrefix(relPath, "..") {
-				parentDir = filepath.Join(stagingDir, "modules", filepath.Base(module.Parent.InstallDir))
-			} else {
-				parentDir = filepath.Join(stagingDir, relPath)
-			}
-		default:
-			// Remote parent: in modules/<uniqueid>
-			parentDir = filepath.Join(stagingDir, "modules", filepath.Base(module.Parent.InstallDir))
-		}
-
-		// Find the module's target directory in staging
-		var targetDir string
-		if module.IsLocal {
-			relPath, relErr := filepath.Rel(tree.Root.InstallDir, module.InstallDir)
-			if relErr != nil {
-				continue
-			}
-			if strings.HasPrefix(relPath, "..") {
-				targetDir = filepath.Join(stagingDir, "modules", filepath.Base(module.InstallDir))
-			} else {
-				targetDir = filepath.Join(stagingDir, relPath)
-			}
-		} else {
-			// Remote module: in modules/<uniqueid>
-			targetDir = filepath.Join(stagingDir, "modules", filepath.Base(module.InstallDir))
-		}
-
-		// Calculate relative path from parent to target
-		relPath, relErr := filepath.Rel(parentDir, targetDir)
-		if relErr != nil {
-			continue
-		}
-
-		newSource := "./" + relPath
-
-		// Find and rewrite the source in the parent's .tf files
-		tfFiles, findErr := FindTerraformFiles(parentDir)
-		if findErr != nil {
-			continue
-		}
-
-		for _, tfFile := range tfFiles {
-			if rewriteErr := RewriteModuleSource(tfFile, module.Name, newSource); rewriteErr != nil {
-				// Not all modules may be in all files, so ignore errors
-				continue
-			}
-		}
-	}
-
 	return nil
 }
 

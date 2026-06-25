@@ -1,12 +1,69 @@
 package tofupress
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestVerifyBlobDigest(t *testing.T) {
+	payload := []byte("hello oci module package")
+	sum := sha256.Sum256(payload)
+	computedHex := hex.EncodeToString(sum[:])
+	validDigest := "sha256:" + computedHex // OCI digest form is lowercase "sha256:"
+
+	tests := []struct {
+		name     string
+		computed string
+		expected string
+		wantErr  bool
+		errCont  string
+	}{
+		{
+			name:     "matching digest accepted",
+			computed: computedHex,
+			expected: validDigest,
+		},
+		{
+			name:     "mismatch rejected (tampered blob)",
+			computed: strings.Repeat("0", 64),
+			expected: validDigest,
+			wantErr:  true,
+			errCont:  "blob digest mismatch",
+		},
+		{
+			name:     "non-sha digest algorithm rejected",
+			computed: computedHex,
+			expected: "sha512:" + computedHex,
+			wantErr:  true,
+			errCont:  "unsupported digest algorithm",
+		},
+		{
+			name:     "empty expected digest accepted (synthetic)",
+			computed: computedHex,
+			expected: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := verifyBlobDigest(tt.computed, tt.expected)
+			if tt.wantErr {
+				require.Error(t, err)
+				if tt.errCont != "" {
+					assert.Contains(t, err.Error(), tt.errCont)
+				}
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
 
 func TestParseOCIRef(t *testing.T) {
 	tests := []struct {
@@ -113,9 +170,22 @@ func TestFindZipLayer(t *testing.T) {
 			wantType: "archive/zip",
 		},
 		{
-			name:     "single layer unknown type (falls through to single-layer assumption)",
-			layers:   []ociDescriptor{makeDesc("application/octet-stream")},
-			wantType: "application/octet-stream",
+			name:    "single layer unknown type (strict: rejected, no blind fallback)",
+			layers:  []ociDescriptor{makeDesc("application/octet-stream")},
+			wantErr: true,
+			errCont: "no archive/zip layer",
+		},
+		{
+			name:    "opentofu.modulepkg artifact type is NOT a valid layer media type",
+			layers:  []ociDescriptor{makeDesc("application/vnd.opentofu.modulepkg")},
+			wantErr: true,
+			errCont: "no archive/zip layer",
+		},
+		{
+			name:    "multiple zip layers are ambiguous",
+			layers:  []ociDescriptor{makeDesc("application/zip"), makeDesc("archive/zip")},
+			wantErr: true,
+			errCont: "multiple zip layers",
 		},
 		{
 			name:     "multiple layers with zip",
@@ -137,7 +207,7 @@ func TestFindZipLayer(t *testing.T) {
 			name:    "multiple layers no zip",
 			layers:  []ociDescriptor{makeDesc("text/plain"), makeDesc("image/png")},
 			wantErr: true,
-			errCont: "no zip layer",
+			errCont: "no archive/zip layer",
 		},
 	}
 

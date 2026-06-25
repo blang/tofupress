@@ -2,12 +2,15 @@ package tofupress
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/url"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/hashicorp/go-getter"
@@ -18,9 +21,20 @@ import (
 	"oras.land/oras-go/v2/registry/remote/credentials"
 )
 
+// modulepkgArtifactType is the artifactType an OCI image manifest MUST carry to be a
+// recognized OpenTofu module package (per the OpenTofu OCI module-package spec).
+const modulepkgArtifactType = "application/vnd.opentofu.modulepkg"
+
+// zipLayerMediaTypes are the only media types accepted as the module-package archive
+// layer. `application/vnd.opentofu.modulepkg` is an *artifact* type, not a layer type,
+// and is intentionally NOT accepted here (review finding F7).
+var zipLayerMediaTypes = []string{"application/zip", "archive/zip"}
+
 // OCIGetter implements go-getter's Getter interface for OCI registries.
 // It supports the oci:// URL scheme for fetching OpenTofu module packages.
-type OCIGetter struct{}
+type OCIGetter struct {
+	client *getter.Client // set by SetClient; carries the caller's context (F8)
+}
 
 // Lazy-initialized Docker credentials store (handles auths, credsStore, and credHelpers).
 var (
@@ -36,9 +50,14 @@ func getCredentialsStore() (*credentials.DynamicStore, error) {
 	return credStore, errCredStore
 }
 
-// Get downloads the OCI artifact and decompresses it into dst.
+// Get downloads the OCI module package and decompresses it into dst.
 func (g *OCIGetter) Get(dst string, u *url.URL) error {
+	// Propagate the caller's context so cancellation/timeouts interrupt the fetch (F8);
+	// fall back to Background when go-getter did not wire a client (synthetic callers).
 	ctx := context.Background()
+	if g.client != nil && g.client.Ctx != nil {
+		ctx = g.client.Ctx
+	}
 
 	// Build the OCI reference from the URL
 	ref, err := parseOCIRef(u)
@@ -74,13 +93,22 @@ func (g *OCIGetter) Get(dst string, u *url.URL) error {
 		return fmt.Errorf("oci: failed to decode manifest: %w", decodeErr)
 	}
 
-	// Find a zip layer in the manifest layers
+	// Enforce the OpenTofu module-package artifactType (F7). A non-module artifact (e.g.
+	// a container image) must be rejected up front so we never feed a non-zip blob to the
+	// zip decompressor. Empty ArtifactType is tolerated for compatibility with registries
+	// that set the type only on the layer; the single-zip-layer rule still applies.
+	if manifest.ArtifactType != "" && manifest.ArtifactType != modulepkgArtifactType {
+		return fmt.Errorf("oci: artifact %s is not an OpenTofu module package (artifactType=%q, want %q)",
+			ref, manifest.ArtifactType, modulepkgArtifactType)
+	}
+
+	// Find the single zip layer in the manifest layers (F7: strict — no blind fallback)
 	layerDesc, err := findZipLayer(manifest.Layers)
 	if err != nil {
 		return fmt.Errorf("oci: %w", err)
 	}
 
-	// Fetch and decompress the zip blob
+	// Fetch, verify the digest, and decompress the zip blob
 	return g.fetchAndDecompress(ctx, repo, &layerDesc, dst)
 }
 
@@ -94,34 +122,36 @@ func (g *OCIGetter) ClientMode(u *url.URL) (getter.ClientMode, error) {
 	return getter.ClientModeDir, nil
 }
 
-// SetClient is a no-op — the OCI getter doesn't need access to the go-getter client.
-func (g *OCIGetter) SetClient(c *getter.Client) {}
+// SetClient stores the go-getter client so Get can propagate the caller's context (F8).
+func (g *OCIGetter) SetClient(c *getter.Client) { g.client = c }
 
-// findZipLayer finds a layer with zip media type in the manifest layers.
+// isZipMediaType reports whether a media type denotes an archive/zip layer.
+func isZipMediaType(mt string) bool { return slices.Contains(zipLayerMediaTypes, mt) }
+
+// findZipLayer locates the single module-package archive layer (F7). It requires exactly
+// one layer with an archive/zip media type; the legacy "single layer → assume zip"
+// blind fallback and the `application/vnd.opentofu.modulepkg` layer type are removed so
+// a non-zip (or ambiguous) manifest is rejected instead of silently decompressed.
 func findZipLayer(layers []ocispec.Descriptor) (ocispec.Descriptor, error) {
-	// Media types for zip archives in OCI artifacts
-	zipMediaTypes := []string{
-		"application/zip",
-		"archive/zip",
-		"application/vnd.opentofu.modulepkg",
-	}
-
-	for _, layer := range layers {
-		if slices.Contains(zipMediaTypes, layer.MediaType) {
-			return layer, nil
-		}
-	}
-
-	if len(layers) == 1 {
-		// Single layer — assume it's the zip archive regardless of media type
-		return layers[0], nil
-	}
-
 	if len(layers) == 0 {
 		return ocispec.Descriptor{}, fmt.Errorf("no layers found in manifest")
 	}
-
-	return ocispec.Descriptor{}, fmt.Errorf("no zip layer found in manifest (available: %v)", layerMediaTypes(layers))
+	var found ocispec.Descriptor
+	seen := false
+	for i := range layers {
+		if !isZipMediaType(layers[i].MediaType) {
+			continue
+		}
+		if seen {
+			return ocispec.Descriptor{}, fmt.Errorf("multiple zip layers in manifest — ambiguous; expected exactly one (available: %v)", layerMediaTypes(layers))
+		}
+		found = layers[i]
+		seen = true
+	}
+	if !seen {
+		return ocispec.Descriptor{}, fmt.Errorf("no archive/zip layer found in manifest (available: %v)", layerMediaTypes(layers))
+	}
+	return found, nil
 }
 
 func layerMediaTypes(layers []ocispec.Descriptor) []string {
@@ -132,7 +162,7 @@ func layerMediaTypes(layers []ocispec.Descriptor) []string {
 	return types
 }
 
-// fetchAndDecompress downloads a blob and decompresses it as a zip archive.
+// fetchAndDecompress downloads a blob, verifies its digest, and decompresses it as a zip archive.
 func (g *OCIGetter) fetchAndDecompress(ctx context.Context, repo *remote.Repository, desc *ocispec.Descriptor, dst string) error {
 	// Fetch the blob content
 	rc, err := repo.Fetch(ctx, *desc)
@@ -141,19 +171,26 @@ func (g *OCIGetter) fetchAndDecompress(ctx context.Context, repo *remote.Reposit
 	}
 	defer rc.Close() //nolint:errcheck // best-effort close
 
-	// Write the blob to a temp zip file
+	// Write the blob to a temp zip file while hashing it (F8: digest verification)
 	tmpZip, err := os.CreateTemp("", "tofupress-oci-*.zip")
 	if err != nil {
 		return fmt.Errorf("oci: failed to create temp file: %w", err)
 	}
 	defer os.Remove(tmpZip.Name()) //nolint:errcheck // best-effort cleanup
 
-	if _, err := io.Copy(tmpZip, rc); err != nil {
+	h := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(tmpZip, h), rc); err != nil {
 		_ = tmpZip.Close()
 		return fmt.Errorf("oci: failed to download blob: %w", err)
 	}
 	if err := tmpZip.Close(); err != nil {
 		return fmt.Errorf("oci: failed to finalize download: %w", err)
+	}
+
+	// Verify the downloaded bytes against the layer descriptor digest (F8). A registry
+	// or MITM serving a tampered blob that still matches the manifest must be rejected.
+	if err := verifyBlobDigest(hex.EncodeToString(h.Sum(nil)), desc.Digest.String()); err != nil {
+		return fmt.Errorf("oci: %w", err)
 	}
 
 	// Decompress the zip into dst
@@ -162,6 +199,22 @@ func (g *OCIGetter) fetchAndDecompress(ctx context.Context, repo *remote.Reposit
 		return fmt.Errorf("oci: failed to decompress artifact: %w", err)
 	}
 
+	return nil
+}
+
+// verifyBlobDigest checks that the computed sha256 hex matches the expected digest of
+// the form "sha256:<hex>". An empty expected digest (pre-synthetic tests) is accepted.
+func verifyBlobDigest(computedHex, expectedDigest string) error {
+	const algo = "sha256:"
+	if expectedDigest == "" {
+		return nil
+	}
+	if !strings.HasPrefix(expectedDigest, algo) {
+		return fmt.Errorf("unsupported digest algorithm %q (only sha256 is supported)", expectedDigest)
+	}
+	if want := strings.TrimPrefix(expectedDigest, algo); want != computedHex {
+		return fmt.Errorf("blob digest mismatch: downloaded sha256:%s, manifest expects %s", computedHex, expectedDigest)
+	}
 	return nil
 }
 

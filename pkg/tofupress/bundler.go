@@ -635,6 +635,14 @@ func (b *Bundler) aggregatePressedModules(tree *ResolvedTree) error {
 	vDir := vendorDirName(tree)
 	rootSourcetree := filepath.Join(tree.Root.InstallDir, vDir)
 
+	// The strip plan was computed before aggregation (bundle.go plans stripping, then later
+	// calls Bundle). Aggregated packages land under the root vendor dir, which the root
+	// PackageStripPlan covers; in module-dir mode that plan keeps only the root's reached
+	// config files, so stagePackages would silently drop the aggregated package. Register a
+	// dedicated IncludeAll plan for each aggregated package so stagePackages copies it whole
+	// (longest-match in PackageForPath makes the package plan win over the root plan).
+	aggregatedPlans := make(map[string]*PackageStripPlan)
+
 	for _, module := range tree.AllModules {
 		// Skip remote modules and the root module itself
 		if !module.IsLocal || module == tree.Root {
@@ -678,6 +686,7 @@ func (b *Bundler) aggregatePressedModules(tree *ResolvedTree) error {
 					PackageAddr: packageID,
 					LocalDir:    targetPkgPath,
 				}
+				aggregatedPlans[filepath.Clean(targetPkgPath)] = newPackageStripPlan(targetPkgPath) // IncludeAll below
 			}
 
 			// Rewrite source in the pressed module
@@ -724,6 +733,16 @@ func (b *Bundler) aggregatePressedModules(tree *ResolvedTree) error {
 		// Remove the nested sourcetree from the pressed module
 		if err := os.RemoveAll(moduleSourcetree); err != nil {
 			return fmt.Errorf("failed to remove nested sourcetree: %w", err)
+		}
+	}
+
+	// Fold the aggregated packages into the active strip plan so stagePackages keeps them
+	// whole. A nil strip plan (library callers that skip planning) is fine — stagePackages
+	// then copies everything unfiltered.
+	if b.StripPlan != nil {
+		for _, pkgPlan := range aggregatedPlans {
+			pkgPlan.IncludeAll = true
+			b.StripPlan.Packages[pkgPlan.PackageRoot] = pkgPlan
 		}
 	}
 

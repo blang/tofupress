@@ -147,9 +147,10 @@ func outputText(stdout io.Writer, tree *tofupress.ResolvedTree) error {
 	// Print tree structure
 	printModuleTree(stdout, tree.Root, 0)
 
-	fmt.Fprintln(stdout)                                             //nolint:errcheck // stdout writes are best-effort
-	fmt.Fprintf(stdout, "Total modules: %d\n", len(tree.AllModules)) //nolint:errcheck // stdout writes are best-effort
-	fmt.Fprintf(stdout, "Total packages: %d\n", len(tree.Packages))  //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintln(stdout)                                                   //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Total modules: %d\n", len(tree.AllModules))       //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Total packages: %d\n", len(tree.Packages))        //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Vendor dir: %s\n", tofupress.VendorDirName(tree)) //nolint:errcheck // stdout writes are best-effort
 
 	return nil
 }

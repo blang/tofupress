@@ -1,6 +1,7 @@
 package tofupress
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -9,6 +10,11 @@ import (
 	"github.com/hashicorp/hcl/v2/hclwrite"
 	"github.com/zclconf/go-cty/cty"
 )
+
+// ErrModuleBlockNotFound is returned by RewriteModuleSource when the named module block
+// is not present in the target file. Callers use it to distinguish "block lives in a
+// different .tf file" from genuine read/parse/write failures (review finding F8).
+var ErrModuleBlockNotFound = errors.New("module block not found in file")
 
 // RewriteModuleSource rewrites the source attribute of a specific module block
 // in a .tf file to point to a new local path. It preserves formatting and comments.
@@ -35,7 +41,7 @@ func RewriteModuleSource(filePath, moduleName, newSource string) error {
 	}
 
 	if targetBlock == nil {
-		return fmt.Errorf("module %q not found in %s", moduleName, filePath)
+		return fmt.Errorf("module %q not found in %s: %w", moduleName, filePath, ErrModuleBlockNotFound)
 	}
 
 	targetBlock.Body().SetAttributeValue("source", cty.StringVal(newSource))

@@ -3,6 +3,7 @@ package tofupress
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -405,18 +406,27 @@ func rewriteRelocatedRemoteSource(module, root *ModuleNode, relocatedRoots map[s
 		return fmt.Errorf("failed to compute final source for module %s: %w", module.Key, err)
 	}
 	newSource := moduleSourcePath(relPath, module.Source.SubDir)
-	// Parent directory may not exist or have no .tf files (e.g. a synthetic test tree);
-	// in that case there is nothing to rewrite. Ignore the error deliberately.
+	// Parent directory may have no .tf files (e.g. a synthetic test tree that only
+	// references the module via tree nodes); in that case there is nothing to rewrite.
 	tfFiles, _ := FindTerraformFiles(module.Parent.InstallDir) //nolint:errcheck // best-effort lookup
 	if len(tfFiles) == 0 {
 		return nil
 	}
-	// The module block lives in exactly one .tf file; RewriteModuleSource returns a
-	// "not found" error for the others. In the real resolution flow the resolver always
-	// emits the block, so one file rewrites; we keep this best-effort to avoid failing on
-	// synthetic trees that deliberately cannot be expressed in HCL.
+	// The module block lives in exactly one .tf file. RewriteModuleSource returns
+	// ErrModuleBlockNotFound for the files that don't declare it (expected), and a
+	// real error for read/parse/write failures. We must surface those real failures
+	// — review finding F8: swallowing read/parse/write errors would silently ship
+	// bundles with stale source references and only fail later at `tofu validate`.
+	// "block not found in any file" is tolerated (best-effort placement) so that
+	// synthetic tree tests that reference modules only via nodes keep working; in
+	// the real CLI flow the resolver always emits the referencing block.
 	for _, tfFile := range tfFiles {
-		_ = RewriteModuleSource(tfFile, module.Name, newSource) //nolint:errcheck // best-effort per-file
+		if err := RewriteModuleSource(tfFile, module.Name, newSource); err != nil {
+			if errors.Is(err, ErrModuleBlockNotFound) {
+				continue
+			}
+			return fmt.Errorf("rewrite source for module %s in %s: %w", module.Name, tfFile, err)
+		}
 	}
 	return nil
 }

@@ -164,3 +164,44 @@ module "b" { source = "./modules/old-b" }
 	assert.NotContains(t, string(mainContent), "old-a")
 	assert.NotContains(t, string(mainContent), "old-b")
 }
+
+// TestApplySourcetreeIdentityPlan_RewriterHardErrorNotSwallowed locks in the F8 fix:
+// rewriteModuleSourcesToFinalIDs previously discarded every RewriteModuleSource error
+// with `_ = ...`, so a read/parse/write failure would silently ship a bundle whose
+// source references still pointed at the pre-rename directories. The caller must now
+// surface genuine failures. Two identical packages force a dedup-into-one relocation
+// so the rewriter is guaranteed to touch the malformed root main.tf.
+func TestApplySourcetreeIdentityPlan_RewriterHardErrorNotSwallowed(t *testing.T) {
+	root := t.TempDir()
+	// Malformed HCL (missing closing brace): RewriteModuleSource cannot parse it.
+	writeTestFile(t, filepath.Join(root, "main.tf"), `module "a" { source = "./modules/old-a"`)
+	pkgA := filepath.Join(root, "modules", "old-a")
+	pkgB := filepath.Join(root, "modules", "old-b")
+	require.NoError(t, os.MkdirAll(pkgA, 0o755))
+	require.NoError(t, os.MkdirAll(pkgB, 0o755))
+	writeTerraformFile(t, pkgA, "main.tf", `output "id" { value = "same" }`)
+	writeTerraformFile(t, pkgB, "main.tf", `output "id" { value = "same" }`)
+
+	modA := &ModuleNode{Key: "root.a", Name: "a", PackageRoot: pkgA, InstallDir: pkgA, Source: ModuleSource{PackageAddr: "git::file:///repo-a"}, IsRemote: true}
+	modB := &ModuleNode{Key: "root.b", Name: "b", PackageRoot: pkgB, InstallDir: pkgB, Source: ModuleSource{PackageAddr: "git::file:///repo-b"}, IsRemote: true}
+	tree := &ResolvedTree{
+		Root:       &ModuleNode{Key: "root", Name: "root", InstallDir: root, PackageRoot: root, Children: []*ModuleNode{modA, modB}},
+		Packages:   map[string]*DownloadedPackage{"old-a": {PackageAddr: "git::file:///repo-a", LocalDir: pkgA}, "old-b": {PackageAddr: "git::file:///repo-b", LocalDir: pkgB}},
+		AllModules: []*ModuleNode{modA, modB},
+		VendorDir:  "modules",
+	}
+	modA.Parent = tree.Root
+	modB.Parent = tree.Root
+
+	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+	plan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	require.NoError(t, err)
+	require.Len(t, plan.ByFinalID, 1, "two identical packages must dedup into one final identity")
+
+	// The relocation forces a rewrite of the malformed root main.tf. Before the F8 fix
+	// this error was silently discarded; now it must propagate.
+	err = ApplySourcetreeIdentityPlan(tree, plan)
+	require.Error(t, err, "rewriter parse error must not be swallowed")
+	assert.Contains(t, err.Error(), "rewrite source for module a")
+}

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // SourcetreeIDPrefix is the standard prefix for content-addressed sourcetree package IDs.
@@ -297,24 +298,26 @@ func materializeCanonicalPackages(plan *SourcetreeIdentityPlan) error {
 // updateTreePackagePointers updates module PackageRoot and InstallDir fields to point to
 // the final sourcetree directories, and rebuilds tree.Packages with final identities.
 func updateTreePackagePointers(tree *ResolvedTree, plan *SourcetreeIdentityPlan) {
-	oldRootToIdentity := make(map[string]*PackageIdentity)
-	for _, identity := range plan.Packages {
-		oldRootToIdentity[filepath.Clean(identity.OldLocalDir)] = identity
-	}
 	for _, module := range tree.AllModules {
 		if module == nil {
 			continue
 		}
-		identity := oldRootToIdentity[filepath.Clean(module.PackageRoot)]
+		// Find the package identity whose old local dir contains this module's install dir.
+		// Matching on InstallDir (longest old root wins) — not an exact PackageRoot match —
+		// is required so sub-module references like "./modules/consul-cluster", whose
+		// PackageRoot == InstallDir != the package root, are remapped together with the
+		// package rename. Otherwise their InstallDir keeps pointing at the old (deleted)
+		// package directory and the post-rename strip plan crashes reading a missing dir.
+		identity := matchingIdentityForInstallDir(plan.Packages, module.InstallDir)
 		if identity == nil {
 			continue
 		}
-		rel, err := filepath.Rel(identity.OldLocalDir, module.InstallDir)
-		if err != nil || rel == "." {
-			rel = ""
+		if mapped, ok := remapUnder(identity.OldLocalDir, identity.FinalLocalDir, module.InstallDir); ok {
+			module.InstallDir = mapped
 		}
-		module.PackageRoot = identity.FinalLocalDir
-		module.InstallDir = filepath.Join(identity.FinalLocalDir, rel)
+		if mapped, ok := remapUnder(identity.OldLocalDir, identity.FinalLocalDir, module.PackageRoot); ok {
+			module.PackageRoot = mapped
+		}
 	}
 
 	finalPackages := make(map[string]*DownloadedPackage, len(plan.ByFinalID))
@@ -335,6 +338,47 @@ func updateTreePackagePointers(tree *ResolvedTree, plan *SourcetreeIdentityPlan)
 }
 
 // treePackageContentHash looks up the original download hash for an identity.
+// matchingIdentityForInstallDir returns the PackageIdentity whose OldLocalDir contains the
+// given install dir, preferring the longest (most specific) match.
+func matchingIdentityForInstallDir(identities map[string]*PackageIdentity, installDir string) *PackageIdentity {
+	inst := filepath.Clean(installDir)
+	var best *PackageIdentity
+	bestLen := -1
+	for _, identity := range identities {
+		oldRoot := filepath.Clean(identity.OldLocalDir)
+		if oldRoot == "" {
+			continue
+		}
+		if inst != oldRoot && !strings.HasPrefix(inst, oldRoot+string(filepath.Separator)) {
+			continue
+		}
+		if len(oldRoot) > bestLen {
+			best = identity
+			bestLen = len(oldRoot)
+		}
+	}
+	return best
+}
+
+// remapUnder translates a path that lives under oldDir to the same relative position
+// under finalDir. Returns the new path and true when the path is under oldDir; returns
+// the original path and false otherwise (so callers can leave unrelated fields alone).
+func remapUnder(oldDir, finalDir, path string) (string, bool) {
+	p := filepath.Clean(path)
+	old := filepath.Clean(oldDir)
+	if p == old {
+		return finalDir, true
+	}
+	if !strings.HasPrefix(p, old+string(filepath.Separator)) {
+		return path, false
+	}
+	rel, err := filepath.Rel(old, p)
+	if err != nil {
+		return path, false
+	}
+	return filepath.Join(finalDir, rel), true
+}
+
 func treePackageContentHash(tree *ResolvedTree, identity *PackageIdentity) string {
 	if tree == nil || identity == nil {
 		return ""

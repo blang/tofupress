@@ -205,3 +205,73 @@ func TestApplySourcetreeIdentityPlan_RewriterHardErrorNotSwallowed(t *testing.T)
 	require.Error(t, err, "rewriter parse error must not be swallowed")
 	assert.Contains(t, err.Error(), "rewrite source for module a")
 }
+
+// TestApplySourcetreeIdentityPlan_RemapSubDirectoryModuleInstallDir reproduces the
+// registry-bundle crash (popular terraform-aws-consul module, P0 on the safe default
+// strip mode): a sub-module referenced inside a downloaded package via
+// "./modules/child" has PackageRoot == InstallDir == <pkg>/modules/child, which is NOT
+// equal to the package's OldLocalDir. The old remapper only matched on an exact
+// PackageRoot, so the sub-module's InstallDir was left pointing at the package's
+// pre-rename directory — which ApplySourcetreeIdentityPlan then deletes — so the
+// second ("final") strip plan crashed reading a missing directory.
+func TestApplySourcetreeIdentityPlan_RemapSubDirectoryModuleInstallDir(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "main.tf"), `
+module "a" { source = "./modules/old-a" }
+module "b" { source = "./modules/old-b" }
+`)
+	pkgA := filepath.Join(root, "modules", "old-a")
+	pkgB := filepath.Join(root, "modules", "old-b")
+	subChild := filepath.Join(pkgA, "modules", "child") // referenced inside pkgA via "./modules/child"
+	require.NoError(t, os.MkdirAll(pkgA, 0o755))
+	require.NoError(t, os.MkdirAll(pkgB, 0o755))
+	require.NoError(t, os.MkdirAll(subChild, 0o755))
+	writeTerraformFile(t, pkgA, "main.tf", `output "id" { value = "same" }`)
+	writeTerraformFile(t, pkgB, "main.tf", `output "id" { value = "same" }`)
+	writeTerraformFile(t, subChild, "main.tf", `output "sub" { value = "child" }`)
+
+	modA := &ModuleNode{Key: "root.a", Name: "a", PackageRoot: pkgA, InstallDir: pkgA, Source: ModuleSource{PackageAddr: "git::file:///repo-a"}, IsRemote: true}
+	modB := &ModuleNode{Key: "root.b", Name: "b", PackageRoot: pkgB, InstallDir: pkgB, Source: ModuleSource{PackageAddr: "git::file:///repo-b"}, IsRemote: true}
+	// Sub-module inside package A: LOCAL sub-reference, PackageRoot == InstallDir == subdir.
+	modChild := &ModuleNode{Key: "root.a.child", Name: "child", PackageRoot: subChild, InstallDir: subChild, IsLocal: true, Parent: modA}
+	modA.Children = []*ModuleNode{modChild}
+
+	tree := &ResolvedTree{
+		Root:       &ModuleNode{Key: "root", Name: "root", InstallDir: root, PackageRoot: root, Children: []*ModuleNode{modA, modB}},
+		Packages:   map[string]*DownloadedPackage{"old-a": {PackageAddr: "git::file:///repo-a", LocalDir: pkgA}, "old-b": {PackageAddr: "git::file:///repo-b", LocalDir: pkgB}},
+		AllModules: []*ModuleNode{modA, modB, modChild},
+		VendorDir:  "modules",
+	}
+	modA.Parent = tree.Root
+	modB.Parent = tree.Root
+
+	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err)
+	plan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	require.NoError(t, err)
+	require.NotEmpty(t, plan.ByFinalID, "packages must be relocated")
+
+	// Find the final dir for package A (the one containing the sub-module).
+	var finalPkgDir string
+	for _, identity := range plan.Packages {
+		if filepath.Clean(identity.OldLocalDir) == filepath.Clean(pkgA) {
+			finalPkgDir = identity.FinalLocalDir
+			break
+		}
+	}
+	require.NotEmpty(t, finalPkgDir, "package A must have a final identity dir")
+
+	require.NoError(t, ApplySourcetreeIdentityPlan(tree, plan))
+
+	// The sub-module's pointers must be remapped into the renamed package directory.
+	assert.Equal(t, filepath.Join(finalPkgDir, "modules", "child"), modChild.InstallDir,
+		"sub-module InstallDir must be remapped under the final package dir")
+	assert.Equal(t, filepath.Join(finalPkgDir, "modules", "child"), modChild.PackageRoot,
+		"sub-module PackageRoot must be remapped under the final package dir")
+	assert.DirExists(t, modChild.InstallDir, "remapped sub-module dir must exist on disk")
+
+	// The post-rename strip plan must not crash reading the deleted old package dir.
+	// Before the fix this returned "failed to read directory .../old-a/modules/child".
+	_, err = PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, err, "final strip plan must not crash reading a renamed-away package subdir")
+}

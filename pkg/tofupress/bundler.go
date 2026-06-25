@@ -46,6 +46,10 @@ func vendorDirName(tree *ResolvedTree) string {
 	return defaultVendorDir
 }
 
+// VendorDirName returns the vendored modules directory name that will be used for a tree,
+// falling back to the safe default when the tree has no explicit vendor dir.
+func VendorDirName(tree *ResolvedTree) string { return vendorDirName(tree) }
+
 // ParseBundleFormat parses a format string into a BundleFormat.
 func ParseBundleFormat(s string) (BundleFormat, error) {
 	switch strings.ToLower(s) {
@@ -678,10 +682,18 @@ func (b *Bundler) aggregatePressedModules(tree *ResolvedTree) error {
 
 			// Rewrite source in the pressed module
 			oldSource := "./" + vDir + "/" + packageID
-			// Calculate relative path based on bundle structure, not filesystem
-			// In the bundle, the pressed module is at <module.Key>/ and the package is at <vendorDir>/<packageID>/
-			// So we need to go up from the module to the root, then into vendorDir
-			moduleBundlePath := module.Key
+			// The new source is relative to the pressed module's *bundled* location, which
+			// mirrors its location within the archive root: a pressed module that lives under
+			// <root>/modules/pressed is archived at "modules/pressed" (the root dir is copied
+			// wholesale so nested locals stay in place), while one outside the root is staged
+			// under its dotted module.Key. Basing the rewrite on module.Key alone was wrong —
+			// it produced dangling ./../_vendor/... references for pressed-in-place modules.
+			moduleBundlePath := strings.ReplaceAll(module.Key, ".", "/")
+			if rootRel, relErr := filepath.Rel(tree.Root.InstallDir, module.InstallDir); relErr == nil {
+				if cleaned := filepath.Clean(rootRel); !strings.HasPrefix(cleaned, "..") {
+					moduleBundlePath = cleaned
+				}
+			}
 			packageBundlePath := filepath.Join(vDir, packageID)
 			relPath, err := filepath.Rel(moduleBundlePath, packageBundlePath)
 			if err != nil {

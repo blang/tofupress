@@ -1,6 +1,7 @@
 # Shared module - leaf module, no dependencies
 variable "environment" {
-  type = string
+  type    = string
+  default = "shared"
 }
 
 output "config" {

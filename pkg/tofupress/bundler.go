@@ -140,6 +140,9 @@ func (b *Bundler) Bundle(tree *ResolvedTree, outputPath string) error {
 		return err
 	}
 
+	// Repivot happens inside stageBundle so library callers that invoke it
+	// directly also benefit (it is a no-op outside //subdir pivot mode).
+
 	switch format {
 	case BundleFormatZIP:
 		return b.bundleZIP(tree, outputPath)
@@ -153,17 +156,19 @@ func (b *Bundler) Bundle(tree *ResolvedTree, outputPath string) error {
 }
 
 // rootArchiveDir returns the directory that should serve as the archive root.
-// For //subdir package-boundary inputs, this is the PackageRoot (the full package)
-// so that the subdirectory structure is preserved in the archive.
-// Otherwise, it falls back to the InstallDir.
+//
+// For //subdir package-boundary inputs (and the implicit repo-root expansion
+// case, where PackageRoot is set but != InstallDir), the entry module lives at
+// InstallDir while the rest of the package is staged around it. The OCI
+// module-package contract requires the zip root to BE the default module, so
+// the archive root pivots to the entry subdir (review item 2). For non-pivot
+// inputs (PackageRoot unset, or equal to InstallDir), InstallDir IS the
+// package root and there is nothing to pivot.
 func rootArchiveDir(tree *ResolvedTree) string {
-	if tree != nil && tree.Root != nil && tree.Root.PackageRoot != "" {
-		return tree.Root.PackageRoot
+	if tree == nil || tree.Root == nil {
+		return ""
 	}
-	if tree != nil && tree.Root != nil {
-		return tree.Root.InstallDir
-	}
-	return ""
+	return tree.Root.InstallDir
 }
 
 // bundleTarGZ creates a tar.gz archive via staged bundling.
@@ -550,6 +555,13 @@ func stageBundle(tree *ResolvedTree, vendorDir string, stripPlan *StripPlan, met
 	}
 	cleanup := func() { _ = os.RemoveAll(stagingDir) }
 
+	// Repivot local sources in //subdir pivot mode BEFORE staging so the staged
+	// entry's .tf files carry the rewritten `./<package-rel-path>` sources (item 2).
+	// Idempotent no-op outside pivot mode.
+	if err := repivotMonorepoSources(tree); err != nil {
+		cleanup()
+		return "", fmt.Errorf("failed to repivot monorepo sources: %w", err)
+	}
 	// 1. Copy root module from archive root to staging root
 	archiveRoot := rootArchiveDir(tree)
 	if err := copyDirOCI(archiveRoot, stagingDir, stripPlan); err != nil {
@@ -557,19 +569,29 @@ func stageBundle(tree *ResolvedTree, vendorDir string, stripPlan *StripPlan, met
 		return "", fmt.Errorf("failed to copy root module to staging: %w", err)
 	}
 
-	// 2. Copy local modules that live outside the archive root
+	// 2. Stage in-package siblings (//subdir pivot mode) at their package-relative
+	// path so the entry module's `../../modules/x` references resolve at the
+	// unpacked archive root (review item 2). Source rewrites happen earlier in
+	// repivotMonorepoSources; this only stages the bytes.
+	if err := stageMonorepoSiblings(tree, stagingDir, stripPlan); err != nil {
+		cleanup()
+		return "", err
+	}
+
+	// 3. Copy local modules that live outside the package root (and outside the
+	// archive root) into the staging directory at their module-key path.
 	if err := stageLocalModules(tree, archiveRoot, stagingDir, stripPlan); err != nil {
 		cleanup()
 		return "", err
 	}
 
-	// 3. Populate vendor directory with packages
+	// 4. Populate vendor directory with packages
 	if err := stagePackages(tree, filepath.Join(stagingDir, vendorDir), stripPlan); err != nil {
 		cleanup()
 		return "", err
 	}
 
-	// 4. Write metadata file if provided
+	// 5. Write metadata file if provided
 	if metadata != nil {
 		if err := WriteMetadataFile(filepath.Join(stagingDir, MetadataFileName), metadata); err != nil {
 			cleanup()
@@ -582,7 +604,9 @@ func stageBundle(tree *ResolvedTree, vendorDir string, stripPlan *StripPlan, met
 
 // stageLocalModules copies local modules that live outside the archive root into
 // the staging directory at their module-key path. Modules inside the archive root
-// are already copied by the root module walk and are skipped here.
+// are already copied by the root module walk; modules inside the package root in
+// //subdir pivot mode are staged by stageMonorepoSiblings at their package-relative
+// path. Both classes are skipped here.
 func stageLocalModules(tree *ResolvedTree, archiveRoot, stagingDir string, stripPlan *StripPlan) error {
 	for _, module := range tree.AllModules {
 		if module == tree.Root {
@@ -595,9 +619,17 @@ func stageLocalModules(tree *ResolvedTree, archiveRoot, stagingDir string, strip
 		if !module.IsLocal || module.InstallDir == "" {
 			continue
 		}
+		// Skip modules inside the archive root — already copied by step 1.
 		relPath, err := filepath.Rel(archiveRoot, module.InstallDir)
 		if err != nil || !strings.HasPrefix(relPath, "..") {
 			continue
+		}
+		// Skip modules inside the package root in pivot mode — staged by
+		// stageMonorepoSiblings at their package-relative path.
+		if tree.Root != nil && tree.Root.PackageRoot != "" && tree.Root.PackageRoot != archiveRoot {
+			if relPkg, relErr := filepath.Rel(tree.Root.PackageRoot, module.InstallDir); relErr == nil && !strings.HasPrefix(relPkg, "..") {
+				continue
+			}
 		}
 		// Use module's key as the archive path to maintain structure
 		archivePath := strings.ReplaceAll(module.Key, ".", "/")
@@ -622,6 +654,137 @@ func stagePackages(tree *ResolvedTree, packagesDir string, stripPlan *StripPlan)
 		targetPath := filepath.Join(packagesDir, pkgID)
 		if err := copyDirOCI(pkg.LocalDir, targetPath, stripPlan); err != nil {
 			return fmt.Errorf("failed to copy package %s: %w", pkg.PackageAddr, err)
+		}
+	}
+	return nil
+}
+
+// inPivotMode reports whether the tree is a //subdir (or implicit repo-root
+// expansion) input whose archive root must pivot from the package root to the
+// entry subdir (review item 2).
+func inPivotMode(tree *ResolvedTree) bool {
+	return tree != nil && tree.Root != nil &&
+		tree.Root.PackageRoot != "" && tree.Root.PackageRoot != tree.Root.InstallDir
+}
+
+// entrySubdir returns the entry module's subdirectory relative to the package
+// root (e.g. "environments/prod"), or "" when not in pivot mode.
+func entrySubdir(tree *ResolvedTree) string {
+	if !inPivotMode(tree) {
+		return ""
+	}
+	rel, err := filepath.Rel(tree.Root.PackageRoot, tree.Root.InstallDir)
+	if err != nil {
+		return ""
+	}
+	return filepath.ToSlash(rel)
+}
+
+// repivotMonorepoSources rewrites local module sources that cross the new
+// archive-root boundary in //subdir pivot mode. After this pass, every
+// `../../modules/x` reference declared by the entry module that escapes the
+// entry subdir is rewritten to `./<package-rel-path>` so it resolves at the
+// unpacked archive root, where stageMonorepoSiblings stages the referenced
+// bytes. No-op outside pivot mode. Deeper descendants' `../sibling` sources
+// are NOT rewritten: stageMonorepoSiblings stages siblings at package-relative
+// paths, preserving the layout and thus the relative references between them.
+func repivotMonorepoSources(tree *ResolvedTree) error {
+	if !inPivotMode(tree) {
+		return nil
+	}
+	pkgRoot := tree.Root.PackageRoot
+	entryDir := tree.Root.InstallDir
+
+	for _, m := range tree.AllModules {
+		if m == tree.Root || !m.IsLocal || m.InstallDir == "" {
+			continue
+		}
+		// Only the entry module's DIRECT children whose targets escape the entry
+		// subdir need rewriting. The entry is flattened to the archive root, so any
+		// `../../modules/x` reference it declares escapes the staging dir and must
+		// be repointed to the package-relative path. Deeper descendants keep their
+		// original `../sibling` sources: stageMonorepoSiblings stages siblings at
+		// their package-relative paths, so the layout — and thus the relative
+		// references between siblings — is preserved verbatim.
+		if m.Parent == nil || m.Parent.InstallDir != entryDir {
+			continue
+		}
+		// Skip children whose target stays inside the entry subdir — staged by
+		// step 1's entry copy and reachable via the original `./child` source.
+		if rel, err := filepath.Rel(entryDir, m.InstallDir); err == nil && !strings.HasPrefix(rel, "..") {
+			continue
+		}
+		if err := rewriteEntryChildToPackageRel(m, pkgRoot); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// rewriteEntryChildToPackageRel rewrites m's parent .tf source for m to
+// `./<package-rel-path>`. Caller has already filtered m to be a crossing
+// direct child of the entry in pivot mode.
+func rewriteEntryChildToPackageRel(m *ModuleNode, pkgRoot string) error {
+	pkgRel, err := filepath.Rel(pkgRoot, m.InstallDir)
+	if err != nil {
+		return nil //nolint:nilerr // unreachable: pkgRoot is an ancestor of m.InstallDir; Rel only fails across volumes
+	}
+	if strings.HasPrefix(pkgRel, "..") {
+		return nil // target outside package root — staged by stageLocalModules
+	}
+	newSource := "./" + filepath.ToSlash(pkgRel)
+
+	parentTfFiles, err := FindTerraformFiles(m.Parent.InstallDir)
+	if err != nil {
+		return fmt.Errorf("failed to find parent terraform files for module %s: %w", m.Key, err)
+	}
+	rewrote := false
+	for _, tfFile := range parentTfFiles {
+		if err := RewriteModuleSource(tfFile, m.Name, newSource); err != nil {
+			if errors.Is(err, ErrModuleBlockNotFound) {
+				continue // this file doesn't declare the block
+			}
+			return fmt.Errorf("failed to rewrite source for module %s in %s: %w", m.Name, tfFile, err)
+		}
+		rewrote = true
+	}
+	if !rewrote {
+		return fmt.Errorf(
+			"monorepo repivot: module %q (key %s) at %s is referenced from %s but no parent .tf file declares it; "+
+				"cannot rewrite its source to %s",
+			m.Name, m.Key, m.InstallDir, m.Parent.InstallDir, newSource)
+	}
+	return nil
+}
+
+// stageMonorepoSiblings stages the parts of the package that live outside the
+// entry subdir (the new archive root) but inside the package root, at their
+// package-relative path. This makes the entry module's `./modules/x`-style
+// references (rewritten by repivotMonorepoSources) resolve at the unpacked
+// archive root. No-op outside pivot mode.
+func stageMonorepoSiblings(tree *ResolvedTree, stagingDir string, stripPlan *StripPlan) error {
+	if !inPivotMode(tree) {
+		return nil
+	}
+	pkgRoot := tree.Root.PackageRoot
+	entryDir := tree.Root.InstallDir
+
+	for _, m := range tree.AllModules {
+		if m == tree.Root || !m.IsLocal || m.InstallDir == "" {
+			continue
+		}
+		// Skip modules inside the entry subdir — staged by step 1 (entry copy).
+		if rel, err := filepath.Rel(entryDir, m.InstallDir); err == nil && !strings.HasPrefix(rel, "..") {
+			continue
+		}
+		// Skip modules outside the package root — staged by stageLocalModules.
+		pkgRel, err := filepath.Rel(pkgRoot, m.InstallDir)
+		if err != nil || strings.HasPrefix(pkgRel, "..") {
+			continue
+		}
+		targetPath := filepath.Join(stagingDir, filepath.FromSlash(filepath.ToSlash(pkgRel)))
+		if err := copyDirOCI(m.InstallDir, targetPath, stripPlan); err != nil {
+			return fmt.Errorf("failed to stage monorepo sibling %s: %w", m.Key, err)
 		}
 	}
 	return nil

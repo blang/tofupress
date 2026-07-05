@@ -57,6 +57,11 @@ type MetadataArtifact struct {
 	Format       string `json:"format"`
 	OCICompliant bool   `json:"oci_compliant"`
 	MetadataPath string `json:"metadata_path"`
+	// EntrySubdir records the entry module's subdirectory relative to the
+	// package root for //subdir (and implicit repo-root expansion) bundles
+	// whose archive root pivots to the entry subdir (review item 2). Empty
+	// for flat inputs where the archive root IS the package root.
+	EntrySubdir string `json:"entry_subdir,omitempty"`
 }
 
 // ModuleMetadata records information about a single module in the resolved tree.
@@ -189,6 +194,7 @@ func BuildArtifactMetadata(tree *ResolvedTree, req *MetadataRequest) (*ArtifactM
 			Format:       req.Options.Format,
 			OCICompliant: req.Options.OCICompliant,
 			MetadataPath: MetadataFileName,
+			EntrySubdir:  entrySubdir(tree),
 		},
 		Root:     moduleToMetadata(tree.Root, tree.Root.InstallDir),
 		Modules:  modules,

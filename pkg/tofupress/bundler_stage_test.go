@@ -65,12 +65,21 @@ func TestStageBundle_LocalModulesOutsideRoot(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(stagingDir)
 
-	// archiveRoot == PackageRoot == repoRoot, so the nested root module and the
-	// sibling shared-a module are both copied at their repo-relative paths
-	// (matching the existing bundler's behaviour). Sources (../shared-a) resolve
-	// from the nested location to the sibling path.
-	assert.FileExists(t, filepath.Join(stagingDir, "live", "network", "infratest", "main.tf"))
-	assert.FileExists(t, filepath.Join(stagingDir, "live", "network", "shared-a", "main.tf"))
+	// Item 2 (//subdir pivot): the archive root pivots from PackageRoot (repoRoot)
+	// to the entry subdir (InstallDir). The entry's main.tf ships at the unpacked
+	// archive root; the sibling shared-a module is staged at its package-relative
+	// path (live/network/shared-a) and the entry's `../shared-a` source is
+	// rewritten to `./live/network/shared-a`.
+	assert.FileExists(t, filepath.Join(stagingDir, "main.tf"),
+		"entry main.tf must be at the unpacked archive root (item 2 pivot)")
+	assert.FileExists(t, filepath.Join(stagingDir, "live", "network", "shared-a", "main.tf"),
+		"in-package sibling must be staged at its package-relative path")
+
+	// The entry source must be rewritten to the package-relative path.
+	data, err := os.ReadFile(filepath.Join(stagingDir, "main.tf"))
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `source = "./live/network/shared-a"`,
+		"entry's crossing local source must be rewritten to the package-relative path")
 }
 
 func TestStageBundle_WithPackages(t *testing.T) {
@@ -143,7 +152,10 @@ func TestStageBundle_PreservesDirectoryStructure(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(stagingDir)
 
-	assert.FileExists(t, filepath.Join(stagingDir, "live", "network", "infratest", "main.tf"))
+	// Item 2: the entry at <repoRoot>//live/network/infratest pivots to the
+	// unpacked archive root, so main.tf ships at the root (not under
+	// live/network/infratest/). No siblings to stage in this fixture.
+	assert.FileExists(t, filepath.Join(stagingDir, "main.tf"))
 }
 
 func TestStageBundle_PackageInModulesHasOwnModules(t *testing.T) {

@@ -173,6 +173,38 @@ func validateArchiveWithTool(t *testing.T, tool iacTool, sourceURL string) {
 	runIACTool(t, tool, consumerDir, "validate", "-no-color")
 }
 
+// consumeArchiveAtRootWithAllTools extracts the artifact and runs
+// `tofu init -backend=false` + `tofu validate` AT the unpacked archive root
+// for every available IAC tool. This is the "produce → distribute → consume"
+// flow the v1 contract requires for //subdir bundles whose archive root IS
+// the entry module (review item 2): no consumer wrapper, no `cd`, no edits.
+func consumeArchiveAtRootWithAllTools(t *testing.T, artifactPath string) {
+	t.Helper()
+	for _, tool := range requireAllIACTools(t) {
+		consumeArchiveAtRootWithTool(t, tool, artifactPath)
+	}
+}
+
+// consumeArchiveAtRootWithTool extracts artifactPath into a tempdir and runs
+// `tofu init -backend=false -input=false` + `tofu validate` at the unpacked
+// archive root. The bundle's root must BE the entry module for this to pass.
+func consumeArchiveAtRootWithTool(t *testing.T, tool iacTool, artifactPath string) {
+	t.Helper()
+	extractDir := t.TempDir()
+	switch {
+	case strings.HasSuffix(artifactPath, ".zip"):
+		extractZip(t, artifactPath, extractDir)
+	case strings.HasSuffix(artifactPath, ".tar.gz"):
+		extractTarGz(t, artifactPath, extractDir)
+	case strings.HasSuffix(artifactPath, ".tar.xz"):
+		extractTarXZ(t, artifactPath, extractDir)
+	default:
+		t.Fatalf("cannot extract unknown artifact format: %s", artifactPath)
+	}
+	runIACTool(t, tool, extractDir, "init", "-backend=false", "-input=false", "-no-color")
+	runIACTool(t, tool, extractDir, "validate", "-no-color")
+}
+
 func expectArchivePlanFailsWithAllTools(t *testing.T, sourceURL string) {
 	t.Helper()
 	for _, tool := range requireAllIACTools(t) {

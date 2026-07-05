@@ -35,30 +35,33 @@ func TestAcceptance_Monorepo_SubdirSyntax(t *testing.T) {
 	bin := buildBinary(t)
 	fixtureDir := monorepoFixture(t, "infra/environments/prod")
 
-	artifact := filepath.Join(t.TempDir(), "bundle.tar.gz")
-	runTofuPressBundle(t, bin, fixtureDir, artifact, "--format=tar.gz")
+	artifact := filepath.Join(t.TempDir(), "bundle.zip")
+	runTofuPressBundle(t, bin, fixtureDir, artifact, "--format=zip")
 
-	validateArchiveWithAllTools(t, serveArtifact(t, artifact))
+	// //subdir bundles ship the entry module at the unpacked archive root, so
+	// the consumer runs `tofu init` + `tofu validate` directly there — no
+	// consumer wrapper, no `cd` (review item 2).
+	consumeArchiveAtRootWithAllTools(t, artifact)
 }
 
 func TestAcceptance_Monorepo_SiblingRefs(t *testing.T) {
 	bin := buildBinary(t)
 	fixtureDir := monorepoFixture(t, "platform/overlays/dev")
 
-	artifact := filepath.Join(t.TempDir(), "bundle.tar.gz")
-	runTofuPressBundle(t, bin, fixtureDir, artifact, "--format=tar.gz")
+	artifact := filepath.Join(t.TempDir(), "bundle.zip")
+	runTofuPressBundle(t, bin, fixtureDir, artifact, "--format=zip")
 
-	validateArchiveWithAllTools(t, serveArtifact(t, artifact))
+	consumeArchiveAtRootWithAllTools(t, artifact)
 }
 
 func TestAcceptance_Monorepo_DeepSubdir(t *testing.T) {
 	bin := buildBinary(t)
 	fixtureDir := monorepoFixture(t, "apps/app3")
 
-	artifact := filepath.Join(t.TempDir(), "bundle.tar.gz")
-	runTofuPressBundle(t, bin, fixtureDir, artifact, "--format=tar.gz")
+	artifact := filepath.Join(t.TempDir(), "bundle.zip")
+	runTofuPressBundle(t, bin, fixtureDir, artifact, "--format=zip")
 
-	validateArchiveWithAllTools(t, serveArtifact(t, artifact))
+	consumeArchiveAtRootWithAllTools(t, artifact)
 }
 
 func TestAcceptance_Monorepo_MultipleEnvs(t *testing.T) {
@@ -76,9 +79,9 @@ func TestAcceptance_Monorepo_MultipleEnvs(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			fixtureDir := monorepoFixture(t, tc.subpath)
-			artifact := filepath.Join(t.TempDir(), "bundle.tar.gz")
-			runTofuPressBundle(t, bin, fixtureDir, artifact, "--format=tar.gz")
-			validateArchiveWithAllTools(t, serveArtifact(t, artifact))
+			artifact := filepath.Join(t.TempDir(), "bundle.zip")
+			runTofuPressBundle(t, bin, fixtureDir, artifact, "--format=zip")
+			consumeArchiveAtRootWithAllTools(t, artifact)
 		})
 	}
 }
@@ -94,5 +97,5 @@ func TestAcceptance_Monorepo_BundleOciCompliant(t *testing.T) {
 	artifact := filepath.Join(t.TempDir(), "bundle.zip")
 	runTofuPressBundle(t, bin, fixtureDir, artifact, "--oci-compliant")
 
-	validateArchiveWithAllTools(t, serveArtifact(t, artifact))
+	consumeArchiveAtRootWithAllTools(t, artifact)
 }

@@ -256,8 +256,6 @@ func setupLocalMonorepo(t *testing.T) cellFixture {
 	writeIntegrationFile(t, repo, "environments/prod/main.tf",
 		`module "network" {
   source = "../../modules/network"
-
-  app_name = "prod"
 }
 `)
 	writeIntegrationFile(t, repo, "modules/network/main.tf",

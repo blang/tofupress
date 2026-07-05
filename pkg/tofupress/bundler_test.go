@@ -1050,18 +1050,18 @@ module "pkg_two" {
 	extractDir := t.TempDir()
 	extractZip(t, archivePath, extractDir)
 
-	// Verify root module files are at the nested path relative to package root
-	rootFile := filepath.Join(extractDir, "live", "network", "infratest", "ssm_outputs.tf")
-	require.FileExists(t, rootFile, "root ssm_outputs.tf must be in the archive at its nested path")
+	// The archive root pivots to the entry subdir (review item 2): ssm_outputs.tf
+	// ships at the unpacked archive root, not at the nested repo-relative path.
+	rootFile := filepath.Join(extractDir, "ssm_outputs.tf")
+	require.FileExists(t, rootFile, "root ssm_outputs.tf must be at the unpacked archive root")
 
 	// Read the rewritten source
 	content, err := os.ReadFile(rootFile)
 	require.NoError(t, err)
 	contentStr := string(content)
 
-	// Sources must be rewritten to relative paths pointing to the vendor dir.
-	// Since the .tf file is at live/network/infratest/ (3 levels below the package root),
-	// the relative path goes up 3 levels then into modules/.
+	// Sources must be rewritten to relative paths pointing to the vendor dir,
+	// now relative to the archive root (no `../../..` traversal).
 	assert.Contains(t, contentStr, defaultVendorDir+"/",
 		"remote module sources must be rewritten to point to vendor dir")
 	assert.NotContains(t, contentStr, "git::",
@@ -1105,7 +1105,7 @@ module "pkg_two" {
 	for _, match := range matches {
 		sourcePath := match[1]
 		// Resolve relative to the .tf file's location
-		tfDir := filepath.Join(extractDir, "live", "network", "infratest")
+		tfDir := extractDir
 		resolved := filepath.Join(tfDir, sourcePath)
 		// Normalize to archive-relative path
 		rel, err := filepath.Rel(extractDir, resolved)

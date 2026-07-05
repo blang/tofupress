@@ -262,3 +262,75 @@ output "vpc_id" {
 	assert.Contains(t, result, `output "vpc_id"`)
 	assert.Contains(t, result, `instance_type = "t2.micro"`)
 }
+
+func TestRewriteModuleSourceAndDropVersion(t *testing.T) {
+	tmpDir := t.TempDir()
+	tfFile := filepath.Join(tmpDir, "main.tf")
+
+	content := `
+module "vpc" {
+  source  = "terraform-aws-modules/vpc/aws"
+  version = "5.21.0"
+}
+
+module "eks" {
+  source  = "terraform-aws-modules/eks/aws"
+  version = "20.0.0"
+}
+`
+	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0o644))
+
+	// Rewrite vpc from registry source to a local vendored path, dropping version.
+	err := RewriteModuleSourceAndDropVersion(tfFile, "vpc", "./_vendor/pkg-abc")
+	require.NoError(t, err)
+
+	blocks, err := ExtractModuleBlocks(tfFile)
+	require.NoError(t, err)
+	require.Len(t, blocks, 2)
+
+	// vpc: source rewritten to the local vendor path and version stripped (item 1).
+	vpc := blocks[0]
+	assert.Equal(t, "vpc", vpc.Name)
+	assert.Equal(t, "./_vendor/pkg-abc", vpc.Source)
+	assert.Empty(t, vpc.Version, "version must be dropped when rewriting a registry source to local")
+
+	// eks: untouched (rewrite targeted only `vpc`).
+	eks := blocks[1]
+	assert.Equal(t, "eks", eks.Name)
+	assert.Equal(t, "terraform-aws-modules/eks/aws", eks.Source)
+	assert.Equal(t, "20.0.0", eks.Version)
+
+	// Provenance: the original pinned version must survive as a comment in the file.
+	data, err := os.ReadFile(tfFile)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), `# version = "5.21.0" (pinned by tofupress)`)
+}
+
+// TestRewriteModuleSourceAndDropVersion_NoVersionAttr is the no-op contract:
+// when a registry block was already rewritten (no `version`), the call must
+// still succeed and rewrite `source` without dropping provenance it never had.
+func TestRewriteModuleSourceAndDropVersion_NoVersionAttr(t *testing.T) {
+	tmpDir := t.TempDir()
+	tfFile := filepath.Join(tmpDir, "main.tf")
+
+	content := `
+module "vpc" {
+  source = "terraform-aws-modules/vpc/aws"
+}
+`
+	require.NoError(t, os.WriteFile(tfFile, []byte(content), 0o644))
+
+	err := RewriteModuleSourceAndDropVersion(tfFile, "vpc", "./_vendor/pkg-xyz")
+	require.NoError(t, err)
+
+	blocks, err := ExtractModuleBlocks(tfFile)
+	require.NoError(t, err)
+	require.Len(t, blocks, 1)
+	assert.Equal(t, "./_vendor/pkg-xyz", blocks[0].Source)
+	assert.Empty(t, blocks[0].Version)
+
+	data, err := os.ReadFile(tfFile)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "pinned by tofupress",
+		"no provenance comment should be emitted when the version attribute was absent")
+}

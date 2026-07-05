@@ -538,8 +538,16 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 					}
 					newSource := moduleSourcePath(relPath, info.child.Source.SubDir)
 
-					if err := RewriteModuleSource(info.tfFile, info.modName, newSource); err != nil {
-						return nil, fmt.Errorf("failed to rewrite source for module %s: %w", info.modName, err)
+					// Registry-source modules carry `version = "x.y.z"`, which OpenTofu/Terraform
+					// reject on a rewritten local source (`Invalid registry module source address`,
+					// review item 1). Drop the `version` attribute when rewriting to a local path.
+					// All other source types never carry `version`, so they keep the plain rewrite.
+					rewriteErr := RewriteModuleSource(info.tfFile, info.modName, newSource)
+					if info.child.Source.Type == SourceRegistry {
+						rewriteErr = RewriteModuleSourceAndDropVersion(info.tfFile, info.modName, newSource)
+					}
+					if rewriteErr != nil {
+						return nil, fmt.Errorf("failed to rewrite source for module %s: %w", info.modName, rewriteErr)
 					}
 
 					// Check depth limit

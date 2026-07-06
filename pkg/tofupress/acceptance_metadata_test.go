@@ -23,6 +23,23 @@ func TestAcceptance_Metadata_SchemaVersion(t *testing.T) {
 	assert.Equal(t, "1", m.SchemaVersion)
 }
 
+// TestAcceptance_Metadata_ProvenanceNonEmptyUnderPlainGoBuild guards review
+// item 7 / QA-6: the integration TestMain builds the tofupress binary with a
+// plain `go build` (no ldflags) at the project root (a git repo). The fallback
+// in version.go must surface non-empty version/commit/time into meta.json so
+// every bundle carries provenance regardless of how the binary was built.
+func TestAcceptance_Metadata_ProvenanceNonEmptyUnderPlainGoBuild(t *testing.T) {
+	bin := buildBinary(t)
+	src := createSimpleFixture(t)
+	artifact := filepath.Join(t.TempDir(), "bundle.zip")
+	runTofuPressBundle(t, bin, src, artifact, "--format=zip")
+
+	m := metadataFromArtifact(t, artifact)
+	assert.NotEmpty(t, m.TofuPress.Version, "provenance version must be non-empty under plain go build (item 7)")
+	assert.NotEmpty(t, m.TofuPress.Commit, "provenance commit must be non-empty when built in a git repo (item 7)")
+	assert.NotEmpty(t, m.TofuPress.Time, "provenance time must be non-empty under plain go build (item 7)")
+}
+
 func TestAcceptance_Metadata_ModuleCount(t *testing.T) {
 	bin := buildBinary(t)
 	src := createSimpleFixture(t) // root + child

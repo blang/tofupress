@@ -12,9 +12,14 @@ import (
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:     "tofupress",
-	Version: BuildVersion,
-	Short:   "TofuPress - OpenTofu/Terraform module bundler",
+	Use: "tofupress",
+	Version: func() string {
+		if v := EffectiveBuildInfo().Version; v != "" {
+			return v
+		}
+		return "(development build)"
+	}(),
+	Short: "TofuPress - OpenTofu/Terraform module bundler",
 	Long: `A CLI that takes an OpenTofu/Terraform root module, recursively resolves
 all referenced modules, and bundles everything into a single self-contained
 artifact (tar.gz or OCI Terraform module) — no external module sources left

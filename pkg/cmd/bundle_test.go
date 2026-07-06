@@ -2,6 +2,8 @@
 package cmd
 
 import (
+	"strings"
+
 	"archive/zip"
 	"bytes"
 	"os"
@@ -116,6 +118,38 @@ func TestBundleCommandPrintsDeduplicatedPackages(t *testing.T) {
 
 	require.NoError(t, runBundle(cmd, []string{root, output}))
 	assert.Contains(t, buf.String(), "Deduplicated packages: 0")
+}
+
+// TestRunBundleEmbedsNonEmptyProvenanceUnderPlainGoBuild guards review item 7 /
+// QA-6: a binary built with plain `go build` (no ldflags) must still embed
+// non-empty tofupress.{version,commit,time} provenance into meta.json. `go
+// test` does not inject ldflags, so this exercise is exactly that scenario.
+func TestRunBundleEmbedsNonEmptyProvenanceUnderPlainGoBuild(t *testing.T) {
+	sourceDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, "main.tf"), []byte(`output "x" { value = "root" }`), 0o644))
+	bundlePath := filepath.Join(t.TempDir(), "bundle.zip")
+
+	cmd := newTestBundleCommand(t, "")
+	require.NoError(t, runBundle(cmd, []string{sourceDir, bundlePath}))
+
+	meta, err := tofupress.ReadMetadataFromArtifact(bundlePath)
+	require.NoError(t, err)
+	assert.NotEmpty(t, meta.TofuPress.Version, "provenance version must never be blank (item 7)")
+	assert.NotEmpty(t, meta.TofuPress.Commit, "provenance commit must never be blank under git VCS (item 7)")
+	assert.NotEmpty(t, meta.TofuPress.Time, "provenance time must never be blank under git VCS (item 7)")
+}
+
+// TestEffectiveBuildInfoNeverBlankVersion asserts the fallback synthesizes a
+// version even when VCS info is absent, so meta.json is never empty.
+func TestEffectiveBuildInfoNeverBlankVersion(t *testing.T) {
+	// Save and clear ldflags-injected vars to exercise the synthesis path.
+	savedV, savedC, savedT := BuildVersion, BuildCommit, BuildTime
+	BuildVersion, BuildCommit, BuildTime = "", "", ""
+	t.Cleanup(func() { BuildVersion, BuildCommit, BuildTime = savedV, savedC, savedT })
+
+	bi := EffectiveBuildInfo()
+	assert.NotEmpty(t, bi.Version, "synthesized version must never be blank")
+	assert.True(t, strings.HasPrefix(bi.Version, "dev-"), "plain go build version should be a dev-<ts> tag, got %q", bi.Version)
 }
 
 //nolint:unparam // metadataPath is always empty string; kept as parameter for test readability

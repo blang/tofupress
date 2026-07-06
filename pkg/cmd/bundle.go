@@ -156,11 +156,7 @@ func runBundle(cmd *cobra.Command, args []string) error {
 	}
 
 	metadata, err := tofupress.BuildArtifactMetadata(tree, &tofupress.MetadataRequest{
-		Build: tofupress.BuildInfo{
-			Version: BuildVersion,
-			Commit:  BuildCommit,
-			Time:    BuildTime,
-		},
+		Build:          EffectiveBuildInfo(),
 		Command:        "bundle",
 		Args:           []string{source, outputPath},
 		Options:        tofupress.BundleOptions{Format: string(format), OCICompliant: ociCompliant, StripMode: string(stripMode)},

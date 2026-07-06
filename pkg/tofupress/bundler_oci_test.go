@@ -200,11 +200,11 @@ func TestBundler_OCICompliantEmbedsMetadataAtRoot(t *testing.T) {
 	var hasMetadata bool
 	for _, file := range zipReader.File {
 		assert.NotContains(t, file.Name, "sourcetree/", "OCI-compliant bundle must not contain sourcetree layout")
-		if file.Name == MetadataFileName {
+		if file.Name == MetadataRelPath {
 			hasMetadata = true
 		}
 	}
-	assert.True(t, hasMetadata, "OCI-compliant bundle should still contain top-level meta.json")
+	assert.True(t, hasMetadata, "OCI-compliant bundle should still contain relocated metadata at .tofupress/meta.json")
 }
 
 // extractZipOCI is a test helper that extracts a ZIP archive.

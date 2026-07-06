@@ -179,7 +179,7 @@ func TestBundler_StagedBundleMatchesContent(t *testing.T) {
 			assert.FileExists(t, filepath.Join(extractDir, "main.tf"))
 			assert.FileExists(t, filepath.Join(extractDir, "app", "main.tf"))
 			assert.FileExists(t, filepath.Join(extractDir, defaultVendorDir, "pkg-abc", "main.tf"))
-			assert.FileExists(t, filepath.Join(extractDir, MetadataFileName))
+			assert.FileExists(t, filepath.Join(extractDir, MetadataDir, MetadataFileName))
 		})
 	}
 }

@@ -3,6 +3,7 @@ package tofupress
 import (
 	"archive/tar"
 	"archive/zip"
+	"bytes"
 	"compress/gzip"
 	"encoding/json"
 	"fmt"
@@ -14,10 +15,19 @@ import (
 )
 
 // ReadMetadataFromDir reads metadata from an extracted artifact directory.
-// The directory should contain a meta.json file at its root.
+// It prefers the relocated .tofupress/meta.json and falls back to the legacy
+// root meta.json so older extracted bundles remain readable (review item 6).
 func ReadMetadataFromDir(dir string) (*ArtifactMetadata, error) {
 	if dir == "" {
 		return nil, fmt.Errorf("directory path is empty")
+	}
+	relocated := filepath.Join(dir, MetadataDir, MetadataFileName)
+	if data, err := os.ReadFile(relocated); err == nil { //nolint:gosec // path is constructed from user input
+		var metadata ArtifactMetadata
+		if err := json.Unmarshal(data, &metadata); err != nil {
+			return nil, fmt.Errorf("invalid metadata in %s: %w", relocated, err)
+		}
+		return &metadata, nil
 	}
 	metaPath := filepath.Join(dir, MetadataFileName)
 	data, err := os.ReadFile(metaPath) //nolint:gosec // path is constructed from user input
@@ -67,6 +77,20 @@ func readMetadataFromZip(path string) (*ArtifactMetadata, error) {
 	defer func() { _ = reader.Close() }()
 
 	for _, file := range reader.File {
+		if file.Name != MetadataRelPath {
+			continue
+		}
+		entry, err := file.Open()
+		if err != nil {
+			return nil, fmt.Errorf("failed to open metadata entry: %w", err)
+		}
+		metadata, decErr := decodeMetadata(entry)
+		_ = entry.Close()
+		return metadata, decErr
+	}
+	// Fallback: older bundles wrote meta.json at the archive root. Accept them
+	// so a v1 relocation does not break reads of pre-existing artifacts.
+	for _, file := range reader.File {
 		if file.Name != MetadataFileName {
 			continue
 		}
@@ -78,7 +102,7 @@ func readMetadataFromZip(path string) (*ArtifactMetadata, error) {
 		_ = entry.Close()
 		return metadata, decErr
 	}
-	return nil, fmt.Errorf("metadata file %s not found in artifact", MetadataFileName)
+	return nil, fmt.Errorf("metadata file %s not found in artifact", MetadataRelPath)
 }
 
 func readMetadataFromTarGZ(path string) (*ArtifactMetadata, error) {
@@ -112,7 +136,14 @@ func readMetadataFromTarXZ(path string) (*ArtifactMetadata, error) {
 	return readMetadataFromTarReader(tar.NewReader(xzReader))
 }
 
+// readMetadataFromTarReader walks a tar stream once. Because tar is a
+// single-forward-pass format, we cannot peek-ahead for .tofupress/meta.json
+// and then rewind; instead we record the entry bytes if we pass the legacy root
+// meta.json, keep walking for the relocated path, and at EOF prefer the
+// relocated entry, falling back to the legacy bytes. This preserves the
+// one-pass contract while honoring both layouts (review item 6).
 func readMetadataFromTarReader(reader *tar.Reader) (*ArtifactMetadata, error) {
+	var legacyBytes []byte
 	for {
 		header, err := reader.Next()
 		if err == io.EOF {
@@ -121,11 +152,22 @@ func readMetadataFromTarReader(reader *tar.Reader) (*ArtifactMetadata, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to read tar entry: %w", err)
 		}
-		if header.Name == MetadataFileName {
+		switch header.Name {
+		case MetadataRelPath:
 			return decodeMetadata(reader)
+		case MetadataFileName:
+			// Buffer the legacy root meta.json in case the relocated one is absent.
+			b, readErr := io.ReadAll(reader)
+			if readErr != nil {
+				return nil, fmt.Errorf("failed to read metadata entry: %w", readErr)
+			}
+			legacyBytes = b
 		}
 	}
-	return nil, fmt.Errorf("metadata file %s not found in artifact", MetadataFileName)
+	if legacyBytes != nil {
+		return decodeMetadata(bytes.NewReader(legacyBytes))
+	}
+	return nil, fmt.Errorf("metadata file %s not found in artifact", MetadataRelPath)
 }
 
 func decodeMetadata(reader io.Reader) (*ArtifactMetadata, error) {

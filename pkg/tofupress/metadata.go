@@ -17,6 +17,17 @@ const MetadataSchemaVersion = "1"
 // MetadataFileName is the standard filename for metadata embedded in artifacts.
 const MetadataFileName = "meta.json"
 
+// MetadataDir is the directory inside an artifact where tofupress stashes its
+// own metadata so the module-package root is not littered with a stray JSON
+// file (review item 6 / F13). The OCI module-package spec says the zip root IS
+// the default module; a top-level meta.json is tolerated by OpenTofu but is
+// not part of any spec. Older bundles wrote meta.json at the root — the reader
+// checks .tofupress/meta.json first and falls back to the root for them.
+const MetadataDir = ".tofupress"
+
+// MetadataRelPath is the archive-relative path of the embedded metadata file.
+const MetadataRelPath = MetadataDir + "/" + MetadataFileName
+
 // BuildInfo records the tofupress build that produced an artifact.
 type BuildInfo struct {
 	Version string `json:"version"`
@@ -182,7 +193,7 @@ func BuildArtifactMetadata(tree *ResolvedTree, req *MetadataRequest) (*ArtifactM
 
 	artifact := &ArtifactMetadata{
 		SchemaVersion: MetadataSchemaVersion,
-		CreatedAt:     createdAt.UTC().Format(time.RFC3339),
+		CreatedAt:     createdAt.Format("2006-01-02T15:04:05Z"),
 		TofuPress:     req.Build,
 		Command: MetadataCommand{
 			Name:    req.Command,
@@ -193,7 +204,7 @@ func BuildArtifactMetadata(tree *ResolvedTree, req *MetadataRequest) (*ArtifactM
 			OutputPath:   safeOutputPath(req.OutputPath),
 			Format:       req.Options.Format,
 			OCICompliant: req.Options.OCICompliant,
-			MetadataPath: MetadataFileName,
+			MetadataPath: MetadataRelPath,
 			EntrySubdir:  entrySubdir(tree),
 		},
 		Root:     moduleToMetadata(tree.Root, tree.Root.InstallDir),

@@ -37,7 +37,7 @@ func TestStageBundle_RootOnly(t *testing.T) {
 	assert.FileExists(t, filepath.Join(stagingDir, "variables.tf"))
 	assert.NoDirExists(t, filepath.Join(stagingDir, "modules"))
 
-	data, err := os.ReadFile(filepath.Join(stagingDir, MetadataFileName))
+	data, err := os.ReadFile(filepath.Join(stagingDir, MetadataDir, MetadataFileName))
 	require.NoError(t, err)
 	assert.Contains(t, string(data), `"schema_version": "1"`)
 }
@@ -207,7 +207,7 @@ func TestStageBundle_MetadataWritten(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(stagingDir)
 
-	data, err := os.ReadFile(filepath.Join(stagingDir, MetadataFileName))
+	data, err := os.ReadFile(filepath.Join(stagingDir, MetadataDir, MetadataFileName))
 	require.NoError(t, err)
 	assert.Contains(t, string(data), `"schema_version": "1"`)
 	assert.Contains(t, string(data), `"created_at": "2026-06-24T12:00:00Z"`)

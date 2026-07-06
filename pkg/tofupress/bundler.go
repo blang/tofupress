@@ -626,7 +626,12 @@ func stageBundle(tree *ResolvedTree, vendorDir string, stripPlan *StripPlan, met
 
 	// 5. Write metadata file if provided
 	if metadata != nil {
-		if err := WriteMetadataFile(filepath.Join(stagingDir, MetadataFileName), metadata); err != nil {
+		metaDir := filepath.Join(stagingDir, MetadataDir)
+		if err := os.MkdirAll(metaDir, 0o755); err != nil { //nolint:gosec // G301: standard dir perms
+			cleanup()
+			return "", fmt.Errorf("failed to create metadata directory: %w", err)
+		}
+		if err := WriteMetadataFile(filepath.Join(metaDir, MetadataFileName), metadata); err != nil {
 			cleanup()
 			return "", fmt.Errorf("failed to write metadata: %w", err)
 		}

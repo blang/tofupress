@@ -471,7 +471,7 @@ func TestBundler_EmbedsMetadataInZip(t *testing.T) {
 
 	var found bool
 	for _, file := range zipReader.File {
-		if file.Name != MetadataFileName {
+		if file.Name != MetadataRelPath {
 			continue
 		}
 		found = true
@@ -482,7 +482,7 @@ func TestBundler_EmbedsMetadataInZip(t *testing.T) {
 		require.NoError(t, reader.Close())
 		assert.Contains(t, string(data), `"schema_version": "1"`)
 	}
-	assert.True(t, found, "zip bundle should contain meta.json at artifact root")
+	assert.True(t, found, "zip bundle should contain metadata at "+MetadataRelPath)
 }
 
 func TestBundler_EmbedsMetadataInTarGz(t *testing.T) {
@@ -503,7 +503,7 @@ func TestBundler_EmbedsMetadataInTarGz(t *testing.T) {
 
 	extractDir := t.TempDir()
 	extractTarGz(t, archivePath, extractDir)
-	data, err := os.ReadFile(filepath.Join(extractDir, MetadataFileName))
+	data, err := os.ReadFile(filepath.Join(extractDir, MetadataDir, MetadataFileName))
 	require.NoError(t, err)
 	assert.Contains(t, string(data), `"schema_version": "1"`)
 }
@@ -1915,7 +1915,8 @@ func TestBundler_TarGzFromDir_EmbedsMetadata(t *testing.T) {
 	srcDir := t.TempDir()
 	writeTerraformFile(t, srcDir, "main.tf", `# root`)
 	meta := &ArtifactMetadata{SchemaVersion: MetadataSchemaVersion, CreatedAt: "2026-06-24T00:00:00Z"}
-	require.NoError(t, WriteMetadataFile(filepath.Join(srcDir, MetadataFileName), meta))
+	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, MetadataDir), 0o755))
+	require.NoError(t, WriteMetadataFile(filepath.Join(srcDir, MetadataDir, MetadataFileName), meta))
 
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
 	bundler := NewBundler(BundleFormatTarGZ)
@@ -1924,7 +1925,7 @@ func TestBundler_TarGzFromDir_EmbedsMetadata(t *testing.T) {
 
 	extractDir := t.TempDir()
 	extractTarGz(t, archivePath, extractDir)
-	data, err := os.ReadFile(filepath.Join(extractDir, MetadataFileName))
+	data, err := os.ReadFile(filepath.Join(extractDir, MetadataDir, MetadataFileName))
 	require.NoError(t, err)
 	assert.Contains(t, string(data), `"schema_version": "1"`)
 }

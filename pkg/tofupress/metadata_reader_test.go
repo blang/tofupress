@@ -42,5 +42,5 @@ func TestReadMetadataFromArtifactErrorsWhenMissing(t *testing.T) {
 
 	_, err := ReadMetadataFromArtifact(archivePath)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "metadata file meta.json not found")
+	assert.Contains(t, err.Error(), "metadata file .tofupress/meta.json not found")
 }

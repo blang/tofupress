@@ -1,9 +1,11 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -31,7 +33,7 @@ Example:
 func init() {
 	bundleCmd.Flags().String("format", "auto", "Bundle format: auto, zip, tar.gz, tar.xz (auto detects from output file extension)")
 	bundleCmd.Flags().Bool("oci-compliant", false, "Generate OCI-compliant bundle (no sourcetree metadata, inlined modules)")
-	bundleCmd.Flags().String("metadata-out", "", "Write bundle metadata JSON to a separate path")
+	bundleCmd.Flags().Bool("json", false, "Emit the bundle metadata as JSON to stdout after success (review item 9)")
 	bundleCmd.Flags().String("strip", "module-dir", "Strip mode: none, module-dir (safe default), config-only, or tf-only (alias for config-only)")
 	bundleCmd.Flags().String("vendor-dir", "_vendor", "Vendored modules directory name (remote dependencies are rooted here in the bundle)")
 }
@@ -49,7 +51,10 @@ func runBundle(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
-	fmt.Fprintf(stdout, "Resolving modules in %s...\n", source) //nolint:errcheck // stdout writes are best-effort
+	jsonOut, _ := cmd.Flags().GetBool("json")
+	if !jsonOut {
+		fmt.Fprintf(stdout, "Resolving modules in %s...\n", source) //nolint:errcheck // stdout writes are best-effort
+	}
 
 	// Resolve source (local or remote) to a working directory
 	workDir, packageRoot, cleanup, err := resolveSource(cmd.Context(), source)
@@ -57,6 +62,8 @@ func runBundle(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer cleanup()
+	stopSig := installSignalCleanup(cleanup)
+	defer stopSig()
 
 	// Resolve modules in temp directory
 	resolver := tofupress.NewResolver()
@@ -91,9 +98,10 @@ func runBundle(cmd *cobra.Command, args []string) error {
 	if err == nil && len(tfFiles) == 0 {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: root module contains no .tf or .tofu files\n") //nolint:errcheck // stderr writes are best-effort
 	}
-
-	fmt.Fprintf(stdout, "Found %d modules and %d packages\n", len(tree.AllModules), len(tree.Packages)) //nolint:errcheck // stdout writes are best-effort
-	fmt.Fprintf(stdout, "Creating bundle at %s...\n", outputPath)                                       //nolint:errcheck // stdout writes are best-effort
+	if !jsonOut {
+		fmt.Fprintf(stdout, "Found %d modules and %d packages\n", len(tree.AllModules), len(tree.Packages)) //nolint:errcheck // stdout writes are best-effort
+		fmt.Fprintf(stdout, "Creating bundle at %s...\n", outputPath)                                       //nolint:errcheck // stdout writes are best-effort
+	}
 
 	// Create bundle
 	formatStr, _ := cmd.Flags().GetString("format")
@@ -106,7 +114,11 @@ func runBundle(cmd *cobra.Command, args []string) error {
 	if format == tofupress.BundleFormatAuto {
 		detected, ok := tofupress.DetectFormatFromPath(outputPath)
 		if !ok {
-			return fmt.Errorf("could not infer bundle format from output path %q; pass --format=zip, --format=tar.gz, or --format=tar.xz", outputPath)
+			hint := ""
+			if strings.HasSuffix(outputPath, "/") || strings.HasSuffix(outputPath, string(filepath.Separator)) {
+				hint = " (the output path looks like a directory; tofupress writes an archive file, not a directory -- pass a file path ending in .zip/.tar.gz/.tar.xz)"
+			}
+			return fmt.Errorf("could not infer bundle format from output path %q; pass --format=zip, --format=tar.gz, or --format=tar.xz%s", outputPath, hint)
 		}
 		format = detected
 	}
@@ -180,13 +192,27 @@ func runBundle(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to stat bundle: %w", err)
 	}
 
-	fmt.Fprintf(stdout, "Bundle created successfully: %s (%.2f MB)\n", outputPath, float64(info.Size())/(1024*1024)) //nolint:errcheck // stdout writes are best-effort
+	if !jsonOut {
+		fmt.Fprintf(stdout, "Bundle created successfully: %s (%.2f MB)\n", outputPath, float64(info.Size())/(1024*1024)) //nolint:errcheck // stdout writes are best-effort
+	}
 
 	metadataOut, _ := cmd.Flags().GetString("metadata-out")
 	if metadataOut != "" {
 		if err := tofupress.WriteMetadataFile(metadataOut, metadata); err != nil {
 			return fmt.Errorf("failed to write metadata output: %w", err)
 		}
+	}
+
+	// --json: emit the metadata JSON to stdout for scriptable CI (review item 9).
+	// Mirrors --metadata-out but to stdout, so CI need not parse human text or
+	// juggle a temp file. jsonOut was read above.
+	if jsonOut {
+		enc := json.NewEncoder(stdout)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(metadata); err != nil {
+			return fmt.Errorf("failed to write metadata JSON: %w", err)
+		}
+		return nil
 	}
 
 	fmt.Fprintf(stdout, "Module references: %d\n", metadata.Stats.ModuleReferences)                    //nolint:errcheck // stdout writes are best-effort

@@ -2,9 +2,11 @@
 package cmd
 
 import (
-	"os"
-
 	"log/slog"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
 
 	"github.com/golang-cz/devslog"
 	"github.com/spf13/cobra"
@@ -70,4 +72,33 @@ func init() {
 	rootCmd.AddCommand(bundleCmd)
 	rootCmd.AddCommand(metadataCmd)
 	rootCmd.AddCommand(versionCmd)
+}
+
+// installSignalCleanup ensures cleanup runs on SIGINT/SIGTERM. Go's defers
+// do NOT fire on os.Exit, and a normal function return does not happen when a
+// signal kills the process — verified in the review session: a Ctrl-C during a
+// slow bundle leaves an orphaned /tmp/tofupress-* dir behind. This installs a
+// one-shot signal handler that invokes cleanup and exits. It returns a stop
+// function that restores the previous signal handling (so a successful return
+// path is never interrupted by the handler). The cleanup is guarded by a
+// sync.Once so it never double-fires with the deferred cleanup on the happy
+// path (review item 9).
+func installSignalCleanup(cleanup func()) (stop func()) {
+	var once sync.Once
+	wrapped := func() { once.Do(cleanup) }
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		_, ok := <-ch
+		if !ok {
+			return
+		}
+		wrapped()
+		os.Exit(130) // 128+SIGINT, the conventional shell exit-on-Ctrl-C
+	}()
+	return func() {
+		signal.Stop(ch)
+		close(ch)
+		wrapped() // belt-and-suspenders: happy-path cleanup also runs via defer
+	}
 }

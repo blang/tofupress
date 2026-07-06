@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"runtime/debug"
 	"strings"
@@ -108,6 +109,21 @@ var versionCmd = &cobra.Command{
 	Short: "Print version information",
 	Run: func(cmd *cobra.Command, args []string) {
 		bi := EffectiveBuildInfo()
+		jsonOut, _ := cmd.Flags().GetBool("json")
+		if jsonOut {
+			// Scriptable version check (review item 9): mirror the text fields as JSON.
+			out := struct {
+				Version   string `json:"version"`
+				Commit    string `json:"commit"`
+				BuildTime string `json:"build_time"`
+			}{Version: bi.Version, Commit: bi.Commit, BuildTime: bi.Time}
+			enc := json.NewEncoder(cmd.OutOrStdout())
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(out); err != nil {
+				fmt.Fprintln(cmd.ErrOrStderr(), err) //nolint:errcheck // stderr write is best-effort
+			}
+			return
+		}
 		version := bi.Version
 		if version == "" {
 			version = "(development build; use 'just build' for versioned builds)"
@@ -120,4 +136,8 @@ var versionCmd = &cobra.Command{
 			fmt.Printf("  built:  %s\n", bi.Time)
 		}
 	},
+}
+
+func init() {
+	versionCmd.Flags().Bool("json", false, "Output version information as JSON (review item 9)")
 }

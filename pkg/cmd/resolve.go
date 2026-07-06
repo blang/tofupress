@@ -35,6 +35,8 @@ func runResolve(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	defer cleanup()
+	stopSig := installSignalCleanup(cleanup)
+	defer stopSig()
 
 	// Resolve modules in temp directory
 	resolver := tofupress.NewResolver()

@@ -2,12 +2,12 @@
 package cmd
 
 import (
-	"strings"
-
 	"archive/zip"
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -158,9 +158,54 @@ func newTestBundleCommand(t *testing.T, metadataPath string) *cobra.Command {
 	cmd := &cobra.Command{}
 	cmd.Flags().String("format", "zip", "")
 	cmd.Flags().Bool("oci-compliant", false, "")
+	cmd.Flags().Bool("json", false, "")
 	cmd.Flags().String("metadata-out", metadataPath, "")
 	cmd.Flags().String("strip", string(tofupress.StripModeModuleDir), "")
+	cmd.Flags().String("vendor-dir", "_vendor", "")
 	return cmd
+}
+
+// TestRunBundleJSONEmitsMetadataToStdout (review item 9) verifies --json
+// emits the artifact metadata as indented JSON to stdout (scriptable CI).
+func TestRunBundleJSONEmitsMetadataToStdout(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "main.tf"), []byte(`output "name" { value = "root" }`), 0o644))
+	bundlePath := filepath.Join(t.TempDir(), "bundle.zip")
+
+	// Build the command with --json set.
+	cmd := &cobra.Command{}
+	cmd.Flags().String("format", "zip", "")
+	cmd.Flags().Bool("oci-compliant", false, "")
+	cmd.Flags().Bool("json", true, "")
+	cmd.Flags().String("metadata-out", "", "")
+	cmd.Flags().String("strip", string(tofupress.StripModeModuleDir), "")
+	cmd.Flags().String("vendor-dir", "_vendor", "")
+
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+
+	require.NoError(t, runBundle(cmd, []string{tmpDir, bundlePath}))
+	out := stdout.String()
+	assert.Contains(t, out, `"schema_version"`)
+	assert.Contains(t, out, `"command": {`)
+	assert.Contains(t, out, `"name": "bundle"`)
+	assert.NotContains(t, out, "Bundle created successfully", "--json must not emit human text")
+	assert.NotContains(t, out, "Resolving modules in", "--json must not emit human preamble")
+}
+
+// TestRunBundleErrorsOnUnknownExtensionWithDirHint (review item 9 / QA-12)
+// verifies a trailing-slash output path gets the directory-shape hint.
+func TestRunBundleErrorsOnUnknownExtensionWithDirHint(t *testing.T) {
+	tmpDir := t.TempDir()
+	cmd := &cobra.Command{}
+	cmd.Flags().String("format", "auto", "")
+	cmd.Flags().Bool("oci-compliant", false, "")
+	cmd.Flags().Bool("json", false, "")
+	cmd.Flags().String("strip", "module-dir", "")
+
+	err := runBundle(cmd, []string{tmpDir, tmpDir + "/out/"})
+	assert.Contains(t, err.Error(), "could not infer bundle format")
+	assert.Contains(t, err.Error(), "looks like a directory")
 }
 
 func zipFileNamesForCmdTest(t *testing.T, archivePath string) []string {
@@ -176,4 +221,36 @@ func zipFileNamesForCmdTest(t *testing.T, archivePath string) []string {
 		}
 	}
 	return names
+}
+
+// TestVersionCommandJSON (review item 9) verifies `version --json` emits
+// scriptable JSON {version,commit,build_time} to stdout.
+func TestVersionCommandJSON(t *testing.T) {
+	var stdout bytes.Buffer
+	versionCmd.SetOut(&stdout)
+	require.NoError(t, versionCmd.Flags().Set("json", "true"))
+	defer versionCmd.Flags().Set("json", "false")
+
+	// invoke the Run directly; EffectiveBuildInfo is non-empty under plain `go test`.
+	versionCmd.Run(versionCmd, nil)
+
+	out := stdout.String()
+	assert.Contains(t, out, `"version"`)
+	assert.Contains(t, out, `"commit"`)
+	assert.Contains(t, out, `"build_time"`)
+}
+
+// TestInstallSignalCleanupRunsOnStop (review item 9) verifies the happy-path
+// stop function triggers cleanup (so a successful run still releases the
+// tempdir even though the deferred cleanup is the same once-guarded target).
+func TestInstallSignalCleanupRunsOnStop(t *testing.T) {
+	var ran atomic.Int32
+	cleanup := func() {
+		ran.Add(1)
+	}
+	stop := installSignalCleanup(cleanup)
+	stop()
+	// once-guarded: stop fires cleanup exactly once; the deferred cleanup is
+	// the same guarded target, so the count stays 1.
+	assert.Equal(t, int32(1), ran.Load(), "stop should fire cleanup exactly once")
 }

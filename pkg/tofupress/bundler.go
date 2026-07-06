@@ -998,10 +998,20 @@ func (b *Bundler) validateVendorDir(tree *ResolvedTree) error {
 		return nil // no remote packages to vendor, vendor dir skip won't trigger
 	}
 
-	// Build set of known package directory base names
+	// Build set of known package top-level vendor entries. With namespaced
+	// vendor paths (review item 6: _vendor/namespace/name/...), the top-level
+	// entry is the namespace dir, not the package dir — so compute the first
+	// path component of each package's vendor-relative path.
 	packageBases := make(map[string]bool, len(tree.Packages))
 	for _, pkg := range tree.Packages {
-		packageBases[filepath.Base(pkg.LocalDir)] = true
+		rel := strings.TrimPrefix(pkg.LocalDir, filepath.Join(tree.Root.InstallDir, b.VendorDir)+string(filepath.Separator))
+		rel = filepath.ToSlash(rel)
+		if first, _, found := strings.Cut(rel, "/"); found && first != "" {
+			packageBases[first] = true
+		} else {
+			// Fallback for flat vendor paths (pkg-<sha>).
+			packageBases[filepath.Base(pkg.LocalDir)] = true
+		}
 	}
 
 	// Check for non-package content that would be lost

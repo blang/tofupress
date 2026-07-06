@@ -7,8 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
+	pathpkg "path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -58,6 +61,82 @@ func SourcetreeIDFromHash(hash string) (string, error) {
 		return "", fmt.Errorf("invalid package hash %q: %w", hash, err)
 	}
 	return SourcetreeIDPrefix + hash, nil
+}
+
+// namespacedPackageID derives a human-readable, addressable vendor directory
+// name from a package address, falling back to the content-addressed pkg-<sha>
+// when the address has no derivable namespace (review item 6). Consumers can
+// then reference sub-modules by name (e.g. source =
+// "./_vendor/terraform-aws-modules/vpc//modules/sub") instead of an opaque hash.
+//
+// Derivation rules:
+//   - git::https://host/namespace/name.git?ref=... -> namespace/name
+//   - registry namespace/name/provider -> namespace/name
+//   - everything else (git::file://, oci://, s3://, gcs://, http archives,
+//     local paths) -> pkg-<sha> (the content-addressed fallback, preserving
+//     the pre-item-6 layout so existing dedup tests stay green).
+func namespacedPackageID(packageAddr, contentHash string) string {
+	if ns := deriveGitNamespace(packageAddr); ns != "" {
+		return ns
+	}
+	if ns := deriveRegistryNamespace(packageAddr); ns != "" {
+		return ns
+	}
+	// Fallback: keep the content-addressed pkg-<sha> so dedup semantics and
+	// existing tests are unchanged for sources without a natural namespace.
+	return SourcetreeIDPrefix + contentHash
+}
+
+// deriveGitNamespace extracts <namespace>/<name> from a git::https:// URL.
+// Returns "" for non-https git sources (file://, ssh://) since those lack a
+// globally addressable namespace.
+func deriveGitNamespace(addr string) string {
+	const gitPrefix = "git::"
+	if !strings.HasPrefix(addr, gitPrefix) {
+		return ""
+	}
+	rest := strings.TrimPrefix(addr, gitPrefix)
+	u, err := url.Parse(rest)
+	if err != nil {
+		return ""
+	}
+	// Only https URLs have a host-based namespace; ssh/file/git protocol don't.
+	if u.Scheme != "https" {
+		return ""
+	}
+	p := strings.TrimSuffix(u.Path, ".git")
+	p = strings.TrimPrefix(p, "/")
+	segs := strings.Split(p, "/")
+	if len(segs) < 2 {
+		return ""
+	}
+	// Take the last two segments: namespace/name.
+	ns := strings.Join(segs[len(segs)-2:], "/")
+	ns = pathpkg.Clean(ns)
+	// Sanitize: the vendor path must be filesystem-safe.
+	ns = strings.ReplaceAll(ns, " ", "-")
+	return ns
+}
+
+// deriveRegistryNamespace extracts <namespace>/<name> from a Terraform registry
+// address of the form namespace/name/provider. Returns "" for non-registry
+// sources.
+func deriveRegistryNamespace(addr string) string {
+	// Registry addresses are 3-part: namespace/name/provider. They do not
+	// contain :: or :// (those indicate a typed source).
+	if strings.Contains(addr, "://") || strings.Contains(addr, "::") {
+		return ""
+	}
+	segs := strings.Split(addr, "/")
+	if len(segs) != 3 {
+		return ""
+	}
+	if slices.Contains(segs, "") {
+		return ""
+	}
+	// namespace/name (drop the provider segment to keep the path short; the
+	// provider is implied by the content).
+	return pathpkg.Clean(segs[0] + "/" + segs[1])
 }
 
 // SnapshotDirectoryWithStrip computes the deterministic identity of files that will be visible
@@ -146,6 +225,12 @@ func BuildSourcetreeIdentityPlan(ctx context.Context, tree *ResolvedTree, stripP
 	}
 	sort.Strings(oldIDs)
 
+	// seenNamespaced tracks namespaced final IDs we've already assigned, so two
+	// different packages that derive the same <namespace>/<name> but have
+	// different content get a short content-hash suffix to avoid a directory
+	// collision (review item 6).
+	seenNamespaced := make(map[string]bool)
+
 	for _, oldID := range oldIDs {
 		pkg := tree.Packages[oldID]
 		if pkg == nil || pkg.LocalDir == "" {
@@ -155,10 +240,22 @@ func BuildSourcetreeIdentityPlan(ctx context.Context, tree *ResolvedTree, stripP
 		if err != nil {
 			return nil, fmt.Errorf("failed to snapshot package %s: %w", pkg.PackageAddr, err)
 		}
-		finalID, err := SourcetreeIDFromHash(snapshot.Hash)
+		// The dedup key is content-addressed so identical content always collapses
+		// to one directory (review item 5 / dedup contract). The visible final ID is
+		// a human-readable namespaced path derived from the package address (review
+		// item 6); it falls back to the content-addressed pkg-<sha> for sources with
+		// no derivable namespace (local git, OCI, S3, HTTP archives).
+		dedupKey, err := SourcetreeIDFromHash(snapshot.Hash)
 		if err != nil {
 			return nil, err
 		}
+		finalID := namespacedPackageID(pkg.PackageAddr, snapshot.Hash)
+		if seenNamespaced[finalID] {
+			// Same <namespace>/<name> but different content (would be a different
+			// dedup key) — disambiguate with a short content-hash suffix.
+			finalID = finalID + "-" + snapshot.Hash[:8]
+		}
+		seenNamespaced[finalID] = true
 		identity := &PackageIdentity{
 			OldID:                oldID,
 			FinalID:              finalID,
@@ -174,13 +271,15 @@ func BuildSourcetreeIdentityPlan(ctx context.Context, tree *ResolvedTree, stripP
 		}
 		plan.Packages[oldID] = identity
 
-		canonical, exists := plan.ByFinalID[finalID]
+		// Dedup is keyed by the content-addressed dedup key, NOT the visible name.
+		canonical, exists := plan.ByFinalID[dedupKey]
 		if !exists {
-			plan.ByFinalID[finalID] = identity
+			plan.ByFinalID[dedupKey] = identity
 			continue
 		}
 		identity.CanonicalPackageAddr = canonical.CanonicalPackageAddr
 		identity.FinalLocalDir = canonical.FinalLocalDir
+		identity.FinalID = canonical.FinalID
 		identity.Deduplicated = true
 		canonical.Deduplicated = true
 		canonical.PackageAddrs = appendUniqueStrings(canonical.PackageAddrs, identity.PackageAddrs...)

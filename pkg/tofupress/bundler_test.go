@@ -1071,13 +1071,15 @@ module "pkg_two" {
 	names := zipFileNames(t, archivePath)
 	t.Logf("Archive contents: %v", names)
 
-	// Count how many unique package directories exist under the vendor dir
+	// Count how many unique package directories exist under the vendor dir.
+	// Namespaced vendor paths (review item 6) are multi-level:
+	// _vendor/example/pkg-one/... so we take the full directory portion.
 	packageDirs := make(map[string]bool)
 	for _, name := range names {
 		if after, ok := strings.CutPrefix(name, defaultVendorDir+"/"); ok {
-			// Extract the package ID (first path component after the vendor dir)
-			if part, _, found := strings.Cut(after, "/"); found && part != "" {
-				packageDirs[part] = true
+			dir := filepath.Dir(filepath.ToSlash(after)) // e.g. "example/pkg-one" or "pkg-abc123"
+			if dir != "" && dir != "." {
+				packageDirs[dir] = true
 			}
 		}
 	}

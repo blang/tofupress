@@ -276,3 +276,28 @@ module "b" { source = "./modules/old-b" }
 	_, err = PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err, "final strip plan must not crash reading a renamed-away package subdir")
 }
+
+// TestNamespacedPackageID (review item 6) verifies git-https and registry
+// sources get human-readable namespaced paths, and everything else falls
+// back to the content-addressed pkg-<sha>.
+func TestNamespacedPackageID(t *testing.T) {
+	hash := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	// git-https derives namespace/name from the URL path.
+	assert.Equal(t, "example/pkg-one",
+		namespacedPackageID("git::https://github.com/example/pkg-one.git?ref=v1.0.0", hash))
+	assert.Equal(t, "terraform-aws-modules/vpc",
+		namespacedPackageID("git::https://github.com/terraform-aws-modules/vpc.git?ref=v5.21.0", hash))
+
+	// Registry derives namespace/name (drops provider).
+	assert.Equal(t, "terraform-aws-modules/consul",
+		namespacedPackageID("terraform-aws-modules/consul/aws", hash))
+
+	// Fallback: file/oci/s3 keep the content-addressed pkg-<sha>.
+	assert.Equal(t, "pkg-"+hash,
+		namespacedPackageID("git::file:///tmp/shared-pkg", hash))
+	assert.Equal(t, "pkg-"+hash,
+		namespacedPackageID("oci://registry.example.com/repo?tag=v1", hash))
+	assert.Equal(t, "pkg-"+hash,
+		namespacedPackageID("s3::https://bucket/module.zip", hash))
+}

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -22,10 +23,10 @@ var resolveCmd = &cobra.Command{
 func init() {
 	resolveCmd.Flags().Bool("json", false, "Output in JSON format")
 	resolveCmd.Flags().String("vendor-dir", "_vendor", "Vendored modules directory name (remote dependencies are rooted here during resolution)")
-	resolveCmd.Flags().Bool("strict-oci", true, "Strict OCI spec enforcement: reject artifacts with empty/non-matching artifactType (review item 10; --strict-oci=false = lenient with warning)")
+	resolveCmd.Flags().String("out", "", "Write the resolution as JSON to this path (for CI inspection/archival; review item 8). Note: bundle --from-resolution is not yet supported -- it requires the content cache, which lands in a follow-up.")
 }
 
-//nolint:gocognit // JSON and text output branching is straightforward
+//nolint:gocognit,gocyclo // JSON + plan-file branching is straightforward CLI wiring (item 8 pushed gocyclo to 16)
 func runResolve(cmd *cobra.Command, args []string) error {
 	dir := args[0]
 	stdout := cmd.OutOrStdout()
@@ -72,6 +73,25 @@ func runResolve(cmd *cobra.Command, args []string) error {
 	tfFiles, err := tofupress.FindTerraformFiles(workDir)
 	if err == nil && len(tfFiles) == 0 {
 		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: root module contains no .tf or .tofu files\n") //nolint:errcheck // stderr writes are best-effort
+	}
+
+	// --out: write the resolution JSON to a file for CI inspection/archival
+	// (review item 8 minimal landing). The plan file is informational; a future
+	// content-addressed cache will enable bundle --from-resolution to consume it.
+	outPath, _ := cmd.Flags().GetString("out")
+	if outPath != "" {
+		f, ferr := os.Create(outPath) //nolint:gosec // path is provided by user
+		if ferr != nil {
+			return fmt.Errorf("failed to create plan file %s: %w", outPath, ferr)
+		}
+		if err := outputJSON(f, tree); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("failed to write plan file %s: %w", outPath, err)
+		}
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("failed to close plan file %s: %w", outPath, err)
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(), "Resolution plan written to %s\n", outPath) //nolint:errcheck // stderr best-effort
 	}
 
 	// Check if JSON output requested

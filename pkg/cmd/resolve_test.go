@@ -3,6 +3,8 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -229,4 +231,26 @@ func resolveTreeWithRemoteModule(t *testing.T) *tofupress.ResolvedTree {
 		AllModules: []*tofupress.ModuleNode{root, remote},
 		Packages:   make(map[string]*tofupress.DownloadedPackage),
 	}
+}
+
+// TestResolveOutPlanFile (review item 8) verifies resolve --out=plan.json
+// writes a valid JSON resolution to the file (for CI inspection/archival).
+// The plan-file-alone landing; bundle --from-resolution lands with the cache.
+func TestResolveOutPlanFile(t *testing.T) {
+	tree := resolveTreeWithRemoteModule(t)
+	tmp := t.TempDir()
+	planPath := filepath.Join(tmp, "plan.json")
+
+	f, err := os.Create(planPath) //nolint:gosec // test path
+	require.NoError(t, err)
+	require.NoError(t, outputJSON(f, tree))
+	require.NoError(t, f.Close())
+
+	data, err := os.ReadFile(planPath) //nolint:gosec // G304: test path from t.TempDir
+	require.NoError(t, err)
+	assert.NotEmpty(t, data)
+	// Must be valid JSON an be parseable as the resolution shape.
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(data, &parsed))
+	assert.Contains(t, parsed, "modules")
 }

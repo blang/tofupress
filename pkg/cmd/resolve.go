@@ -22,6 +22,7 @@ var resolveCmd = &cobra.Command{
 func init() {
 	resolveCmd.Flags().Bool("json", false, "Output in JSON format")
 	resolveCmd.Flags().String("vendor-dir", "_vendor", "Vendored modules directory name (remote dependencies are rooted here during resolution)")
+	resolveCmd.Flags().Bool("strict-oci", true, "Strict OCI spec enforcement: reject artifacts with empty/non-matching artifactType (review item 10; --strict-oci=false = lenient with warning)")
 }
 
 //nolint:gocognit // JSON and text output branching is straightforward
@@ -38,8 +39,9 @@ func runResolve(cmd *cobra.Command, args []string) error {
 	stopSig := installSignalCleanup(cleanup)
 	defer stopSig()
 
-	// Resolve modules in temp directory
-	resolver := tofupress.NewResolver()
+	strictOCI, _ := cmd.Flags().GetBool("strict-oci")
+	fetcher := tofupress.NewFetcher(tofupress.WithStrictOCI(strictOCI))
+	resolver := tofupress.NewResolver(tofupress.WithFetcher(fetcher))
 	resolver.PackageRoot = packageRoot // Set package boundary for local path enforcement
 	resolver.RootDir = workDir         // Set root dir for user-friendly error message paths
 	vendorDir, _ := cmd.Flags().GetString("vendor-dir")

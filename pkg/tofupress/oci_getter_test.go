@@ -226,3 +226,47 @@ func TestFindZipLayer(t *testing.T) {
 		})
 	}
 }
+
+// TestEnforceArtifactType (review item 10) verifies strict mode (default)
+// rejects an artifact with empty or non-matching artifactType, and lenient
+// mode accepts both with nil error (the warning goes to stderr).
+func TestEnforceArtifactType(t *testing.T) {
+	const ref = "registry.example.com/repo:latest"
+
+	// Matching artifact type is accepted in both modes.
+	assert.NoError(t, enforceArtifactType(true, ref, modulepkgArtifactType))
+	assert.NoError(t, enforceArtifactType(false, ref, modulepkgArtifactType))
+
+	// Strict rejects empty artifactType (the spec gap the review flags).
+	err := enforceArtifactType(true, ref, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), modulepkgArtifactType)
+	assert.Contains(t, err.Error(), `artifactType=""`, "strict mode must name the empty artifactType in the error")
+
+	// Strict rejects a non-matching artifact type.
+	err = enforceArtifactType(true, ref, "application/vnd.oci.image.manifest.v1+json")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "application/vnd.oci.image.manifest.v1+json")
+
+	// Lenient accepts empty artifactType with no error (warning is on stderr).
+	assert.NoError(t, enforceArtifactType(false, ref, ""))
+
+	// Lenient accepts a non-matching artifact type with no error.
+	assert.NoError(t, enforceArtifactType(false, ref, "application/vnd.other"))
+}
+
+// TestNewFetcherStrictOCIDefault (review item 10) verifies the OCI getter
+// defaults to strict (NewFetcher constructs strictOCI=true) so a plain
+// NewFetcher enforces the spec without the caller opting in.
+func TestNewFetcherStrictOCIDefault(t *testing.T) {
+	f := NewFetcher()
+	og := f.ociGetter
+	require.NotNil(t, og)
+	// Strict default: empty artifactType must error.
+	err := enforceArtifactType(og.strictOCI, "reg/repo:tag", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), modulepkgArtifactType)
+	// WithStrictOCI(false) flips to lenient.
+	f2 := NewFetcher(WithStrictOCI(false))
+	assert.NoError(t, enforceArtifactType(f2.ociGetter.strictOCI, "reg/repo:tag", ""))
+}

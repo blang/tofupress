@@ -36,7 +36,13 @@ var zipLayerMediaTypes = []string{"application/zip", "archive/zip"}
 type OCIGetter struct {
 	client       *getter.Client    // set by SetClient; carries the caller's context (F8)
 	roundTripper http.RoundTripper // optional; injected by NewFetcher(WithRoundTripper(...))
+	strictOCI    bool              // review item 10: when true (default), reject empty artifactType
 }
+
+// SetStrictOCI configures whether the getter enforces the spec's non-empty
+// artifactType requirement. Called by NewFetcher(WithStrictOCI(...)) from
+// the CLI --strict-oci flag (review item 10).
+func (g *OCIGetter) SetStrictOCI(strict bool) { g.strictOCI = strict }
 
 // Lazy-initialized Docker credentials store (handles auths, credsStore, and credHelpers).
 var (
@@ -95,13 +101,15 @@ func (g *OCIGetter) Get(dst string, u *url.URL) error {
 		return fmt.Errorf("oci: failed to decode manifest: %w", decodeErr)
 	}
 
-	// Enforce the OpenTofu module-package artifactType (F7). A non-module artifact (e.g.
-	// a container image) must be rejected up front so we never feed a non-zip blob to the
-	// zip decompressor. Empty ArtifactType is tolerated for compatibility with registries
-	// that set the type only on the layer; the single-zip-layer rule still applies.
-	if manifest.ArtifactType != "" && manifest.ArtifactType != modulepkgArtifactType {
-		return fmt.Errorf("oci: artifact %s is not an OpenTofu module package (artifactType=%q, want %q)",
-			ref, manifest.ArtifactType, modulepkgArtifactType)
+	// Enforce the OpenTofu module-package artifactType (review item 10 / F7).
+	// The spec requires artifactType == application/vnd.opentofu.modulepkg exactly.
+	// A non-module artifact (e.g. a container image) must be rejected so we never
+	// feed a non-zip blob to the zip decompressor. An EMPTY artifactType is NOT a
+	// module package per spec: strict mode (default) rejects it; lenient mode
+	// (--strict-oci=false) accepts it with a warning, for interop with registries
+	// that set the type only on the layer.
+	if atErr := enforceArtifactType(g.strictOCI, ref.String(), manifest.ArtifactType); atErr != nil {
+		return atErr
 	}
 
 	// Find the single zip layer in the manifest layers (F7: strict — no blind fallback)
@@ -216,6 +224,28 @@ func verifyBlobDigest(computedHex, expectedDigest string) error {
 	}
 	if want := strings.TrimPrefix(expectedDigest, algo); want != computedHex {
 		return fmt.Errorf("blob digest mismatch: downloaded sha256:%s, manifest expects %s", computedHex, expectedDigest)
+	}
+	return nil
+}
+
+// enforceArtifactType validates the manifest's artifactType against the
+// OpenTofu module-package spec (review item 10 / F7). Strict (default) rejects
+// any artifact whose artifactType is not exactly application/vnd.opentofu.modulepkg
+// — including an empty one. Lenient (strict=false) accepts a non-matching
+// artifactType with a stderr warning, for interop with registries that set the
+// type only on the layer. Returns an error only in strict mode.
+func enforceArtifactType(strict bool, ref, artifactType string) error {
+	if artifactType == modulepkgArtifactType {
+		return nil
+	}
+	if strict {
+		return fmt.Errorf("oci: artifact %s is not an OpenTofu module package (artifactType=%q, want %q)",
+			ref, artifactType, modulepkgArtifactType)
+	}
+	if artifactType == "" {
+		fmt.Fprintf(os.Stderr, "warning: oci artifact %s has empty artifactType; accepted in lenient mode (--strict-oci=false); spec requires %q\n", ref, modulepkgArtifactType) //nolint:errcheck,lll // stderr warning
+	} else {
+		fmt.Fprintf(os.Stderr, "warning: oci artifact %s has unexpected artifactType=%q; accepted in lenient mode (--strict-oci=false)\n", ref, artifactType) //nolint:errcheck,lll // stderr warning
 	}
 	return nil
 }

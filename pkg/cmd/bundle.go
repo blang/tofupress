@@ -33,7 +33,9 @@ Example:
 func init() {
 	bundleCmd.Flags().String("format", "auto", "Bundle format: auto, zip, tar.gz, tar.xz (auto detects from output file extension)")
 	bundleCmd.Flags().Bool("oci-compliant", false, "Generate OCI-compliant bundle (no sourcetree metadata, inlined modules)")
+	bundleCmd.Flags().Bool("strict-oci", true, "Strict OCI spec enforcement: reject artifacts with empty/non-matching artifactType (review item 10; --strict-oci=false = lenient with warning)")
 	bundleCmd.Flags().Bool("json", false, "Emit the bundle metadata as JSON to stdout after success (review item 9)")
+	bundleCmd.Flags().String("metadata-out", "", "Write bundle metadata JSON to a separate path")
 	bundleCmd.Flags().String("strip", "module-dir", "Strip mode: none, module-dir (safe default), config-only, or tf-only (alias for config-only)")
 	bundleCmd.Flags().String("vendor-dir", "_vendor", "Vendored modules directory name (remote dependencies are rooted here in the bundle)")
 }
@@ -66,7 +68,11 @@ func runBundle(cmd *cobra.Command, args []string) error {
 	defer stopSig()
 
 	// Resolve modules in temp directory
-	resolver := tofupress.NewResolver()
+	// Build the fetcher with the OCI strictness flag (review item 10) and inject
+	// it via the options-pattern affordance added in item 5's API companion.
+	strictOCI, _ := cmd.Flags().GetBool("strict-oci")
+	fetcher := tofupress.NewFetcher(tofupress.WithStrictOCI(strictOCI))
+	resolver := tofupress.NewResolver(tofupress.WithFetcher(fetcher))
 	resolver.PackageRoot = packageRoot // Set package boundary for local path enforcement
 	resolver.RootDir = workDir         // Set root dir for user-friendly error message paths
 	vendorDir, _ := cmd.Flags().GetString("vendor-dir")

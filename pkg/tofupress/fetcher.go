@@ -38,10 +38,22 @@ func WithDetectors(d []getter.Detector) FetcherOption {
 	return func(f *Fetcher) { f.detectors = d }
 }
 
+// WithStrictOCI toggles the OCI getter's strict-spec enforcement. Strict (the
+// default) rejects an artifact with empty or non-matching artifactType; false
+// accepts a non-matching artifact with a warning (--strict-oci=false, review
+// item 10).
+func WithStrictOCI(strict bool) FetcherOption {
+	return func(f *Fetcher) {
+		if f.ociGetter != nil {
+			f.ociGetter.SetStrictOCI(strict)
+		}
+	}
+}
+
 // NewFetcher creates a new Fetcher with the given options applied on top of the
 // default go-getter getters + the OCI getter.
 func NewFetcher(opts ...FetcherOption) *Fetcher {
-	ociGetter := &OCIGetter{}
+	ociGetter := &OCIGetter{strictOCI: true} // strict by default (review item 10)
 	getters := make(map[string]getter.Getter)
 	maps.Copy(getters, getter.Getters)
 	getters["oci"] = ociGetter

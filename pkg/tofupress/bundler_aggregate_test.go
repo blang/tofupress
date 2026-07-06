@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestBundler_AggregatePressedSubModules(t *testing.T) {
@@ -120,4 +122,71 @@ module "pressed" {
 	if !strings.Contains(string(content), "./../"+defaultVendorDir+"/abc123") {
 		t.Errorf("Pressed module source should be rewritten to point to flattened vendor dir, got: %s", string(content))
 	}
+}
+
+// TestBundler_AggregationPreservesRootInstallDir is the library contract test
+// for review item 5 / F9: a library caller passing a real on-disk tree must
+// get tree.Root.InstallDir back byte-identical after Bundle. Aggregation must
+// operate entirely within the staging dir, never touching the caller's tree.
+func TestBundler_AggregationPreservesRootInstallDir(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Pressed module: has its own _vendor with an inner package.
+	pressedDir := filepath.Join(tmpDir, "pressed")
+	_ = os.MkdirAll(filepath.Join(pressedDir, defaultVendorDir, "abc123"), 0o755)
+	_ = os.WriteFile(filepath.Join(pressedDir, "main.tf"),
+		[]byte(`module "inner" { source = "./`+defaultVendorDir+`/abc123" }`), 0o644)
+	_ = os.WriteFile(filepath.Join(pressedDir, defaultVendorDir, "abc123", "main.tf"),
+		[]byte(`resource "null_resource" "inner" {}`), 0o644)
+
+	// Root references the pressed module as a sibling.
+	rootDir := filepath.Join(tmpDir, "root")
+	_ = os.MkdirAll(rootDir, 0o755)
+	_ = os.WriteFile(filepath.Join(rootDir, "main.tf"),
+		[]byte(`module "pressed" { source = "../pressed" }`), 0o644)
+
+	// Snapshot the entire caller tree (root + pressed sibling) BEFORE bundling.
+	wantSnapshot := snapshotTree(t, tmpDir)
+
+	resolver := NewResolver()
+	tree, err := resolver.Resolve(context.Background(), rootDir)
+	require.NoError(t, err, "Failed to resolve")
+
+	bundler := NewBundler(BundleFormatTarGZ)
+	bundlePath := filepath.Join(t.TempDir(), "out.tar.gz")
+	require.NoError(t, bundler.Bundle(tree, bundlePath))
+
+	// Aggregation must have written nothing into the caller's tree. Re-snapshot
+	// and require byte-identical contents.
+	gotSnapshot := snapshotTree(t, tmpDir)
+	require.Equal(t, wantSnapshot, gotSnapshot,
+		"Bundle must not modify the caller's tree (review item 5 / F9): "+
+			"non-destructive aggregation contract violated")
+}
+
+// snapshotTree walks dir and returns a deterministic hash of its contents
+// (path → file bytes), so two snapshots can be diffed for byte-identical trees.
+func snapshotTree(t *testing.T, dir string) map[string][]byte {
+	t.Helper()
+	out := make(map[string][]byte)
+	walkErr := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			return nil
+		}
+		rel, relErr := filepath.Rel(dir, path)
+		if relErr != nil {
+			return relErr
+		}
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		out[filepath.ToSlash(rel)] = data
+		return nil
+	})
+	require.NoError(t, walkErr, "failed to snapshot tree at %s", dir)
+	return out
 }

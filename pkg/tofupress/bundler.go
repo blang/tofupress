@@ -129,11 +129,6 @@ func (b *Bundler) Bundle(tree *ResolvedTree, outputPath string) error {
 	// Use the tree's vendor dir, falling back to the private default.
 	b.VendorDir = vendorDirName(tree)
 
-	// Aggregate pressed modules before creating the bundle.
-	if err := b.aggregatePressedModules(tree); err != nil {
-		return fmt.Errorf("failed to aggregate pressed modules: %w", err)
-	}
-
 	// Guard against a vendor directory that already contains user content; bundling
 	// would otherwise silently drop that content (or mix it with vendored packages).
 	if err := b.validateVendorDir(tree); err != nil {
@@ -183,6 +178,10 @@ func (b *Bundler) bundleTarGZ(tree *ResolvedTree, outputPath string) (err error)
 		}
 	}()
 
+	if err := b.aggregatePressedModulesInStaging(tree, stagingDir); err != nil {
+		return fmt.Errorf("failed to aggregate pressed modules: %w", err)
+	}
+
 	return b.bundleTarGzFromDir(stagingDir, outputPath)
 }
 
@@ -198,6 +197,10 @@ func (b *Bundler) bundleTarXZ(tree *ResolvedTree, outputPath string) (err error)
 		}
 	}()
 
+	if err := b.aggregatePressedModulesInStaging(tree, stagingDir); err != nil {
+		return fmt.Errorf("failed to aggregate pressed modules: %w", err)
+	}
+
 	return b.bundleTarXzFromDir(stagingDir, outputPath)
 }
 
@@ -212,6 +215,10 @@ func (b *Bundler) bundleZIP(tree *ResolvedTree, outputPath string) (err error) {
 			err = errors.Join(err, rmErr)
 		}
 	}()
+
+	if err := b.aggregatePressedModulesInStaging(tree, stagingDir); err != nil {
+		return fmt.Errorf("failed to aggregate pressed modules: %w", err)
+	}
 
 	return b.bundleZipFromDir(stagingDir, outputPath)
 }
@@ -790,118 +797,132 @@ func stageMonorepoSiblings(tree *ResolvedTree, stagingDir string, stripPlan *Str
 	return nil
 }
 
-// aggregatePressedModules finds local modules that are pressed bundles (have their own vendor dir)
-// and flattens their packages into the root vendor dir.
+// aggregatePressedModulesInStaging flattens pressed local modules' nested
+// vendor directories into the staging root's vendor directory. It operates
+// ENTIRELY within the staging tree (never touching tree.Root.InstallDir or
+// any module's InstallDir on the caller's filesystem), so the library API is
+// non-destructive: a library caller passing a real on-disk tree gets it back
+// byte-identical after Bundle (review item 5 / F9).
 //
-//nolint:gocyclo,gocognit // complex but straightforward aggregation logic
-func (b *Bundler) aggregatePressedModules(tree *ResolvedTree) error {
+// Detection is read-only: pressed modules are identified by stat'ing the
+// original module.InstallDir/<vDir> path. The physical move/rewrite then
+// targets the analogous staged path under stagingDir, so the staged copy is
+// what gets transformed, not the original.
+//
+//nolint:gocyclo,gocognit // complex but straightforward staging-only aggregation
+func (b *Bundler) aggregatePressedModulesInStaging(tree *ResolvedTree, stagingDir string) error {
 	vDir := vendorDirName(tree)
-	rootSourcetree := filepath.Join(tree.Root.InstallDir, vDir)
+	stagingVendorRoot := filepath.Join(stagingDir, vDir)
 
-	// The strip plan was computed before aggregation (bundle.go plans stripping, then later
-	// calls Bundle). Aggregated packages land under the root vendor dir, which the root
-	// PackageStripPlan covers; in module-dir mode that plan keeps only the root's reached
-	// config files, so stagePackages would silently drop the aggregated package. Register a
-	// dedicated IncludeAll plan for each aggregated package so stagePackages copies it whole
-	// (longest-match in PackageForPath makes the package plan win over the root plan).
+	// Aggregated packages land under the staging root vendor dir. Register a
+	// dedicated IncludeAll plan keyed by the staged target path so the archive
+	// writer's strip-plan check keeps each aggregated package whole (longest-
+	// match in PackageForPath makes the package plan win over the root plan).
 	aggregatedPlans := make(map[string]*PackageStripPlan)
 
 	for _, module := range tree.AllModules {
-		// Skip remote modules and the root module itself
-		if !module.IsLocal || module == tree.Root {
+		if !module.IsLocal || module == tree.Root || module.InstallDir == "" {
 			continue
 		}
 
-		// Check if this module has its own vendor dir (it's a pressed module)
-		moduleSourcetree := filepath.Join(module.InstallDir, vDir)
-		if _, err := os.Stat(moduleSourcetree); os.IsNotExist(err) {
+		// Detect pressed modules: read-only stat on the ORIGINAL module path.
+		// Read the directory listing there so we know which pkgIDs to aggregate.
+		origVendorDir := filepath.Join(module.InstallDir, vDir)
+		_, statErr := os.Stat(origVendorDir)
+		if os.IsNotExist(statErr) {
 			continue
+		} else if statErr != nil {
+			return fmt.Errorf("failed to stat pressed module vendor dir %s: %w", origVendorDir, statErr)
 		}
 
-		// This is a pressed module - aggregate its packages
-		entries, err := os.ReadDir(moduleSourcetree)
+		// Compute the module's bundle path (where stageLocalModules/stageMonorepoSiblings
+		// placed it under stagingDir). Same logic as those helpers: under-root modules
+		// keep their package-relative path; outside-root modules use dotted Key slashes.
+		moduleBundlePath := strings.ReplaceAll(module.Key, ".", "/")
+		if rootRel, relErr := filepath.Rel(tree.Root.InstallDir, module.InstallDir); relErr == nil {
+			if cleaned := filepath.Clean(rootRel); !strings.HasPrefix(cleaned, "..") {
+				moduleBundlePath = cleaned
+			}
+		}
+		stagedModulePath := filepath.Join(stagingDir, moduleBundlePath)
+		stagedVendorDir := filepath.Join(stagedModulePath, vDir)
+
+		entries, err := os.ReadDir(origVendorDir)
 		if err != nil {
-			return fmt.Errorf("failed to read pressed module sourcetree: %w", err)
+			return fmt.Errorf("failed to read pressed module vendor dir %s: %w", origVendorDir, err)
 		}
 
 		for _, entry := range entries {
 			if !entry.IsDir() {
 				continue
 			}
-
 			packageID := entry.Name()
-			sourcePkgPath := filepath.Join(moduleSourcetree, packageID)
-			targetPkgPath := filepath.Join(rootSourcetree, packageID)
+			stagedSourcePkgPath := filepath.Join(stagedVendorDir, packageID)
+			stagedTargetPkgPath := filepath.Join(stagingVendorRoot, packageID)
+			origSourcePkgPath := filepath.Join(origVendorDir, packageID)
 
-			// Create root sourcetree if it doesn't exist
-			if err := os.MkdirAll(rootSourcetree, 0o755); err != nil { //nolint:gosec // G301: standard permissions
-				return fmt.Errorf("failed to create root sourcetree: %w", err)
+			// Skip entries that did not make it through staging (e.g. strip plan
+			// excluded them). Nothing to aggregate for that pkgID.
+			if _, err := os.Stat(stagedSourcePkgPath); os.IsNotExist(err) {
+				continue
 			}
 
-			// Copy package to root sourcetree if it doesn't already exist
-			if _, err := os.Stat(targetPkgPath); os.IsNotExist(err) {
-				if err := copyDirOCI(sourcePkgPath, targetPkgPath, nil); err != nil {
-					return fmt.Errorf("failed to copy package %s: %w", packageID, err)
+			if err := os.MkdirAll(stagingVendorRoot, 0o755); err != nil { //nolint:gosec // G301: standard permissions
+				return fmt.Errorf("failed to create staging vendor dir: %w", err)
+			}
+
+			// Aggregate to the staging root vendor dir unless a package with the
+			// same ID already lives there (collected from another pressed module
+			// or from the root's own resolution).
+			if _, err := os.Stat(stagedTargetPkgPath); os.IsNotExist(err) {
+				if err := moveOrCopyDir(stagedSourcePkgPath, stagedTargetPkgPath); err != nil {
+					return fmt.Errorf("failed to aggregate package %s: %w", packageID, err)
 				}
 
-				// Add to tree.Packages
 				tree.Packages[packageID] = &DownloadedPackage{
 					PackageAddr: packageID,
-					LocalDir:    targetPkgPath,
+					LocalDir:    stagedTargetPkgPath,
 				}
-				aggregatedPlans[filepath.Clean(targetPkgPath)] = newPackageStripPlan(targetPkgPath) // IncludeAll below
+				aggregatedPlans[filepath.Clean(stagedTargetPkgPath)] = newPackageStripPlan(stagedTargetPkgPath)
 			}
 
-			// Rewrite source in the pressed module
+			// Rewrite the staged pressed module's .tf source to point at the
+			// aggregated location. Source files inside the original tree are
+			// never modified (non-destructive contract).
 			oldSource := "./" + vDir + "/" + packageID
-			// The new source is relative to the pressed module's *bundled* location, which
-			// mirrors its location within the archive root: a pressed module that lives under
-			// <root>/modules/pressed is archived at "modules/pressed" (the root dir is copied
-			// wholesale so nested locals stay in place), while one outside the root is staged
-			// under its dotted module.Key. Basing the rewrite on module.Key alone was wrong —
-			// it produced dangling ./../_vendor/... references for pressed-in-place modules.
-			moduleBundlePath := strings.ReplaceAll(module.Key, ".", "/")
-			if rootRel, relErr := filepath.Rel(tree.Root.InstallDir, module.InstallDir); relErr == nil {
-				if cleaned := filepath.Clean(rootRel); !strings.HasPrefix(cleaned, "..") {
-					moduleBundlePath = cleaned
-				}
-			}
 			packageBundlePath := filepath.Join(vDir, packageID)
-			relPath, err := filepath.Rel(moduleBundlePath, packageBundlePath)
-			if err != nil {
-				return fmt.Errorf("failed to calculate relative path: %w", err)
+			relPath, relErr := filepath.Rel(moduleBundlePath, packageBundlePath)
+			if relErr != nil {
+				return fmt.Errorf("failed to calculate relative path for %s: %w", packageID, relErr)
 			}
 			newSource := "./" + relPath
 
-			tfFiles, err := FindTerraformFiles(module.InstallDir)
+			stagedTfFiles, err := FindTerraformFiles(stagedModulePath)
 			if err != nil {
-				return fmt.Errorf("failed to find terraform files: %w", err)
+				return fmt.Errorf("failed to find terraform files in staged module %s: %w", module.Key, err)
 			}
-
-			for _, tfFile := range tfFiles {
+			for _, tfFile := range stagedTfFiles {
 				if err := RewriteModuleSourceByOldSource(tfFile, oldSource, newSource); err != nil {
-					// Ignore errors - source might not be in this file
-					continue
+					continue // source might not be in this file
 				}
 			}
 
-			// Update tree.AllModules to reflect the new location
+			// Point the in-memory tree at the staged aggregated location so any
+			// downstream consumer of tree.AllModules sees the archive-visible path.
 			for i, m := range tree.AllModules {
-				if m.InstallDir == sourcePkgPath {
-					tree.AllModules[i].InstallDir = targetPkgPath
+				if m.InstallDir == origSourcePkgPath {
+					tree.AllModules[i].InstallDir = stagedTargetPkgPath
 				}
 			}
 		}
 
-		// Remove the nested sourcetree from the pressed module
-		if err := os.RemoveAll(moduleSourcetree); err != nil {
-			return fmt.Errorf("failed to remove nested sourcetree: %w", err)
+		// Remove the staged nested vendor dir now that its packages are flattened
+		// into the staging root vendor dir. The original caller tree is untouched.
+		if err := os.RemoveAll(stagedVendorDir); err != nil {
+			return fmt.Errorf("failed to remove staged nested vendor dir: %w", err)
 		}
 	}
 
-	// Fold the aggregated packages into the active strip plan so stagePackages keeps them
-	// whole. A nil strip plan (library callers that skip planning) is fine — stagePackages
-	// then copies everything unfiltered.
 	if b.StripPlan != nil {
 		for _, pkgPlan := range aggregatedPlans {
 			pkgPlan.IncludeAll = true
@@ -910,6 +931,19 @@ func (b *Bundler) aggregatePressedModules(tree *ResolvedTree) error {
 	}
 
 	return nil
+}
+
+// moveOrCopyDir relocates srcPath to dstPath. It first attempts an O(1) rename
+// (same filesystem under stagingDir); if that fails it falls back to a copy +
+// remove so cross-directory moves still work.
+func moveOrCopyDir(srcPath, dstPath string) error {
+	if err := os.Rename(srcPath, dstPath); err == nil {
+		return nil
+	}
+	if err := copyDirOCI(srcPath, dstPath, nil); err != nil {
+		return err
+	}
+	return os.RemoveAll(srcPath)
 }
 
 // validateVendorDir checks whether the vendor directory contains any non-package

@@ -50,6 +50,7 @@ type ProgressEvent struct {
 type Resolver struct {
 	Progress    ProgressCallback // 16 bytes (data ptr + type ptr)
 	fetcher     *Fetcher         // 8 bytes (ptr)
+	httpClient  *http.Client     // injected HTTP client for registry API calls (review item 5)
 	PackageRoot string           // 16 bytes (data ptr + length)
 	Concurrency int              // 8 bytes
 	MaxDepth    int              // 0 = unlimited, max depth of module tree
@@ -58,12 +59,70 @@ type Resolver struct {
 	RootDir     string           // Root directory for display path computation (set by CLI)
 }
 
-// NewResolver creates a new Resolver with default configuration.
-func NewResolver() *Resolver {
-	return &Resolver{
+// ResolverOption configures a Resolver at construction time (review item 5 /
+// ArchAudit R4). The configuration is also settable via the exported fields for
+// backwards compatibility; the options are the preferred, freeze-safe entry point.
+type ResolverOption func(*Resolver)
+
+// WithFetcher injects a custom Fetcher (e.g. a test double or one configured
+// with a custom RoundTripper / getter map).
+func WithFetcher(f *Fetcher) ResolverOption {
+	return func(r *Resolver) { r.fetcher = f }
+}
+
+// WithHTTPClient injects the HTTP client used for registry API queries.
+func WithHTTPClient(c *http.Client) ResolverOption {
+	return func(r *Resolver) { r.httpClient = c }
+}
+
+// WithConcurrency sets the parallel download worker count.
+func WithConcurrency(n int) ResolverOption { return func(r *Resolver) { r.Concurrency = n } }
+
+// WithMaxDepth caps the module tree depth (0 = unlimited).
+func WithMaxDepth(n int) ResolverOption { return func(r *Resolver) { r.MaxDepth = n } }
+
+// WithMaxModules caps the total module count (0 = unlimited).
+func WithMaxModules(n int) ResolverOption { return func(r *Resolver) { r.MaxModules = n } }
+
+// WithResolverVendorDir sets the vendored modules directory name on the Resolver.
+func WithResolverVendorDir(d string) ResolverOption { return func(r *Resolver) { r.VendorDir = d } }
+
+// WithPackageRoot sets the package boundary for local-path enforcement.
+func WithPackageRoot(p string) ResolverOption { return func(r *Resolver) { r.PackageRoot = p } }
+
+// WithRootDir sets the root directory for display-path computation.
+func WithRootDir(d string) ResolverOption { return func(r *Resolver) { r.RootDir = d } }
+
+// WithProgress sets the resolution progress callback.
+func WithProgress(p ProgressCallback) ResolverOption { return func(r *Resolver) { r.Progress = p } }
+
+// NewResolver creates a new Resolver with default configuration, applying the
+// given options on top of the defaults.
+func NewResolver(opts ...ResolverOption) *Resolver {
+	r := &Resolver{
 		fetcher:     NewFetcher(),
 		Concurrency: 4,
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
+}
+
+// registryClient returns the HTTP client to use for registry API queries: the
+// injected client when configured, otherwise nil and doRegistryQuery builds a
+// default 30s-timeout client. When the fetcher carries a custom RoundTripper
+// and no explicit client was set, mirror it so registry traffic is interceptable.
+func (r *Resolver) registryClient() *http.Client {
+	if r.httpClient != nil {
+		return r.httpClient
+	}
+	if r.fetcher != nil {
+		if rt := r.fetcher.RoundTripper(); rt != nil {
+			return &http.Client{Timeout: 30 * time.Second, Transport: rt}
+		}
+	}
+	return nil
 }
 
 // report safely calls the progress callback if configured.
@@ -388,7 +447,7 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 						child.IsRemote = true
 
 						// Query the registry API to get the download URL
-						registryURL, err := queryRegistryAPI(ctx, source.RegistryNamespace, source.RegistryName, source.RegistryProvider, mod.Version)
+						registryURL, err := queryRegistryAPI(ctx, r.registryClient(), source.RegistryNamespace, source.RegistryName, source.RegistryProvider, mod.Version)
 						if err != nil {
 							return nil, fmt.Errorf("failed to resolve registry module %s: %w", mod.Name, err)
 						}
@@ -651,7 +710,9 @@ var testRegistryBaseURL string
 // It retries transient errors (5xx status codes, network failures) with exponential backoff.
 // testRegistryBaseURL takes precedence (set by in-process tests); the TOFUPRESS_REGISTRY_BASE_URL
 // env var allows driving the CLI binary at a local httptest stub without touching the network.
-func queryRegistryAPI(ctx context.Context, namespace, name, provider, version string) (string, error) {
+// The client parameter may be nil, in which case a default 30s-timeout client is used; the
+// Resolver injects its configured client here (review item 5).
+func queryRegistryAPI(ctx context.Context, client *http.Client, namespace, name, provider, version string) (string, error) {
 	baseURL := testRegistryBaseURL
 	if baseURL == "" {
 		if env := os.Getenv("TOFUPRESS_REGISTRY_BASE_URL"); env != "" {
@@ -682,7 +743,7 @@ func queryRegistryAPI(ctx context.Context, namespace, name, provider, version st
 			}
 		}
 
-		result, err := doRegistryQuery(ctx, apiURL)
+		result, err := doRegistryQuery(ctx, client, apiURL)
 		if err == nil {
 			return result, nil
 		}
@@ -699,15 +760,17 @@ func queryRegistryAPI(ctx context.Context, namespace, name, provider, version st
 }
 
 // doRegistryQuery executes a single HTTP query to the registry API.
-func doRegistryQuery(ctx context.Context, apiURL string) (string, error) {
+func doRegistryQuery(ctx context.Context, client *http.Client, apiURL string) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, http.NoBody) //nolint:gosec // G704: apiURL is built from registry-namespace/name/provider path-escaped inputs, not user-controlled freeform URL
 	if err != nil {
 		return "", fmt.Errorf("failed to create registry API request: %w", err)
 	}
 	req.Header.Set("User-Agent", "tofupress/dev")
 
-	client := &http.Client{
-		Timeout: 30 * time.Second,
+	if client == nil {
+		client = &http.Client{
+			Timeout: 30 * time.Second,
+		}
 	}
 
 	resp, err := client.Do(req) //nolint:gosec // G704: apiURL is built from trusted registry API inputs, not user-controlled freeform URL

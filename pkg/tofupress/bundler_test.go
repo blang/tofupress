@@ -50,7 +50,7 @@ module "local" {
 	// Bundle
 	bundler := NewBundler(BundleFormatTarGZ)
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
-	err = bundler.Bundle(tree, archivePath)
+	err = bundler.Bundle(context.Background(), tree, archivePath)
 	require.NoError(t, err)
 
 	// Verify archive exists
@@ -93,7 +93,7 @@ module "vpc" {
 	// Bundle
 	bundler := NewBundler(BundleFormatTarGZ)
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
-	err = bundler.Bundle(tree, archivePath)
+	err = bundler.Bundle(context.Background(), tree, archivePath)
 	require.NoError(t, err)
 
 	// Verify archive exists
@@ -153,7 +153,7 @@ echo "test"`)
 	// Bundle
 	bundler := NewBundler(BundleFormatTarGZ)
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
-	err := bundler.Bundle(tree, archivePath)
+	err := bundler.Bundle(context.Background(), tree, archivePath)
 	require.NoError(t, err)
 
 	// Extract and verify permissions
@@ -191,7 +191,7 @@ func TestBundler_BundleEmptyModule(t *testing.T) {
 	// Bundle
 	bundler := NewBundler(BundleFormatTarGZ)
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
-	err := bundler.Bundle(tree, archivePath)
+	err := bundler.Bundle(context.Background(), tree, archivePath)
 	require.NoError(t, err)
 
 	// Verify archive exists
@@ -203,7 +203,7 @@ func TestBundler_BundleInvalidTree(t *testing.T) {
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
 
 	// Bundle with nil tree
-	err := bundler.Bundle(nil, archivePath)
+	err := bundler.Bundle(context.Background(), nil, archivePath)
 	assert.Error(t, err)
 }
 
@@ -229,7 +229,7 @@ func TestBundler_BundleToInvalidPath(t *testing.T) {
 	bundler := NewBundler(BundleFormatTarGZ)
 
 	// Try to bundle to a non-existent directory
-	err := bundler.Bundle(tree, "/nonexistent/path/bundle.tar.gz")
+	err := bundler.Bundle(context.Background(), tree, "/nonexistent/path/bundle.tar.gz")
 	assert.Error(t, err)
 }
 
@@ -257,18 +257,18 @@ module "b" { source = "./modules/old-b" }
 	}
 	modA.Parent = tree.Root
 	modB.Parent = tree.Root
-	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
-	identityPlan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	identityPlan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
 	require.NoError(t, err)
-	require.NoError(t, ApplySourcetreeIdentityPlan(tree, identityPlan))
-	stripPlan, err = PlanStripping(tree, StripModeModuleDir)
+	require.NoError(t, ApplySourcetreeIdentityPlan(context.Background(), tree, identityPlan))
+	stripPlan, err = PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
 
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
 	bundler := NewBundler(BundleFormatZIP)
 	bundler.StripPlan = stripPlan
-	require.NoError(t, bundler.Bundle(tree, archivePath))
+	require.NoError(t, bundler.Bundle(context.Background(), tree, archivePath))
 
 	names := zipFileNames(t, archivePath)
 	var finalID string
@@ -312,7 +312,7 @@ module "remote" {
 	// Bundle
 	bundler := NewBundler(BundleFormatTarGZ)
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
-	err = bundler.Bundle(tree, archivePath)
+	err = bundler.Bundle(context.Background(), tree, archivePath)
 	require.NoError(t, err)
 
 	// Extract and verify
@@ -355,7 +355,7 @@ module "local" {
 	// Bundle as ZIP
 	bundler := NewBundler(BundleFormatZIP)
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
-	err = bundler.Bundle(tree, archivePath)
+	err = bundler.Bundle(context.Background(), tree, archivePath)
 	require.NoError(t, err)
 
 	// Verify archive exists
@@ -396,7 +396,7 @@ module "local" {
 	// Bundle as tar.xz
 	bundler := NewBundler(BundleFormatTarXZ)
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.xz")
-	err = bundler.Bundle(tree, archivePath)
+	err = bundler.Bundle(context.Background(), tree, archivePath)
 	require.NoError(t, err)
 
 	// Verify archive exists
@@ -463,7 +463,7 @@ func TestBundler_EmbedsMetadataInZip(t *testing.T) {
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
 	bundler := NewBundler(BundleFormatZIP)
 	bundler.Metadata = metadata
-	require.NoError(t, bundler.Bundle(tree, archivePath))
+	require.NoError(t, bundler.Bundle(context.Background(), tree, archivePath))
 
 	zipReader, err := zip.OpenReader(archivePath)
 	require.NoError(t, err)
@@ -499,7 +499,7 @@ func TestBundler_EmbedsMetadataInTarGz(t *testing.T) {
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
 	bundler := NewBundler(BundleFormatTarGZ)
 	bundler.Metadata = metadata
-	require.NoError(t, bundler.Bundle(tree, archivePath))
+	require.NoError(t, bundler.Bundle(context.Background(), tree, archivePath))
 
 	extractDir := t.TempDir()
 	extractTarGz(t, archivePath, extractDir)
@@ -648,13 +648,13 @@ func TestBundlerZIPAppliesModuleDirStripPlanWithoutMutatingSource(t *testing.T) 
 
 	tree := &ResolvedTree{Root: &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}, Packages: map[string]*DownloadedPackage{}}
 	tree.AllModules = []*ModuleNode{tree.Root}
-	plan, err := PlanStripping(tree, StripModeConfigOnly)
+	plan, err := PlanStripping(context.Background(), tree, StripModeConfigOnly)
 	require.NoError(t, err)
 
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
 	bundler := NewBundler(BundleFormatZIP)
 	bundler.StripPlan = plan
-	require.NoError(t, bundler.Bundle(tree, archivePath))
+	require.NoError(t, bundler.Bundle(context.Background(), tree, archivePath))
 
 	assert.Contains(t, zipFileNames(t, archivePath), "main.tf")
 	assert.NotContains(t, zipFileNames(t, archivePath), "README.md")
@@ -671,13 +671,13 @@ func TestBundlerTarGZAppliesModuleDirStripPlan(t *testing.T) {
 
 	tree := &ResolvedTree{Root: &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}, Packages: map[string]*DownloadedPackage{}}
 	tree.AllModules = []*ModuleNode{tree.Root}
-	plan, err := PlanStripping(tree, StripModeModuleDir)
+	plan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
 
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
 	bundler := NewBundler(BundleFormatTarGZ)
 	bundler.StripPlan = plan
-	require.NoError(t, bundler.Bundle(tree, archivePath))
+	require.NoError(t, bundler.Bundle(context.Background(), tree, archivePath))
 
 	names := tarGzFileNames(t, archivePath)
 	assert.Contains(t, names, "main.tf")
@@ -699,13 +699,13 @@ locals {
 
 	root := &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}
 	tree := &ResolvedTree{Root: root, AllModules: []*ModuleNode{root}, Packages: map[string]*DownloadedPackage{}}
-	plan, err := PlanStripping(tree, StripModeModuleDir)
+	plan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
 
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
 	bundler := NewBundler(BundleFormatZIP)
 	bundler.StripPlan = plan
-	require.NoError(t, bundler.Bundle(tree, archivePath))
+	require.NoError(t, bundler.Bundle(context.Background(), tree, archivePath))
 
 	names := zipFileNames(t, archivePath)
 	assert.Contains(t, names, "main.tf")
@@ -724,13 +724,13 @@ func TestBundlerDefaultModuleDirStrippingDropsIrrelevantPackageFilesWhenReadsAre
 
 	tree := &ResolvedTree{Root: &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}, Packages: map[string]*DownloadedPackage{}}
 	tree.AllModules = []*ModuleNode{tree.Root}
-	plan, err := PlanStripping(tree, StripModeModuleDir)
+	plan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
 
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
 	bundler := NewBundler(BundleFormatZIP)
 	bundler.StripPlan = plan
-	require.NoError(t, bundler.Bundle(tree, archivePath))
+	require.NoError(t, bundler.Bundle(context.Background(), tree, archivePath))
 
 	names := zipFileNames(t, archivePath)
 	assert.Contains(t, names, "main.tf")
@@ -805,21 +805,21 @@ module "shared_c" {
 		"expected at least 4 modules (root + 3 local)")
 
 	// Apply sourcetree identity planning (non-OCI flow)
-	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
-	identityPlan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	identityPlan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
 	require.NoError(t, err)
-	require.NoError(t, ApplySourcetreeIdentityPlan(tree, identityPlan))
+	require.NoError(t, ApplySourcetreeIdentityPlan(context.Background(), tree, identityPlan))
 
 	// Re-plan stripping
-	stripPlan, err = PlanStripping(tree, StripModeModuleDir)
+	stripPlan, err = PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
 
 	// Bundle to ZIP
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
 	bundler := NewBundler(BundleFormatZIP)
 	bundler.StripPlan = stripPlan
-	require.NoError(t, bundler.Bundle(tree, archivePath))
+	require.NoError(t, bundler.Bundle(context.Background(), tree, archivePath))
 
 	// List all files in the archive
 	names := zipFileNames(t, archivePath)
@@ -920,19 +920,19 @@ module "remote_mod" {
 		"expected at least 1 remote package")
 
 	// Apply sourcetree identity planning
-	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
-	identityPlan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	identityPlan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
 	require.NoError(t, err)
-	require.NoError(t, ApplySourcetreeIdentityPlan(tree, identityPlan))
+	require.NoError(t, ApplySourcetreeIdentityPlan(context.Background(), tree, identityPlan))
 
-	stripPlan, err = PlanStripping(tree, StripModeModuleDir)
+	stripPlan, err = PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
 
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
 	bundler := NewBundler(BundleFormatZIP)
 	bundler.StripPlan = stripPlan
-	require.NoError(t, bundler.Bundle(tree, archivePath))
+	require.NoError(t, bundler.Bundle(context.Background(), tree, archivePath))
 
 	names := zipFileNames(t, archivePath)
 	t.Logf("Archive contents (%d entries):", len(names))
@@ -1030,21 +1030,21 @@ module "pkg_two" {
 	}
 
 	// Apply sourcetree identity planning (non-OCI flow)
-	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
-	identityPlan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	identityPlan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
 	require.NoError(t, err)
-	require.NoError(t, ApplySourcetreeIdentityPlan(tree, identityPlan))
+	require.NoError(t, ApplySourcetreeIdentityPlan(context.Background(), tree, identityPlan))
 
 	// Re-plan stripping after identity
-	stripPlan, err = PlanStripping(tree, StripModeModuleDir)
+	stripPlan, err = PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
 
 	// Bundle to ZIP
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
 	bundler := NewBundler(BundleFormatZIP)
 	bundler.StripPlan = stripPlan
-	require.NoError(t, bundler.Bundle(tree, archivePath))
+	require.NoError(t, bundler.Bundle(context.Background(), tree, archivePath))
 
 	// Extract and verify
 	extractDir := t.TempDir()
@@ -1150,7 +1150,7 @@ module "remote" {
 
 	bundler := NewBundler(BundleFormatTarGZ)
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
-	err = bundler.Bundle(tree, archivePath)
+	err = bundler.Bundle(context.Background(), tree, archivePath)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "conflicts with existing content")
 	assert.Contains(t, err.Error(), "local")
@@ -1178,7 +1178,7 @@ module "local" {
 
 	bundler := NewBundler(BundleFormatTarGZ)
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
-	err = bundler.Bundle(tree, archivePath)
+	err = bundler.Bundle(context.Background(), tree, archivePath)
 	require.NoError(t, err) // no remote packages, no conflict
 }
 
@@ -1210,7 +1210,7 @@ module "remote" {
 	bundler := NewBundler(BundleFormatTarGZ)
 	bundler.VendorDir = testCustomVendorDir
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
-	err = bundler.Bundle(tree, archivePath)
+	err = bundler.Bundle(context.Background(), tree, archivePath)
 	require.NoError(t, err) // custom vendor dir doesn't conflict with modules/
 }
 
@@ -1262,7 +1262,7 @@ output "out" { value = "%s-${var.input}" }
 	require.NotEmpty(t, tree.Packages)
 
 	bundler := NewBundler(BundleFormatTarGZ)
-	err = bundler.Bundle(tree, filepath.Join(t.TempDir(), "conflict.tar.gz"))
+	err = bundler.Bundle(context.Background(), tree, filepath.Join(t.TempDir(), "conflict.tar.gz"))
 	require.Error(t, err, "modules vendor dir must detect conflict")
 	assert.Contains(t, err.Error(), "conflicts with existing content")
 
@@ -1306,7 +1306,7 @@ output "out" { value = "%s-${var.input}" }
 	bundler2 := NewBundler(BundleFormatTarGZ)
 	bundler2.VendorDir = testCustomVendorDir
 	archivePath := filepath.Join(t.TempDir(), "resolved.tar.gz")
-	err = bundler2.Bundle(tree2, archivePath)
+	err = bundler2.Bundle(context.Background(), tree2, archivePath)
 	require.NoError(t, err, "custom vendor dir must succeed")
 
 	// Phase 3: Extract and verify complete integrity
@@ -1387,7 +1387,7 @@ module "remote" {
 
 	bundler := NewBundler(BundleFormatTarGZ)
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
-	err = bundler.Bundle(tree, archivePath)
+	err = bundler.Bundle(context.Background(), tree, archivePath)
 	require.NoError(t, err, "no conflict — default vendor dir must work")
 
 	extractDir := t.TempDir()
@@ -1539,17 +1539,17 @@ func TestBundler_SelfReferencingModuleDoesNotDropPackages(t *testing.T) {
 	assert.Same(t, bugMod, bugMod.Children[0], "module should reference itself as child")
 
 	// Apply sourcetree identity planning (same as bundle command)
-	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
 
 	t.Logf("Before identity: %d packages in tree, %d packages in strip plan", len(tree.Packages), len(stripPlan.Packages))
 
-	identityPlan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	identityPlan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
 	require.NoError(t, err)
 
 	t.Logf("Identity plan: %d packages, %d by final ID", len(identityPlan.Packages), len(identityPlan.ByFinalID))
 
-	require.NoError(t, ApplySourcetreeIdentityPlan(tree, identityPlan))
+	require.NoError(t, ApplySourcetreeIdentityPlan(context.Background(), tree, identityPlan))
 
 	// After identity: verify ALL final dirs exist on disk (sanity check)
 	for id, identity := range identityPlan.ByFinalID {
@@ -1564,7 +1564,7 @@ func TestBundler_SelfReferencingModuleDoesNotDropPackages(t *testing.T) {
 	}
 
 	// Re-plan stripping
-	stripPlan, err = PlanStripping(tree, StripModeModuleDir)
+	stripPlan, err = PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
 
 	t.Logf("After identity: %d packages in tree", len(tree.Packages))
@@ -1577,7 +1577,7 @@ func TestBundler_SelfReferencingModuleDoesNotDropPackages(t *testing.T) {
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
 	bundler := NewBundler(BundleFormatZIP)
 	bundler.StripPlan = stripPlan
-	err = bundler.Bundle(tree, archivePath)
+	err = bundler.Bundle(context.Background(), tree, archivePath)
 	require.NoError(t, err, "bundling should complete without errors")
 
 	// Verify ALL packages are in the archive
@@ -1719,13 +1719,13 @@ module "nacl_private" {
 		"account_config.accountindex.accountindex must not self-reference")
 
 	// Run through the full bundle pipeline
-	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
 
-	identityPlan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	identityPlan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
 	require.NoError(t, err)
 
-	require.NoError(t, ApplySourcetreeIdentityPlan(tree, identityPlan))
+	require.NoError(t, ApplySourcetreeIdentityPlan(context.Background(), tree, identityPlan))
 
 	// Verify all package dirs exist after identity
 	for _, pkg := range tree.Packages {
@@ -1734,13 +1734,13 @@ module "nacl_private" {
 	}
 
 	// Rebuild strip plan and bundle
-	stripPlan, err = PlanStripping(tree, StripModeModuleDir)
+	stripPlan, err = PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
 
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
 	bundler := NewBundler(BundleFormatZIP)
 	bundler.StripPlan = stripPlan
-	require.NoError(t, bundler.Bundle(tree, archivePath))
+	require.NoError(t, bundler.Bundle(context.Background(), tree, archivePath))
 
 	// Verify ALL packages are in the archive (no packages dropped due to vendor-dir skip)
 	names := zipFileNames(t, archivePath)
@@ -1829,17 +1829,17 @@ func TestBundler_VendorDirSkippingInternalModulesDir(t *testing.T) {
 	}
 
 	// Apply identity planning (no-op since LocalDir IS the final dir)
-	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
 
-	identityPlan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	identityPlan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
 	require.NoError(t, err)
 
 	// In this case old==final, so materialization is a no-op
 	t.Logf("Identity: %d by final ID", len(identityPlan.ByFinalID))
 
 	// Build a fresh strip plan (after identity)
-	stripPlan, err = PlanStripping(tree, StripModeModuleDir)
+	stripPlan, err = PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
 
 	// Bundle
@@ -1847,7 +1847,7 @@ func TestBundler_VendorDirSkippingInternalModulesDir(t *testing.T) {
 	bundler := NewBundler(BundleFormatZIP)
 	bundler.StripPlan = stripPlan
 	bundler.VendorDir = testLegacyVendorDir
-	require.NoError(t, bundler.Bundle(tree, archivePath))
+	require.NoError(t, bundler.Bundle(context.Background(), tree, archivePath))
 
 	// Verify all entries in the archive
 	names := zipFileNames(t, archivePath)
@@ -1879,7 +1879,7 @@ func TestBundler_TarGzFromDir_Basic(t *testing.T) {
 
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
 	bundler := NewBundler(BundleFormatTarGZ)
-	err := bundler.bundleTarGzFromDir(srcDir, archivePath)
+	err := bundler.bundleTarGzFromDir(context.Background(), srcDir, archivePath)
 	require.NoError(t, err)
 
 	names := tarGzFileNames(t, archivePath)
@@ -1900,7 +1900,7 @@ func TestBundler_TarGzFromDir_SkipsTerraformAndGitDirs(t *testing.T) {
 
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
 	bundler := NewBundler(BundleFormatTarGZ)
-	err := bundler.bundleTarGzFromDir(srcDir, archivePath)
+	err := bundler.bundleTarGzFromDir(context.Background(), srcDir, archivePath)
 	require.NoError(t, err)
 
 	names := tarGzFileNames(t, archivePath)
@@ -1919,7 +1919,7 @@ func TestBundler_TarGzFromDir_EmbedsMetadata(t *testing.T) {
 
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
 	bundler := NewBundler(BundleFormatTarGZ)
-	err := bundler.bundleTarGzFromDir(srcDir, archivePath)
+	err := bundler.bundleTarGzFromDir(context.Background(), srcDir, archivePath)
 	require.NoError(t, err)
 
 	extractDir := t.TempDir()
@@ -1937,7 +1937,7 @@ func TestBundler_TarXzFromDir_Basic(t *testing.T) {
 
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.xz")
 	bundler := NewBundler(BundleFormatTarXZ)
-	err := bundler.bundleTarXzFromDir(srcDir, archivePath)
+	err := bundler.bundleTarXzFromDir(context.Background(), srcDir, archivePath)
 	require.NoError(t, err)
 
 	extractDir := t.TempDir()

@@ -34,7 +34,7 @@ module "vpc" {
 	bundler := NewBundler(BundleFormatZIP)
 	bundler.OCICompliant = true
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
-	err = bundler.Bundle(tree, archivePath)
+	err = bundler.Bundle(context.Background(), tree, archivePath)
 	require.NoError(t, err)
 
 	// Extract and verify OCI compliance
@@ -92,7 +92,7 @@ module "remote" {
 	bundler := NewBundler(BundleFormatZIP)
 	bundler.OCICompliant = true
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
-	err = bundler.Bundle(tree, archivePath)
+	err = bundler.Bundle(context.Background(), tree, archivePath)
 	require.NoError(t, err)
 
 	// Extract and verify
@@ -126,7 +126,7 @@ func TestBundler_BundleOCICompliantOnlyZIP(t *testing.T) {
 	bundler := NewBundler(BundleFormatTarGZ)
 	bundler.OCICompliant = true
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
-	err = bundler.Bundle(tree, archivePath)
+	err = bundler.Bundle(context.Background(), tree, archivePath)
 
 	// Should either error or ignore OCI flag for non-ZIP formats
 	// For now, we'll just ensure it doesn't crash
@@ -140,14 +140,14 @@ func TestBundlerOCICompliantAppliesStripPlan(t *testing.T) {
 
 	tree := &ResolvedTree{Root: &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}, Packages: map[string]*DownloadedPackage{}}
 	tree.AllModules = []*ModuleNode{tree.Root}
-	plan, err := PlanStripping(tree, StripModeConfigOnly)
+	plan, err := PlanStripping(context.Background(), tree, StripModeConfigOnly)
 	require.NoError(t, err)
 
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
 	bundler := NewBundler(BundleFormatZIP)
 	bundler.OCICompliant = true
 	bundler.StripPlan = plan
-	require.NoError(t, bundler.Bundle(tree, archivePath))
+	require.NoError(t, bundler.Bundle(context.Background(), tree, archivePath))
 
 	names := zipFileNames(t, archivePath)
 	assert.Contains(t, names, "main.tf")
@@ -167,7 +167,7 @@ func TestBundlerOCICompliantOmitsSourcetreeLayoutMetadata(t *testing.T) {
 	bundler := NewBundler(BundleFormatZIP)
 	bundler.OCICompliant = true
 	bundler.Metadata = metadata
-	require.NoError(t, bundler.Bundle(tree, archivePath))
+	require.NoError(t, bundler.Bundle(context.Background(), tree, archivePath))
 
 	for _, name := range zipFileNames(t, archivePath) {
 		assert.NotContains(t, name, "sourcetree/")
@@ -191,7 +191,7 @@ func TestBundler_OCICompliantEmbedsMetadataAtRoot(t *testing.T) {
 	bundler := NewBundler(BundleFormatZIP)
 	bundler.OCICompliant = true
 	bundler.Metadata = &ArtifactMetadata{SchemaVersion: MetadataSchemaVersion, CreatedAt: "2026-06-21T12:00:00Z"}
-	require.NoError(t, bundler.Bundle(tree, archivePath))
+	require.NoError(t, bundler.Bundle(context.Background(), tree, archivePath))
 
 	zipReader, err := zip.OpenReader(archivePath)
 	require.NoError(t, err)

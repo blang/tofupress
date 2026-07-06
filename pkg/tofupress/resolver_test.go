@@ -651,7 +651,7 @@ func TestQueryRegistryAPI_Success(t *testing.T) {
 	testRegistryBaseURL = server.URL
 	t.Cleanup(func() { testRegistryBaseURL = origBase })
 
-	result, err := queryRegistryAPI(context.Background(), "hashicorp", "consul", "aws", "1.0.0")
+	result, err := queryRegistryAPI(context.Background(), nil, "hashicorp", "consul", "aws", "1.0.0")
 	require.NoError(t, err)
 	assert.Equal(t, "git::https://github.com/hashicorp/terraform-aws-consul.git?ref=v1.0.0", result)
 }
@@ -673,7 +673,7 @@ func TestQueryRegistryAPI_RetryOnTransient(t *testing.T) {
 	testRegistryBaseURL = server.URL
 	t.Cleanup(func() { testRegistryBaseURL = origBase })
 
-	result, err := queryRegistryAPI(context.Background(), "test", "mod", "aws", "1.0.0")
+	result, err := queryRegistryAPI(context.Background(), nil, "test", "mod", "aws", "1.0.0")
 	require.NoError(t, err)
 	assert.Equal(t, 3, attempts, "expected 3 attempts (2 failures + 1 success)")
 	assert.Contains(t, result, "git::https://")
@@ -689,7 +689,7 @@ func TestQueryRegistryAPI_NonOKStatus(t *testing.T) {
 	testRegistryBaseURL = server.URL
 	t.Cleanup(func() { testRegistryBaseURL = origBase })
 
-	_, err := queryRegistryAPI(context.Background(), "missing", "module", "aws", "")
+	_, err := queryRegistryAPI(context.Background(), nil, "missing", "module", "aws", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "registry API returned status 404")
 	assert.Contains(t, err.Error(), "missing/module/aws")
@@ -706,7 +706,7 @@ func TestQueryRegistryAPI_InvalidJSON(t *testing.T) {
 	testRegistryBaseURL = server.URL
 	t.Cleanup(func() { testRegistryBaseURL = origBase })
 
-	_, err := queryRegistryAPI(context.Background(), "test", "mod", "aws", "")
+	_, err := queryRegistryAPI(context.Background(), nil, "test", "mod", "aws", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to parse registry API response")
 }
@@ -722,7 +722,7 @@ func TestQueryRegistryAPI_MissingSource(t *testing.T) {
 	testRegistryBaseURL = server.URL
 	t.Cleanup(func() { testRegistryBaseURL = origBase })
 
-	_, err := queryRegistryAPI(context.Background(), "test", "mod", "aws", "")
+	_, err := queryRegistryAPI(context.Background(), nil, "test", "mod", "aws", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "did not return a source URL")
 }
@@ -740,7 +740,7 @@ func TestQueryRegistryAPI_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	t.Cleanup(cancel)
 
-	_, err := queryRegistryAPI(ctx, "test", "mod", "aws", "")
+	_, err := queryRegistryAPI(ctx, nil, "test", "mod", "aws", "")
 	require.Error(t, err)
 }
 

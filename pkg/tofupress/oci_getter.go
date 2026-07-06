@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"slices"
@@ -33,7 +34,8 @@ var zipLayerMediaTypes = []string{"application/zip", "archive/zip"}
 // OCIGetter implements go-getter's Getter interface for OCI registries.
 // It supports the oci:// URL scheme for fetching OpenTofu module packages.
 type OCIGetter struct {
-	client *getter.Client // set by SetClient; carries the caller's context (F8)
+	client       *getter.Client    // set by SetClient; carries the caller's context (F8)
+	roundTripper http.RoundTripper // optional; injected by NewFetcher(WithRoundTripper(...))
 }
 
 // Lazy-initialized Docker credentials store (handles auths, credsStore, and credHelpers).
@@ -218,14 +220,20 @@ func verifyBlobDigest(computedHex, expectedDigest string) error {
 	return nil
 }
 
-// authClient creates an authenticated HTTP client.
+// authClient creates an authenticated HTTP client. When a custom RoundTripper
+// was injected (review item 5), it overrides the default auth transport so
+// library callers and tests can intercept OCI registry traffic.
 func (g *OCIGetter) authClient() remote.Client {
-	return &auth.Client{
+	c := &auth.Client{
 		Client:     auth.DefaultClient.Client,
 		Header:     auth.DefaultClient.Header,
 		Cache:      auth.DefaultCache,
 		Credential: g.resolveCredential(),
 	}
+	if g.roundTripper != nil {
+		c.Client = &http.Client{Transport: g.roundTripper}
+	}
+	return c
 }
 
 // resolveCredential returns a credential callback that resolves credentials.

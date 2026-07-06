@@ -2,6 +2,7 @@
 package tofupress
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -51,10 +52,10 @@ func TestBuildSourcetreeIdentityPlanDeduplicatesDifferentSourcesWithSameFinalCon
 			{Key: "root.b", Name: "b", PackageRoot: pkgB, InstallDir: pkgB, Source: ModuleSource{PackageAddr: "git::file:///repo-b"}, IsRemote: true},
 		},
 	}
-	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
 
-	plan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	plan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
 	require.NoError(t, err)
 	require.Len(t, plan.ByFinalID, 1)
 	require.Len(t, plan.DedupGroups, 1)
@@ -82,10 +83,10 @@ func TestBuildSourcetreeIdentityPlanDoesNotDeduplicateDifferentFinalContent(t *t
 			{Key: "root.b", Name: "b", PackageRoot: pkgB, InstallDir: pkgB, Source: ModuleSource{PackageAddr: "git::file:///repo-b"}, IsRemote: true},
 		},
 	}
-	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
 
-	plan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	plan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
 	require.NoError(t, err)
 	assert.Len(t, plan.ByFinalID, 2)
 	assert.Empty(t, plan.DedupGroups)
@@ -102,7 +103,7 @@ func TestSnapshotDirectoryWithStripUsesIncludedFinalContent(t *testing.T) {
 		AllModules: []*ModuleNode{rootModule},
 		Packages:   map[string]*DownloadedPackage{},
 	}
-	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
 
 	snapshot, err := SnapshotDirectoryWithStrip(root, stripPlan)
@@ -138,13 +139,13 @@ module "b" { source = "./modules/old-b" }
 	}
 	modA.Parent = tree.Root
 	modB.Parent = tree.Root
-	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
-	plan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	plan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
 	require.NoError(t, err)
 	require.Len(t, plan.ByFinalID, 1)
 
-	err = ApplySourcetreeIdentityPlan(tree, plan)
+	err = ApplySourcetreeIdentityPlan(context.Background(), tree, plan)
 	require.NoError(t, err)
 
 	var finalID string
@@ -193,15 +194,15 @@ func TestApplySourcetreeIdentityPlan_RewriterHardErrorNotSwallowed(t *testing.T)
 	modA.Parent = tree.Root
 	modB.Parent = tree.Root
 
-	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
-	plan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	plan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
 	require.NoError(t, err)
 	require.Len(t, plan.ByFinalID, 1, "two identical packages must dedup into one final identity")
 
 	// The relocation forces a rewrite of the malformed root main.tf. Before the F8 fix
 	// this error was silently discarded; now it must propagate.
-	err = ApplySourcetreeIdentityPlan(tree, plan)
+	err = ApplySourcetreeIdentityPlan(context.Background(), tree, plan)
 	require.Error(t, err, "rewriter parse error must not be swallowed")
 	assert.Contains(t, err.Error(), "rewrite source for module a")
 }
@@ -245,9 +246,9 @@ module "b" { source = "./modules/old-b" }
 	modA.Parent = tree.Root
 	modB.Parent = tree.Root
 
-	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
-	plan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	plan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
 	require.NoError(t, err)
 	require.NotEmpty(t, plan.ByFinalID, "packages must be relocated")
 
@@ -261,7 +262,7 @@ module "b" { source = "./modules/old-b" }
 	}
 	require.NotEmpty(t, finalPkgDir, "package A must have a final identity dir")
 
-	require.NoError(t, ApplySourcetreeIdentityPlan(tree, plan))
+	require.NoError(t, ApplySourcetreeIdentityPlan(context.Background(), tree, plan))
 
 	// The sub-module's pointers must be remapped into the renamed package directory.
 	assert.Equal(t, filepath.Join(finalPkgDir, "modules", "child"), modChild.InstallDir,
@@ -272,6 +273,6 @@ module "b" { source = "./modules/old-b" }
 
 	// The post-rename strip plan must not crash reading the deleted old package dir.
 	// Before the fix this returned "failed to read directory .../old-a/modules/child".
-	_, err = PlanStripping(tree, StripModeModuleDir)
+	_, err = PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err, "final strip plan must not crash reading a renamed-away package subdir")
 }

@@ -86,20 +86,20 @@ module "remote_mod" {
 	require.NoError(t, err)
 
 	// ── Identity planning ─────────────────────────────────────────────
-	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
-	identityPlan, err := BuildSourcetreeIdentityPlan(tree, stripPlan)
+	identityPlan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
 	require.NoError(t, err)
-	require.NoError(t, ApplySourcetreeIdentityPlan(tree, identityPlan))
+	require.NoError(t, ApplySourcetreeIdentityPlan(context.Background(), tree, identityPlan))
 
-	stripPlan, err = PlanStripping(tree, StripModeModuleDir)
+	stripPlan, err = PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
 
 	// ── Bundle ────────────────────────────────────────────────────────
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
 	bundler := NewBundler(BundleFormatZIP)
 	bundler.StripPlan = stripPlan
-	require.NoError(t, bundler.Bundle(tree, archivePath))
+	require.NoError(t, bundler.Bundle(context.Background(), tree, archivePath))
 
 	// ── Inspect archive ────────────────────────────────────────────────
 	names := zipFileNames(t, archivePath)
@@ -185,13 +185,13 @@ module "child" {
 	tree, err := resolver.Resolve(context.Background(), tmp)
 	require.NoError(t, err)
 
-	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
 
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
 	bundler := NewBundler(BundleFormatZIP)
 	bundler.StripPlan = stripPlan
-	require.NoError(t, bundler.Bundle(tree, archivePath))
+	require.NoError(t, bundler.Bundle(context.Background(), tree, archivePath))
 
 	names := zipFileNames(t, archivePath)
 	t.Logf("Archive: %v", names)

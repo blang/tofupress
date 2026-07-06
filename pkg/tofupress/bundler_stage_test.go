@@ -2,6 +2,7 @@
 package tofupress
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -99,7 +100,7 @@ func TestStageBundle_WithPackages(t *testing.T) {
 		Packages:   map[string]*DownloadedPackage{"pkg-abc123": {PackageAddr: "git::https://example.com/vpc.git", LocalDir: pkgDir}},
 	}
 
-	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
 
 	stagingDir, err := stageBundle(tree, "modules", stripPlan, nil)
@@ -125,7 +126,7 @@ func TestStageBundle_StripPlanApplied(t *testing.T) {
 		AllModules: []*ModuleNode{{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}},
 		Packages:   map[string]*DownloadedPackage{},
 	}
-	plan, err := PlanStripping(tree, StripModeConfigOnly)
+	plan, err := PlanStripping(context.Background(), tree, StripModeConfigOnly)
 	require.NoError(t, err)
 
 	stagingDir, err := stageBundle(tree, "modules", plan, nil)

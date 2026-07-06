@@ -69,7 +69,7 @@ module "pressed" {
 	// Bundle with tar.gz format
 	outputPath := filepath.Join(tmpDir, "output.tar.gz")
 	bundler := NewBundler(BundleFormatTarGZ)
-	bundleErr := bundler.Bundle(tree, outputPath)
+	bundleErr := bundler.Bundle(context.Background(), tree, outputPath)
 	if bundleErr != nil {
 		t.Fatalf("Failed to bundle: %v", bundleErr)
 	}
@@ -154,7 +154,7 @@ func TestBundler_AggregationPreservesRootInstallDir(t *testing.T) {
 
 	bundler := NewBundler(BundleFormatTarGZ)
 	bundlePath := filepath.Join(t.TempDir(), "out.tar.gz")
-	require.NoError(t, bundler.Bundle(tree, bundlePath))
+	require.NoError(t, bundler.Bundle(context.Background(), tree, bundlePath))
 
 	// Aggregation must have written nothing into the caller's tree. Re-snapshot
 	// and require byte-identical contents.

@@ -1,6 +1,7 @@
 package tofupress
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 
@@ -20,7 +21,7 @@ func TestReadMetadataFromZipArtifact(t *testing.T) {
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
 	bundler := NewBundler(BundleFormatZIP)
 	bundler.Metadata = &ArtifactMetadata{SchemaVersion: MetadataSchemaVersion, CreatedAt: "2026-06-21T12:00:00Z"}
-	require.NoError(t, bundler.Bundle(tree, archivePath))
+	require.NoError(t, bundler.Bundle(context.Background(), tree, archivePath))
 
 	metadata, err := ReadMetadataFromArtifact(archivePath)
 	require.NoError(t, err)
@@ -37,7 +38,7 @@ func TestReadMetadataFromArtifactErrorsWhenMissing(t *testing.T) {
 		Packages:   make(map[string]*DownloadedPackage),
 	}
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
-	require.NoError(t, NewBundler(BundleFormatZIP).Bundle(tree, archivePath))
+	require.NoError(t, NewBundler(BundleFormatZIP).Bundle(context.Background(), tree, archivePath))
 
 	_, err := ReadMetadataFromArtifact(archivePath)
 	require.Error(t, err)

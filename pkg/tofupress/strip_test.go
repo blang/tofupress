@@ -2,6 +2,7 @@
 package tofupress
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -51,7 +52,7 @@ func TestPlanStrippingNoneIncludesPackageContent(t *testing.T) {
 	writeFile(t, rootDir, ".terraform/modules/ignored/main.tf", `ignored`)
 
 	tree := testTree(rootDir)
-	plan, err := PlanStripping(tree, StripModeNone)
+	plan, err := PlanStripping(context.Background(), tree, StripModeNone)
 	require.NoError(t, err)
 
 	assert.True(t, plan.IncludePath(filepath.Join(rootDir, "main.tf"), false))
@@ -76,7 +77,7 @@ func TestPlanStrippingModuleDirIncludesOnlyResolvedModuleDirsAndStaticReads(t *t
 	root.Children = []*ModuleNode{worker}
 	tree := &ResolvedTree{Root: root, AllModules: []*ModuleNode{root, worker}, Packages: map[string]*DownloadedPackage{}}
 
-	plan, err := PlanStripping(tree, StripModeModuleDir)
+	plan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
 
 	assert.True(t, plan.IncludePath(filepath.Join(packageRoot, "modules", "app", "main.tf"), false))
@@ -98,7 +99,7 @@ locals { rendered = file("../shared/${var.name}.txt") }`)
 	root := &ModuleNode{Key: "", Name: "root", InstallDir: filepath.Join(packageRoot, "modules", "app"), PackageRoot: packageRoot, IsLocal: true}
 	tree := &ResolvedTree{Root: root, AllModules: []*ModuleNode{root}, Packages: map[string]*DownloadedPackage{}}
 
-	plan, err := PlanStripping(tree, StripModeModuleDir)
+	plan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
 
 	assert.True(t, plan.IncludePath(filepath.Join(packageRoot, "README.md"), false), "dynamic read should keep whole legal package scope")
@@ -115,7 +116,7 @@ locals { rendered = file("../shared/${var.name}.txt") }`)
 	root := &ModuleNode{Key: "", Name: "root", InstallDir: filepath.Join(packageRoot, "modules", "app"), PackageRoot: packageRoot, IsLocal: true}
 	tree := &ResolvedTree{Root: root, AllModules: []*ModuleNode{root}, Packages: map[string]*DownloadedPackage{}}
 
-	plan, err := PlanStripping(tree, StripModeConfigOnly)
+	plan, err := PlanStripping(context.Background(), tree, StripModeConfigOnly)
 	require.NoError(t, err)
 
 	assert.True(t, plan.IncludePath(filepath.Join(packageRoot, "modules", "app", "main.tf"), false))
@@ -131,7 +132,7 @@ func TestPlanStrippingModuleDirKeepsFilesetMatches(t *testing.T) {
 	writeFile(t, rootDir, "policies/drop.txt", `drop`)
 
 	tree := testTree(rootDir)
-	plan, err := PlanStripping(tree, StripModeModuleDir)
+	plan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
 
 	assert.True(t, plan.IncludePath(filepath.Join(rootDir, "policies", "keep.json"), false))

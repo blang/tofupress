@@ -2,6 +2,7 @@
 package tofupress
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -162,7 +163,7 @@ func TestBundler_StagedBundleMatchesContent(t *testing.T) {
 			archivePath := filepath.Join(t.TempDir(), "bundle"+ext)
 			bundler := NewBundler(format)
 			bundler.Metadata = meta
-			require.NoError(t, bundler.Bundle(tree, archivePath))
+			require.NoError(t, bundler.Bundle(context.Background(), tree, archivePath))
 
 			// Extract and verify
 			extractDir := t.TempDir()

@@ -126,7 +126,7 @@ func runBundle(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	stripPlan, err := tofupress.PlanStripping(tree, stripMode)
+	stripPlan, err := tofupress.PlanStripping(cmd.Context(), tree, stripMode)
 	if err != nil {
 		return fmt.Errorf("failed to plan stripping: %w", err)
 	}
@@ -140,15 +140,15 @@ func runBundle(cmd *cobra.Command, args []string) error {
 	// Plan and apply sourcetree identity (archive-only; OCI-compliant inlines modules)
 	var sourcetreePlan *tofupress.SourcetreeIdentityPlan
 	if !ociCompliant {
-		sourcetreePlan, err = tofupress.BuildSourcetreeIdentityPlan(tree, stripPlan)
+		sourcetreePlan, err = tofupress.BuildSourcetreeIdentityPlan(cmd.Context(), tree, stripPlan)
 		if err != nil {
 			return fmt.Errorf("failed to plan sourcetree identity: %w", err)
 		}
-		if applyErr := tofupress.ApplySourcetreeIdentityPlan(tree, sourcetreePlan); applyErr != nil {
+		if applyErr := tofupress.ApplySourcetreeIdentityPlan(cmd.Context(), tree, sourcetreePlan); applyErr != nil {
 			return fmt.Errorf("failed to apply sourcetree identity: %w", applyErr)
 		}
 		// Re-plan stripping after identity application since package directories changed
-		stripPlan, err = tofupress.PlanStripping(tree, stripMode)
+		stripPlan, err = tofupress.PlanStripping(cmd.Context(), tree, stripMode)
 		if err != nil {
 			return fmt.Errorf("failed to plan final stripping: %w", err)
 		}
@@ -170,7 +170,7 @@ func runBundle(cmd *cobra.Command, args []string) error {
 	}
 	bundler.Metadata = metadata
 
-	if bundleErr := bundler.Bundle(tree, outputPath); bundleErr != nil {
+	if bundleErr := bundler.Bundle(cmd.Context(), tree, outputPath); bundleErr != nil {
 		return fmt.Errorf("failed to create bundle: %w", bundleErr)
 	}
 

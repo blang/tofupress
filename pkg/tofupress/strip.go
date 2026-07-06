@@ -1,6 +1,7 @@
 package tofupress
 
 import (
+	"context"
 	"fmt"
 	"io/fs"
 	"os"
@@ -105,7 +106,12 @@ func cleanRel(root, absPath string) string {
 }
 
 // PlanStripping builds a strip plan for a resolved module tree.
-func PlanStripping(tree *ResolvedTree, mode StripMode) (*StripPlan, error) {
+//
+// The context is threaded through for API consistency and future cancellation
+// hooks (review item 5); strip planning does not currently block long enough
+// to honor ctx itself.
+func PlanStripping(ctx context.Context, tree *ResolvedTree, mode StripMode) (*StripPlan, error) {
+	_ = ctx
 	if tree == nil || tree.Root == nil {
 		return nil, fmt.Errorf("cannot plan stripping for empty tree")
 	}

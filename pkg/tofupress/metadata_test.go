@@ -2,6 +2,7 @@
 package tofupress
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -87,7 +88,7 @@ func TestBuildArtifactMetadataIncludesStripPlanStatsAndFilesystemFunctions(t *te
 
 	tree := &ResolvedTree{Root: &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}, Packages: map[string]*DownloadedPackage{}}
 	tree.AllModules = []*ModuleNode{tree.Root}
-	stripPlan, err := PlanStripping(tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
 	require.NoError(t, err)
 
 	metadata, err := BuildArtifactMetadata(tree, &MetadataRequest{

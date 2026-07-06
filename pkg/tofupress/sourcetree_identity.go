@@ -1,6 +1,7 @@
 package tofupress
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -127,7 +128,8 @@ func SnapshotDirectoryWithStrip(dir string, stripPlan *StripPlan) (DirectorySnap
 // packages in the resolved tree, grouping packages with identical final content.
 //
 //nolint:gocognit // iterating packages and merging dedup groups requires branching
-func BuildSourcetreeIdentityPlan(tree *ResolvedTree, stripPlan *StripPlan) (*SourcetreeIdentityPlan, error) {
+func BuildSourcetreeIdentityPlan(ctx context.Context, tree *ResolvedTree, stripPlan *StripPlan) (*SourcetreeIdentityPlan, error) {
+	_ = ctx
 	if tree == nil || tree.Root == nil {
 		return nil, fmt.Errorf("cannot build sourcetree identity plan for empty tree")
 	}
@@ -250,7 +252,8 @@ func buildDedupGroups(canonical map[string]*PackageIdentity) []DedupGroup {
 // ApplySourcetreeIdentityPlan materializes canonical sourcetree directories, updates
 // tree module pointers, rewrites module sources to final IDs, and removes superseded
 // package directories.
-func ApplySourcetreeIdentityPlan(tree *ResolvedTree, plan *SourcetreeIdentityPlan) error {
+func ApplySourcetreeIdentityPlan(ctx context.Context, tree *ResolvedTree, plan *SourcetreeIdentityPlan) error {
+	_ = ctx
 	if tree == nil || tree.Root == nil {
 		return fmt.Errorf("cannot apply sourcetree identity plan to empty tree")
 	}

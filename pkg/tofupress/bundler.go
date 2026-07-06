@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"compress/gzip"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -93,9 +94,30 @@ type Bundler struct {
 	VendorDir    string            // Vendored modules directory name (from tree.VendorDir)
 }
 
-// NewBundler creates a new Bundler with the specified format.
-func NewBundler(format BundleFormat) *Bundler {
-	return &Bundler{Format: format}
+// BundlerOption configures a Bundler at construction time (review item 5 /
+// ArchAudit R4). Exported fields remain settable post-construction for
+// backwards compatibility; options are the preferred, freeze-safe entry point.
+type BundlerOption func(*Bundler)
+
+// WithOCICompliant toggles OCI-compliant bundling.
+func WithOCICompliant(v bool) BundlerOption { return func(b *Bundler) { b.OCICompliant = v } }
+
+// WithMetadata attaches metadata to embed in the archive.
+func WithMetadata(m *ArtifactMetadata) BundlerOption { return func(b *Bundler) { b.Metadata = m } }
+
+// WithStripPlan attaches a pre-computed strip plan.
+func WithStripPlan(p *StripPlan) BundlerOption { return func(b *Bundler) { b.StripPlan = p } }
+
+// WithVendorDir sets the vendored modules directory name.
+func WithVendorDir(d string) BundlerOption { return func(b *Bundler) { b.VendorDir = d } }
+
+// NewBundler creates a new Bundler with the specified format and options.
+func NewBundler(format BundleFormat, opts ...BundlerOption) *Bundler {
+	b := &Bundler{Format: format}
+	for _, opt := range opts {
+		opt(b)
+	}
+	return b
 }
 
 // Bundle creates a single self-contained archive containing the root module together
@@ -107,7 +129,10 @@ func NewBundler(format BundleFormat) *Bundler {
 // OCI-compliant and non-OCI bundles now share ONE staging pipeline (review F4/F5/F12).
 // They differ only in archive format: OCI requires zip. Every format is produced from
 // the same staged directory, so the same tree always yields a consistent layout.
-func (b *Bundler) Bundle(tree *ResolvedTree, outputPath string) error {
+func (b *Bundler) Bundle(ctx context.Context, tree *ResolvedTree, outputPath string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if tree == nil {
 		return fmt.Errorf("tree is nil")
 	}
@@ -140,11 +165,11 @@ func (b *Bundler) Bundle(tree *ResolvedTree, outputPath string) error {
 
 	switch format {
 	case BundleFormatZIP:
-		return b.bundleZIP(tree, outputPath)
+		return b.bundleZIP(ctx, tree, outputPath)
 	case BundleFormatTarGZ:
-		return b.bundleTarGZ(tree, outputPath)
+		return b.bundleTarGZ(ctx, tree, outputPath)
 	case BundleFormatTarXZ:
-		return b.bundleTarXZ(tree, outputPath)
+		return b.bundleTarXZ(ctx, tree, outputPath)
 	default:
 		return fmt.Errorf("unsupported format: %s", format)
 	}
@@ -165,9 +190,7 @@ func rootArchiveDir(tree *ResolvedTree) string {
 	}
 	return tree.Root.InstallDir
 }
-
-// bundleTarGZ creates a tar.gz archive via staged bundling.
-func (b *Bundler) bundleTarGZ(tree *ResolvedTree, outputPath string) (err error) {
+func (b *Bundler) bundleTarGZ(ctx context.Context, tree *ResolvedTree, outputPath string) (err error) {
 	stagingDir, err := stageBundle(tree, b.VendorDir, b.StripPlan, b.Metadata)
 	if err != nil {
 		return err
@@ -182,11 +205,11 @@ func (b *Bundler) bundleTarGZ(tree *ResolvedTree, outputPath string) (err error)
 		return fmt.Errorf("failed to aggregate pressed modules: %w", err)
 	}
 
-	return b.bundleTarGzFromDir(stagingDir, outputPath)
+	return b.bundleTarGzFromDir(ctx, stagingDir, outputPath)
 }
 
 // bundleTarXZ creates a tar.xz archive via staged bundling.
-func (b *Bundler) bundleTarXZ(tree *ResolvedTree, outputPath string) (err error) {
+func (b *Bundler) bundleTarXZ(ctx context.Context, tree *ResolvedTree, outputPath string) (err error) {
 	stagingDir, err := stageBundle(tree, b.VendorDir, b.StripPlan, b.Metadata)
 	if err != nil {
 		return err
@@ -201,11 +224,11 @@ func (b *Bundler) bundleTarXZ(tree *ResolvedTree, outputPath string) (err error)
 		return fmt.Errorf("failed to aggregate pressed modules: %w", err)
 	}
 
-	return b.bundleTarXzFromDir(stagingDir, outputPath)
+	return b.bundleTarXzFromDir(ctx, stagingDir, outputPath)
 }
 
 // bundleZIP creates a ZIP archive via staged bundling.
-func (b *Bundler) bundleZIP(tree *ResolvedTree, outputPath string) (err error) {
+func (b *Bundler) bundleZIP(ctx context.Context, tree *ResolvedTree, outputPath string) (err error) {
 	stagingDir, err := stageBundle(tree, b.VendorDir, b.StripPlan, b.Metadata)
 	if err != nil {
 		return err
@@ -220,13 +243,14 @@ func (b *Bundler) bundleZIP(tree *ResolvedTree, outputPath string) (err error) {
 		return fmt.Errorf("failed to aggregate pressed modules: %w", err)
 	}
 
-	return b.bundleZipFromDir(stagingDir, outputPath)
+	return b.bundleZipFromDir(ctx, stagingDir, outputPath)
 }
 
 // bundleZipFromDir creates a ZIP archive from a directory.
 //
 //nolint:gocognit,gocyclo // directory walking and zip creation is inherently complex
-func (b *Bundler) bundleZipFromDir(srcDir, outputPath string) (err error) {
+func (b *Bundler) bundleZipFromDir(ctx context.Context, srcDir, outputPath string) (err error) {
+	_ = ctx                               // currently unused; reserved for cancellation-aware file copy
 	outFile, err := os.Create(outputPath) //nolint:gosec // G304: path is provided by user
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
@@ -314,7 +338,8 @@ func (b *Bundler) bundleZipFromDir(srcDir, outputPath string) (err error) {
 // to be pre-staged.
 //
 //nolint:gocognit,gocyclo // directory walking and tar creation is inherently complex
-func (b *Bundler) bundleTarGzFromDir(srcDir, outputPath string) (err error) {
+func (b *Bundler) bundleTarGzFromDir(ctx context.Context, srcDir, outputPath string) (err error) {
+	_ = ctx                               // currently unused; reserved for cancellation-aware file copy
 	outFile, err := os.Create(outputPath) //nolint:gosec // G304: path is provided by user
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
@@ -399,7 +424,8 @@ func (b *Bundler) bundleTarGzFromDir(srcDir, outputPath string) (err error) {
 // Mirror of bundleTarGzFromDir using xz compression.
 //
 //nolint:gocognit,gocyclo // directory walking and tar/xz creation is inherently complex
-func (b *Bundler) bundleTarXzFromDir(srcDir, outputPath string) (err error) {
+func (b *Bundler) bundleTarXzFromDir(ctx context.Context, srcDir, outputPath string) (err error) {
+	_ = ctx                               // currently unused; reserved for cancellation-aware file copy
 	outFile, err := os.Create(outputPath) //nolint:gosec // G304: path is provided by user
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)

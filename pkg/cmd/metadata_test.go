@@ -4,6 +4,7 @@ package cmd
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -27,7 +28,7 @@ func TestRunMetadataPrintsArtifactMetadata(t *testing.T) {
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
 	bundler := tofupress.NewBundler(tofupress.BundleFormatZIP)
 	bundler.Metadata = &tofupress.ArtifactMetadata{SchemaVersion: tofupress.MetadataSchemaVersion, CreatedAt: "2026-06-21T12:00:00Z"}
-	require.NoError(t, bundler.Bundle(tree, archivePath))
+	require.NoError(t, bundler.Bundle(context.Background(), tree, archivePath))
 
 	cmd := metadataCmd
 	var stdout bytes.Buffer
@@ -52,7 +53,7 @@ func TestRunMetadataTarGzBundle(t *testing.T) {
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
 	bundler := tofupress.NewBundler(tofupress.BundleFormatTarGZ)
 	bundler.Metadata = &tofupress.ArtifactMetadata{SchemaVersion: tofupress.MetadataSchemaVersion, CreatedAt: "2026-06-21T12:00:00Z"}
-	require.NoError(t, bundler.Bundle(tree, archivePath))
+	require.NoError(t, bundler.Bundle(context.Background(), tree, archivePath))
 
 	cmd := metadataCmd
 	var stdout bytes.Buffer
@@ -77,7 +78,7 @@ func TestRunMetadataTarXzBundle(t *testing.T) {
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.xz")
 	bundler := tofupress.NewBundler(tofupress.BundleFormatTarXZ)
 	bundler.Metadata = &tofupress.ArtifactMetadata{SchemaVersion: tofupress.MetadataSchemaVersion, CreatedAt: "2026-06-21T12:00:00Z"}
-	require.NoError(t, bundler.Bundle(tree, archivePath))
+	require.NoError(t, bundler.Bundle(context.Background(), tree, archivePath))
 
 	cmd := metadataCmd
 	var stdout bytes.Buffer

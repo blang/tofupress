@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -137,6 +138,60 @@ func TestPlanStrippingModuleDirKeepsFilesetMatches(t *testing.T) {
 
 	assert.True(t, plan.IncludePath(filepath.Join(rootDir, "policies", "keep.json"), false))
 	assert.False(t, plan.IncludePath(filepath.Join(rootDir, "policies", "drop.txt"), false))
+}
+
+// TestPlanStrippingModuleDirWarnsOnExcludedRemotePackageSibling (review item 4)
+// verifies that a downloaded remote package containing an unreached sibling
+// directory (the kind a conditional ../sibling ref would hit at runtime)
+// produces a loud warning naming the excluded directory and the package, so
+// the silent content-loss failure mode is surfaced to the user.
+func TestPlanStrippingModuleDirWarnsOnExcludedRemotePackageSibling(t *testing.T) {
+	rootDir := t.TempDir()
+	writeFile(t, rootDir, "main.tf", `module "ext" { source = "git::https://example.com/pkg-a.git" }`)
+
+	// Simulate the downloaded remote package: it has a reached dir (the entry)
+	// and an unreached sibling dir the resolver never descended into.
+	pkgRoot := t.TempDir()
+	writeFile(t, pkgRoot, "main.tf", `output "entry" { value = "ok" }`)
+	writeFile(t, filepath.Join(pkgRoot, "modules", "helper"), "main.tf", `resource "x" "y" {}`)
+
+	root := &ModuleNode{Key: "", Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}
+	ext := &ModuleNode{
+		Key:         "ext",
+		Name:        "ext",
+		Parent:      root,
+		InstallDir:  pkgRoot,
+		PackageRoot: pkgRoot,
+		IsRemote:    true,
+		Source:      ModuleSource{Raw: "git::https://example.com/pkg-a.git", PackageAddr: "git::https://example.com/pkg-a.git", Type: SourceGit},
+	}
+	root.Children = []*ModuleNode{ext}
+	tree := &ResolvedTree{
+		Root:       root,
+		AllModules: []*ModuleNode{root, ext},
+		VendorDir:  "_vendor",
+		Packages: map[string]*DownloadedPackage{
+			"git::https://example.com/pkg-a.git": {
+				PackageAddr: "git::https://example.com/pkg-a.git",
+				LocalDir:    pkgRoot,
+			},
+		},
+	}
+
+	plan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
+	require.NoError(t, err)
+
+	var found bool
+	for _, w := range plan.Warnings {
+		if strings.Contains(w.Message, "modules") && strings.Contains(w.Message, "pkg-a.git") &&
+			strings.Contains(w.Message, "review item 4") {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found,
+		"item 4: expected a warning about the excluded 'modules' sibling in remote package pkg-a.git, got %+v",
+		plan.Warnings)
 }
 
 func writeFile(t *testing.T, root, rel, content string) {

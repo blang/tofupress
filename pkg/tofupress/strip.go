@@ -176,8 +176,19 @@ func collectPackageRoots(tree *ResolvedTree) []string {
 	return roots
 }
 
-//nolint:gocognit // subdir parent-plan inclusion adds natural complexity
+//nolint:gocognit // subdir parent-plan inclusion + remote-package safety adds branching
 func includeResolvedModuleDirs(plan *StripPlan, tree *ResolvedTree) {
+	// After building the keep-set from resolver-descended modules, warn loudly
+	// about silent content loss the keep-set cannot see: third-party downloaded
+	// packages may contain `../sibling` refs inside conditional branches
+	// (count=0, file()-pointed locals) the resolver never expanded. Directories
+	// inside such packages that the plan would exclude are surfaced as warnings
+	// so the user can re-run with --strip=none for that package. We DO NOT
+	// change the strip contract here (module-dir still applies file-level
+	// filtering); the safe fallback --strip=none already exists (review item 4
+	// / F6 content-loss — warn-only landing).
+	warnExcludedRemotePackageDirs(plan, tree)
+
 	for _, module := range tree.AllModules {
 		pkgPlan := plan.PackageForPath(module.InstallDir)
 		if pkgPlan == nil {
@@ -204,6 +215,45 @@ func includeResolvedModuleDirs(plan *StripPlan, tree *ResolvedTree) {
 			}
 			if strings.HasPrefix(module.InstallDir, parentPlan.PackageRoot+string(filepath.Separator)) {
 				parentPlan.includeDir(module.InstallDir)
+			}
+		}
+	}
+}
+
+// warnExcludedRemotePackageDirs walks each downloaded remote package's
+// top-level directories and emits a warning for any directory the strip plan
+// would exclude — i.e. a sibling the resolver never descended into but which a
+// conditional `../sibling` reference in the third-party package could reach at
+// runtime. The warning names the package and the excluded dir so the user can
+// decide to re-run with --strip=none.
+func warnExcludedRemotePackageDirs(plan *StripPlan, tree *ResolvedTree) {
+	for _, pkg := range tree.Packages {
+		if pkg.LocalDir == "" {
+			continue
+		}
+		root := filepath.Clean(pkg.LocalDir)
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			childDir := filepath.Join(root, entry.Name())
+			// Skip generated/VCS directories; those are intentionally excluded.
+			if isGeneratedOrVCSPath(childDir) {
+				continue
+			}
+			if !plan.IncludePath(childDir, true) {
+				plan.Warnings = append(plan.Warnings, StripWarning{
+					Message: fmt.Sprintf(
+						"module-dir strip mode excludes directory %q inside the "+
+							"downloaded remote package %s; a conditional ../%s reference "+
+							"in this third-party module could reach it at runtime and fail. "+
+							"Re-run with --strip=none to keep it (review item 4)",
+						entry.Name(), pkg.PackageAddr, entry.Name()),
+				})
 			}
 		}
 	}

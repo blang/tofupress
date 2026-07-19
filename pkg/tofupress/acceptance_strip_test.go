@@ -253,7 +253,7 @@ output "runtime" { value = local.runtime }
 	assert.Contains(t, stderr, "filesystem reads were detected", "stderr should mention filesystem reads")
 
 	metadata := metadataFromArtifact(t, artifact)
-	assert.Equal(t, string(StripModeConfigOnly), metadata.Command.Options.StripMode)
+	assert.Equal(t, string(StripModeAggressive), metadata.Command.Options.StripMode)
 	assert.Greater(t, metadata.Stats.StrippedFiles, 0, "config-only strip should strip files")
 	assert.NotEmpty(t, metadata.StripWarnings, "config-only should produce strip warnings")
 

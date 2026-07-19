@@ -52,7 +52,7 @@ func TestBuildSourcetreeIdentityPlanDeduplicatesDifferentSourcesWithSameFinalCon
 			{Key: "root.b", Name: "b", PackageRoot: pkgB, InstallDir: pkgB, Source: ModuleSource{PackageAddr: "git::file:///repo-b"}, IsRemote: true},
 		},
 	}
-	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 
 	plan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
@@ -83,7 +83,7 @@ func TestBuildSourcetreeIdentityPlanDoesNotDeduplicateDifferentFinalContent(t *t
 			{Key: "root.b", Name: "b", PackageRoot: pkgB, InstallDir: pkgB, Source: ModuleSource{PackageAddr: "git::file:///repo-b"}, IsRemote: true},
 		},
 	}
-	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 
 	plan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
@@ -103,7 +103,7 @@ func TestSnapshotDirectoryWithStripUsesIncludedFinalContent(t *testing.T) {
 		AllModules: []*ModuleNode{rootModule},
 		Packages:   map[string]*DownloadedPackage{},
 	}
-	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 
 	snapshot, err := SnapshotDirectoryWithStrip(root, stripPlan)
@@ -139,7 +139,7 @@ module "b" { source = "./modules/old-b" }
 	}
 	modA.Parent = tree.Root
 	modB.Parent = tree.Root
-	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 	plan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
 	require.NoError(t, err)
@@ -194,7 +194,7 @@ func TestApplySourcetreeIdentityPlan_RewriterHardErrorNotSwallowed(t *testing.T)
 	modA.Parent = tree.Root
 	modB.Parent = tree.Root
 
-	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 	plan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
 	require.NoError(t, err)
@@ -246,7 +246,7 @@ module "b" { source = "./modules/old-b" }
 	modA.Parent = tree.Root
 	modB.Parent = tree.Root
 
-	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 	plan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
 	require.NoError(t, err)
@@ -273,7 +273,7 @@ module "b" { source = "./modules/old-b" }
 
 	// The post-rename strip plan must not crash reading the deleted old package dir.
 	// Before the fix this returned "failed to read directory .../old-a/modules/child".
-	_, err = PlanStripping(context.Background(), tree, StripModeModuleDir)
+	_, err = PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err, "final strip plan must not crash reading a renamed-away package subdir")
 }
 

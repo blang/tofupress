@@ -55,7 +55,7 @@ output "name" { value = var.name }
 			assert.Contains(t, stdout, "Stripped bytes:")
 
 			metadata := metadataFromArtifact(t, artifact)
-			assert.Equal(t, string(StripModeModuleDir), metadata.Command.Options.StripMode)
+			assert.Equal(t, string(StripModeOptimistic), metadata.Command.Options.StripMode)
 			assert.Greater(t, metadata.Stats.StrippedFiles, 0)
 			assert.Greater(t, metadata.Stats.StrippedBytes, int64(0))
 			require.Len(t, metadata.FilesystemFunctions, 1)
@@ -90,7 +90,7 @@ output "runtime" {
 	runTofuPressBundle(t, bin, sourceDir, artifact, "--format=zip")
 
 	metadata := metadataFromArtifact(t, artifact)
-	assert.Equal(t, string(StripModeModuleDir), metadata.Command.Options.StripMode)
+	assert.Equal(t, string(StripModeOptimistic), metadata.Command.Options.StripMode)
 	require.Len(t, metadata.FilesystemFunctions, 1)
 	assert.False(t, metadata.FilesystemFunctions[0].Static)
 	assert.Equal(t, "dynamic-package-fallback", metadata.FilesystemFunctions[0].Handling)
@@ -123,7 +123,7 @@ output "runtime" {
 	assert.Contains(t, stderr, "filesystem reads were detected")
 
 	metadata := metadataFromArtifact(t, artifact)
-	assert.Equal(t, string(StripModeConfigOnly), metadata.Command.Options.StripMode)
+	assert.Equal(t, string(StripModeAggressive), metadata.Command.Options.StripMode)
 	assert.Greater(t, metadata.Stats.StrippedFiles, 0)
 	assert.NotEmpty(t, metadata.StripWarnings)
 
@@ -152,7 +152,7 @@ output "tofu_priority" {
 	runTofuPressBundle(t, bin, sourceDir, artifact, "--format=zip")
 
 	metadata := metadataFromArtifact(t, artifact)
-	assert.Equal(t, string(StripModeModuleDir), metadata.Command.Options.StripMode)
+	assert.Equal(t, string(StripModeOptimistic), metadata.Command.Options.StripMode)
 	assert.Empty(t, metadata.FilesystemFunctions, "scanner must honor .tofu priority and ignore same-basename .tf")
 
 	validateArchiveWithTool(t, requireIACTool(t, "tofu"), serveArtifact(t, artifact))
@@ -186,7 +186,7 @@ output "value" { value = var.value }
 	runTofuPressBundle(t, bin, packageRoot+"//modules/app", artifact, "--format=tar.gz")
 
 	metadata := metadataFromArtifact(t, artifact)
-	assert.Equal(t, string(StripModeModuleDir), metadata.Command.Options.StripMode)
+	assert.Equal(t, string(StripModeOptimistic), metadata.Command.Options.StripMode)
 	require.NotEmpty(t, metadata.FilesystemFunctions)
 
 	artifactSource := serveArtifact(t, artifact) + "//modules/app"

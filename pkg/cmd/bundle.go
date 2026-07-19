@@ -36,7 +36,7 @@ func init() {
 	bundleCmd.Flags().Bool("strict-oci", true, "Strict OCI spec enforcement: reject artifacts with empty/non-matching artifactType (review item 10; --strict-oci=false = lenient with warning)")
 	bundleCmd.Flags().Bool("json", false, "Emit the bundle metadata as JSON to stdout after success (review item 9)")
 	bundleCmd.Flags().String("metadata-out", "", "Write bundle metadata JSON to a separate path")
-	bundleCmd.Flags().String("strip", "module-dir", "Strip mode: none, module-dir (safe default), config-only, or tf-only (alias for config-only)")
+	bundleCmd.Flags().String("strip", "optimistic", "Strip level: full, optimistic (default), aggressive. Legacy aliases: none=full, module-dir=optimistic, config-only/tf-only=aggressive (ADR-0001)")
 	bundleCmd.Flags().String("vendor-dir", "_vendor", "Vendored modules directory name (remote dependencies are rooted here in the bundle)")
 }
 

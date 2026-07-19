@@ -105,19 +105,88 @@ type pathEvalContext struct {
 	ModuleDir string
 }
 
-// walkFilesystemNodes traverses an HCL syntax node tree and records filesystem-function calls.
+// walkFilesystemNodes traverses an HCL syntax node tree and records:
+//
+//   - signal #1 (ADR-0001): filesystem-function calls (file/fileset/...) —
+//     precise static matches when the arg is literal, dynamic-package-fallback
+//     when it is not.
+//   - signal #2 (ADR-0001): any string template containing a ${path.module}/...
+//     or ${path.root}/... interpolation — the risk signal that catches plain
+//     attributes and provisioner commands the file() detector cannot see. A
+//     module carrying such a ref has its whole owning package kept verbatim
+//     (escalated in strip.go via PackageForModuleKey).
+//
+// To avoid double-counting (and to preserve the precision of static file()
+// handling), templates that are the direct argument of a filesystem-function
+// call are skipped for signal #2: a static file("${path.module}/x") is already
+// precisely resolved by signal #1 — there is no silent-loss risk to escalate.
+// The skip set is built as we visit each filesystem FunctionCallExpr (parents
+// are visited before their arg expressions).
 func walkFilesystemNodes(node hclsyntax.Node, module *ModuleNode, filePath string, ctx pathEvalContext, refs *[]FilesystemFunctionRef) {
+	var fsCallArgRanges []hcl.Range
 	_ = hclsyntax.VisitAll(node, func(visited hclsyntax.Node) hcl.Diagnostics {
-		call, ok := visited.(*hclsyntax.FunctionCallExpr)
-		if !ok {
+		if call, ok := visited.(*hclsyntax.FunctionCallExpr); ok {
+			if _, isFilesystem := terraformFilesystemFunctions[call.Name]; isFilesystem {
+				*refs = append(*refs, buildFilesystemRef(call, module, filePath, ctx))
+				for _, arg := range call.Args {
+					fsCallArgRanges = append(fsCallArgRanges, arg.Range())
+				}
+			}
 			return nil
 		}
-		if _, isFilesystem := terraformFilesystemFunctions[call.Name]; !isFilesystem {
-			return nil
+		if tmpl, ok := visited.(*hclsyntax.TemplateExpr); ok {
+			rng := tmpl.Range()
+			if !rangeContainedInAny(rng, fsCallArgRanges) {
+				if ref, ok := buildPathModuleRef(tmpl, module, filePath); ok {
+					*refs = append(*refs, ref)
+				}
+			}
 		}
-		*refs = append(*refs, buildFilesystemRef(call, module, filePath, ctx))
 		return nil
 	})
+}
+
+// buildPathModuleRef constructs a risk-signal (#2) FilesystemFunctionRef for a
+// template string that contains a ${path.module}/... or ${path.root}/...
+// interpolation. The ref is marked non-static with the dynamic-package-fallback
+// handling, so applyFilesystemFunctionRefs escalates the module's whole owning
+// package to IncludeAll. The decision is whole-owning-package (not the named
+// subtree) because the referenced file (e.g. package.py) may itself read
+// arbitrary siblings at runtime (ADR-0001 "Risk signals").
+func buildPathModuleRef(tmpl *hclsyntax.TemplateExpr, module *ModuleNode, filePath string) (FilesystemFunctionRef, bool) {
+	raw := expressionSourceText(tmpl)
+	var function string
+	switch {
+	case strings.Contains(raw, "${path.module}/"):
+		function = "path.module"
+	case strings.Contains(raw, "${path.root}/"):
+		function = "path.root"
+	default:
+		return FilesystemFunctionRef{}, false
+	}
+	return FilesystemFunctionRef{
+		Function:    function,
+		ModuleKey:   module.Key,
+		SourceFile:  filePath,
+		SourceRange: tmpl.Range().String(),
+		RawPath:     raw,
+		Handling:    handlingDynamicFallback,
+		Static:      false,
+	}, true
+}
+
+// rangeContainedInAny reports whether r is within any of the given ranges
+// (same file, byte-bounded). Used to skip filesystem-function-call arguments
+// during the signal #2 (path.module) scan.
+func rangeContainedInAny(r hcl.Range, ranges []hcl.Range) bool {
+	for _, within := range ranges {
+		if r.Filename == within.Filename &&
+			r.Start.Byte >= within.Start.Byte &&
+			r.End.Byte <= within.End.Byte {
+			return true
+		}
+	}
+	return false
 }
 
 // buildFilesystemRef constructs a FilesystemFunctionRef from a function call expression.

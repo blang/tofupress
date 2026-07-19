@@ -146,13 +146,13 @@ func TestAcceptance_Error_InvalidStrip(t *testing.T) {
 	src := createSimpleFixture(t)
 	artifact := filepath.Join(t.TempDir(), "bundle.zip")
 
-	cmd := exec.Command(bin, "bundle", src, artifact, "--strip=aggressive")
+	cmd := exec.Command(bin, "bundle", src, artifact, "--strip=delete-everything")
 	out, err := cmd.CombinedOutput()
-	require.Error(t, err, "invalid strip mode should error")
+	require.Error(t, err, "invalid strip level should error")
 	assert.True(t,
-		strings.Contains(strings.ToLower(string(out)), "unsupported strip mode") ||
+		strings.Contains(strings.ToLower(string(out)), "unsupported strip level") ||
 			strings.Contains(strings.ToLower(string(out)), "strip"),
-		"error should mention unsupported strip mode, got: %s", string(out))
+		"error should mention unsupported strip level, got: %s", string(out))
 }
 
 func TestAcceptance_Error_NonexistentSource(t *testing.T) {

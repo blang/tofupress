@@ -140,7 +140,7 @@ func TestBundlerOCICompliantAppliesStripPlan(t *testing.T) {
 
 	tree := &ResolvedTree{Root: &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}, Packages: map[string]*DownloadedPackage{}}
 	tree.AllModules = []*ModuleNode{tree.Root}
-	plan, err := PlanStripping(context.Background(), tree, StripModeConfigOnly)
+	plan, err := PlanStripping(context.Background(), tree, StripModeAggressive)
 	require.NoError(t, err)
 
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")

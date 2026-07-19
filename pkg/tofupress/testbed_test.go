@@ -86,13 +86,13 @@ module "remote_mod" {
 	require.NoError(t, err)
 
 	// ── Identity planning ─────────────────────────────────────────────
-	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 	identityPlan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
 	require.NoError(t, err)
 	require.NoError(t, ApplySourcetreeIdentityPlan(context.Background(), tree, identityPlan))
 
-	stripPlan, err = PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err = PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 
 	// ── Bundle ────────────────────────────────────────────────────────
@@ -185,7 +185,7 @@ module "child" {
 	tree, err := resolver.Resolve(context.Background(), tmp)
 	require.NoError(t, err)
 
-	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")

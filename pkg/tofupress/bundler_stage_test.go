@@ -100,7 +100,7 @@ func TestStageBundle_WithPackages(t *testing.T) {
 		Packages:   map[string]*DownloadedPackage{"pkg-abc123": {PackageAddr: "git::https://example.com/vpc.git", LocalDir: pkgDir}},
 	}
 
-	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 
 	stagingDir, err := stageBundle(tree, "modules", stripPlan, nil)
@@ -126,7 +126,7 @@ func TestStageBundle_StripPlanApplied(t *testing.T) {
 		AllModules: []*ModuleNode{{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}},
 		Packages:   map[string]*DownloadedPackage{},
 	}
-	plan, err := PlanStripping(context.Background(), tree, StripModeConfigOnly)
+	plan, err := PlanStripping(context.Background(), tree, StripModeAggressive)
 	require.NoError(t, err)
 
 	stagingDir, err := stageBundle(tree, "modules", plan, nil)

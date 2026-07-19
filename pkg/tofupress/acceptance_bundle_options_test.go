@@ -34,7 +34,7 @@ output "config" { value = jsondecode(local.data) }
 	runTofuPressBundle(t, bin, src, artifact, "--format=zip")
 
 	metadata := metadataFromArtifact(t, artifact)
-	assert.Equal(t, string(StripModeModuleDir), metadata.Command.Options.StripMode)
+	assert.Equal(t, string(StripModeOptimistic), metadata.Command.Options.StripMode)
 	assert.Greater(t, metadata.Stats.StrippedFiles, 0)
 	assert.Greater(t, metadata.Stats.StrippedBytes, int64(0))
 
@@ -55,7 +55,7 @@ func TestAcceptance_Strip_None(t *testing.T) {
 	runTofuPressBundle(t, bin, src, artifact, "--format=zip", "--strip=none")
 
 	metadata := metadataFromArtifact(t, artifact)
-	assert.Equal(t, string(StripModeNone), metadata.Command.Options.StripMode)
+	assert.Equal(t, string(StripModeFull), metadata.Command.Options.StripMode)
 	assert.Equal(t, 0, metadata.Stats.StrippedFiles)
 }
 
@@ -70,7 +70,7 @@ func TestAcceptance_Strip_ConfigOnly(t *testing.T) {
 	runTofuPressBundle(t, bin, src, artifact, "--format=zip", "--strip=config-only")
 
 	metadata := metadataFromArtifact(t, artifact)
-	assert.Equal(t, string(StripModeConfigOnly), metadata.Command.Options.StripMode)
+	assert.Equal(t, string(StripModeAggressive), metadata.Command.Options.StripMode)
 	assert.Greater(t, metadata.Stats.StrippedFiles, 0)
 }
 

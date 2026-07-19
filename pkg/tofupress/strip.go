@@ -10,33 +10,38 @@ import (
 	"strings"
 )
 
-// StripMode controls how much non-generated package content is retained.
+// StripMode controls how much content is retained after the strip filter.
+// See ADR-0001 for the full strip-level ladder and the anchor rule.
 type StripMode string
 
-// Strip mode constants define the supported ways to filter bundle content.
+// Strip level constants define the supported policies for filtering bundle
+// content. See ADR-0001 for the strip-level ladder (full / optimistic /
+// aggressive) and the anchor rule. Legacy names map via ParseStripMode aliases.
 const (
-	StripModeNone       StripMode = "none"
-	StripModeModuleDir  StripMode = "module-dir"
-	StripModeConfigOnly StripMode = "config-only"
+	StripModeFull       StripMode = "full"       // legacy: none
+	StripModeOptimistic StripMode = "optimistic" // legacy: module-dir (default)
+	StripModeAggressive StripMode = "aggressive" // legacy: config-only / tf-only
 )
 
-// ParseStripMode parses CLI/API strip mode input. Empty input means the safe default.
+// ParseStripMode parses CLI/API strip level input. Empty input means the
+// default (optimistic). Legacy names (none, module-dir, config-only, tf-only)
+// are accepted as aliases during alpha so existing tooling keeps working.
 func ParseStripMode(raw string) (StripMode, error) {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "", string(StripModeModuleDir):
-		return StripModeModuleDir, nil
-	case string(StripModeNone):
-		return StripModeNone, nil
-	case string(StripModeConfigOnly), "tf-only":
-		return StripModeConfigOnly, nil
+	case "", string(StripModeOptimistic), "module-dir":
+		return StripModeOptimistic, nil
+	case string(StripModeFull), "none":
+		return StripModeFull, nil
+	case string(StripModeAggressive), "config-only", "tf-only":
+		return StripModeAggressive, nil
 	default:
-		return "", fmt.Errorf("unsupported strip mode %q (use none, module-dir, config-only, or tf-only)", raw)
+		return "", fmt.Errorf("unsupported strip level %q (use full, optimistic, or aggressive; aliases none/module-dir/config-only/tf-only)", raw)
 	}
 }
 
 // IsAggressive reports whether this mode may remove files despite possible runtime reads.
 func (m StripMode) IsAggressive() bool {
-	return m == StripModeConfigOnly
+	return m == StripModeAggressive
 }
 
 // StripWarning is a user-visible warning produced while planning stripping.
@@ -116,7 +121,7 @@ func PlanStripping(ctx context.Context, tree *ResolvedTree, mode StripMode) (*St
 		return nil, fmt.Errorf("cannot plan stripping for empty tree")
 	}
 	if mode == "" {
-		mode = StripModeModuleDir
+		mode = StripModeOptimistic
 	}
 
 	plan := &StripPlan{Mode: mode, Packages: make(map[string]*PackageStripPlan)}
@@ -131,20 +136,28 @@ func PlanStripping(ctx context.Context, tree *ResolvedTree, mode StripMode) (*St
 	plan.FilesystemFunctions = refs
 
 	switch mode {
-	case StripModeNone:
+	case StripModeFull:
 		for _, pkgPlan := range plan.Packages {
 			pkgPlan.IncludeAll = true
 		}
-	case StripModeModuleDir:
+	case StripModeOptimistic:
+		// ADR-0001 optimistic keep-set:
+		//   1. anchor rule — preserve every subject .tf/.tofu-bearing dir at its
+		//      staged path with its config files (subject only; vendor never anchors)
+		//   2. resolver-descended module dirs reachable
+		//   3. static file()/fileset()/... matches with literal args
+		//   4. whole owning package verbatim for any module with a risk signal
+		//      (dynamic file() OR any ${path.module}/${path.root} string value)
+		markAnchors(plan, tree)
 		includeResolvedModuleDirs(plan, tree)
 		applyFilesystemFunctionRefs(plan, refs, true)
-	case StripModeConfigOnly:
+	case StripModeAggressive:
 		includeConfigFilesOnly(plan, tree)
 		if len(refs) > 0 {
-			plan.Warnings = append(plan.Warnings, StripWarning{Message: "filesystem reads were detected; config-only stripping is aggressive and may omit runtime files"})
+			plan.Warnings = append(plan.Warnings, StripWarning{Message: "filesystem reads were detected; aggressive stripping may omit runtime files"})
 		}
 	default:
-		return nil, fmt.Errorf("unsupported strip mode: %s", mode)
+		return nil, fmt.Errorf("unsupported strip level: %s", mode)
 	}
 
 	if err := plan.computeStats(); err != nil {
@@ -183,9 +196,9 @@ func includeResolvedModuleDirs(plan *StripPlan, tree *ResolvedTree) {
 	// packages may contain `../sibling` refs inside conditional branches
 	// (count=0, file()-pointed locals) the resolver never expanded. Directories
 	// inside such packages that the plan would exclude are surfaced as warnings
-	// so the user can re-run with --strip=none for that package. We DO NOT
-	// change the strip contract here (module-dir still applies file-level
-	// filtering); the safe fallback --strip=none already exists (review item 4
+	// so the user can re-run with --strip=full for that package. We DO NOT
+	// change the strip contract here (optimistic still applies file-level
+	// filtering); the safe fallback --strip=full already exists (review item 4
 	// / F6 content-loss — warn-only landing).
 	warnExcludedRemotePackageDirs(plan, tree)
 
@@ -220,12 +233,101 @@ func includeResolvedModuleDirs(plan *StripPlan, tree *ResolvedTree) {
 	}
 }
 
+// markAnchors implements ADR-0001's anchor rule: every directory under the
+// press subject (tree.Root.InstallDir) that contains a .tf/.tofu file is an
+// anchor, preserved at its staged path with its config files kept.
+//
+// Subject-boundary choice (ADR-0001 + ADR-0002 coherence): the anchor walk's
+// subject is the entry tree (tree.Root.InstallDir), NOT the whole package
+// root. Dirs outside the InstallDir subtree but inside PackageRoot (e.g.
+// packageRoot/examples/, packageRoot/README.md) are NOT anchors — they stay
+// governed by the keep-set, matching the existing bundle//subdir behavior.
+//
+// Vendor carveout: a directory inside the vendor directory is NEVER an
+// anchor (vendor is not // -addressable). We skip any directory that is at
+// or under a downloaded package's LocalDir so vendored .tf-dirs do not get
+// anchor-kept; they are governed by the risk-detector keep-set instead.
+//
+// Per the corrected anchor semantics (ADR-0001, amended), the anchor rule
+// guarantees LOCATION INVARIANCE + CONFIG PRESERVATION only: the dir stays
+// at its staged path and its .tf/.tofu config files are kept. NON-.tf files
+// in an anchor dir are NOT kept wholesale — they follow the same keep-set as
+// everything else (static file()/fileset() matches and whole-owning-package
+// when the module is risk-flagged). We therefore include ONLY the .tf/.tofu
+// config files (via includeFile), NOT the dir itself. Walker reachability is
+// preserved because includePath(dir, isDir=true) returns true when any
+// IncludedFile lives under it, so the archiver descends into the anchor dir
+// and reaches the .tf config without retaining the dir's non-.tf siblings.
+func markAnchors(plan *StripPlan, tree *ResolvedTree) {
+	subject := filepath.Clean(tree.Root.InstallDir)
+	if subject == "" {
+		return
+	}
+	vendorRoots := collectVendorRoots(tree)
+	_ = filepath.WalkDir(subject, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return filepath.SkipDir // tolerate vanished paths during planning
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		if isGeneratedOrVCSPath(path) {
+			return filepath.SkipDir
+		}
+		if isInsideAnyVendorRoot(path, vendorRoots) {
+			return filepath.SkipDir
+		}
+		tfFiles, ferr := FindTerraformFiles(path)
+		if ferr != nil {
+			return filepath.SkipDir
+		}
+		if len(tfFiles) == 0 {
+			return nil
+		}
+		pkgPlan := plan.PackageForPath(path)
+		if pkgPlan == nil {
+			return nil
+		}
+		for _, f := range tfFiles {
+			pkgPlan.includeFile(f)
+		}
+		return nil
+	})
+}
+
+// collectVendorRoots returns the cleaned LocalDir of every downloaded package
+// in the tree — the set of vendor package roots that are exempt from the
+// anchor rule (ADR-0001: directories inside the vendor directory are never
+// anchors).
+func collectVendorRoots(tree *ResolvedTree) []string {
+	roots := make([]string, 0, len(tree.Packages))
+	for _, pkg := range tree.Packages {
+		if pkg.LocalDir != "" {
+			root := filepath.Clean(pkg.LocalDir)
+			roots = append(roots, root)
+		}
+	}
+	return roots
+}
+
+// isInsideAnyVendorRoot reports whether path is at or under one of the vendor
+// package roots. Used by markAnchors to apply the vendor carveout.
+func isInsideAnyVendorRoot(path string, vendorRoots []string) bool {
+	p := filepath.Clean(path)
+	for _, root := range vendorRoots {
+		if p == root || strings.HasPrefix(p, root+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
+}
+
 // warnExcludedRemotePackageDirs walks each downloaded remote package's
 // top-level directories and emits a warning for any directory the strip plan
 // would exclude — i.e. a sibling the resolver never descended into but which a
 // conditional `../sibling` reference in the third-party package could reach at
 // runtime. The warning names the package and the excluded dir so the user can
-// decide to re-run with --strip=none.
+// decide to re-run with --strip=full (ADR-0001).
 func warnExcludedRemotePackageDirs(plan *StripPlan, tree *ResolvedTree) {
 	for _, pkg := range tree.Packages {
 		if pkg.LocalDir == "" {
@@ -248,10 +350,10 @@ func warnExcludedRemotePackageDirs(plan *StripPlan, tree *ResolvedTree) {
 			if !plan.IncludePath(childDir, true) {
 				plan.Warnings = append(plan.Warnings, StripWarning{
 					Message: fmt.Sprintf(
-						"module-dir strip mode excludes directory %q inside the "+
+						"optimistic strip level excludes directory %q inside the "+
 							"downloaded remote package %s; a conditional ../%s reference "+
 							"in this third-party module could reach it at runtime and fail. "+
-							"Re-run with --strip=none to keep it (review item 4)",
+							"Re-run with --strip=full to keep it (review item 4 / ADR-0001)",
 						entry.Name(), pkg.PackageAddr, entry.Name()),
 				})
 			}
@@ -296,18 +398,24 @@ func applyFilesystemFunctionRefs(plan *StripPlan, refs []FilesystemFunctionRef, 
 	plan.FilesystemFunctions = refs
 }
 
-// PackageForModuleKey finds the broadest PackageStripPlan (the package root) for a module.
+// PackageForModuleKey finds the OWNING package plan for a module flagged with a
+// risk signal. The owning package is the module's OWN (narrowest) enclosing
+// package root, NOT the broadest ancestor — a vendored module keeps its own
+// downloaded package, a subject module keeps its own directory subtree. This
+// fixes the scope bug documented in ADR-0001 ("Owning package"), where a
+// dynamic fallback previously escalated to the broadest ancestor and
+// over-included the user's repo when a vendored module triggered the signal.
 func (p *StripPlan) PackageForModuleKey(moduleKey string) *PackageStripPlan {
-	// Find a file from this module
 	for i := range p.FilesystemFunctions {
 		ref := &p.FilesystemFunctions[i]
 		if ref.ModuleKey == moduleKey {
 			cleaned := filepath.Clean(ref.SourceFile)
-			// Return the broadest (shortest) matching package root
+			// Return the narrowest (longest) matching package root — the
+			// module's own owning package (ADR-0001).
 			var best *PackageStripPlan
 			for root, pkgPlan := range p.Packages {
 				if cleaned == root || strings.HasPrefix(cleaned, root+string(filepath.Separator)) {
-					if best == nil || len(root) < len(best.PackageRoot) {
+					if best == nil || len(root) > len(best.PackageRoot) {
 						best = pkgPlan
 					}
 				}

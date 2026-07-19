@@ -131,7 +131,7 @@ func TestAcceptance_OCI_StripConfigOnly(t *testing.T) {
 
 	metadata := metadataFromArtifact(t, artifact)
 	assert.True(t, metadata.Command.Options.OCICompliant)
-	assert.Equal(t, string(StripModeConfigOnly), metadata.Command.Options.StripMode)
+	assert.Equal(t, string(StripModeAggressive), metadata.Command.Options.StripMode)
 
 	validateArchiveWithAllTools(t, serveArtifact(t, artifact))
 }

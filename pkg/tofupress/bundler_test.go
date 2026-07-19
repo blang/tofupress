@@ -257,12 +257,12 @@ module "b" { source = "./modules/old-b" }
 	}
 	modA.Parent = tree.Root
 	modB.Parent = tree.Root
-	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 	identityPlan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
 	require.NoError(t, err)
 	require.NoError(t, ApplySourcetreeIdentityPlan(context.Background(), tree, identityPlan))
-	stripPlan, err = PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err = PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
@@ -648,7 +648,7 @@ func TestBundlerZIPAppliesModuleDirStripPlanWithoutMutatingSource(t *testing.T) 
 
 	tree := &ResolvedTree{Root: &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}, Packages: map[string]*DownloadedPackage{}}
 	tree.AllModules = []*ModuleNode{tree.Root}
-	plan, err := PlanStripping(context.Background(), tree, StripModeConfigOnly)
+	plan, err := PlanStripping(context.Background(), tree, StripModeAggressive)
 	require.NoError(t, err)
 
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
@@ -671,7 +671,7 @@ func TestBundlerTarGZAppliesModuleDirStripPlan(t *testing.T) {
 
 	tree := &ResolvedTree{Root: &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}, Packages: map[string]*DownloadedPackage{}}
 	tree.AllModules = []*ModuleNode{tree.Root}
-	plan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
+	plan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 
 	archivePath := filepath.Join(t.TempDir(), "bundle.tar.gz")
@@ -699,7 +699,7 @@ locals {
 
 	root := &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}
 	tree := &ResolvedTree{Root: root, AllModules: []*ModuleNode{root}, Packages: map[string]*DownloadedPackage{}}
-	plan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
+	plan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
@@ -724,7 +724,7 @@ func TestBundlerDefaultModuleDirStrippingDropsIrrelevantPackageFilesWhenReadsAre
 
 	tree := &ResolvedTree{Root: &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}, Packages: map[string]*DownloadedPackage{}}
 	tree.AllModules = []*ModuleNode{tree.Root}
-	plan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
+	plan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
@@ -805,14 +805,14 @@ module "shared_c" {
 		"expected at least 4 modules (root + 3 local)")
 
 	// Apply sourcetree identity planning (non-OCI flow)
-	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 	identityPlan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
 	require.NoError(t, err)
 	require.NoError(t, ApplySourcetreeIdentityPlan(context.Background(), tree, identityPlan))
 
 	// Re-plan stripping
-	stripPlan, err = PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err = PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 
 	// Bundle to ZIP
@@ -920,13 +920,13 @@ module "remote_mod" {
 		"expected at least 1 remote package")
 
 	// Apply sourcetree identity planning
-	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 	identityPlan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
 	require.NoError(t, err)
 	require.NoError(t, ApplySourcetreeIdentityPlan(context.Background(), tree, identityPlan))
 
-	stripPlan, err = PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err = PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
@@ -1030,14 +1030,14 @@ module "pkg_two" {
 	}
 
 	// Apply sourcetree identity planning (non-OCI flow)
-	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 	identityPlan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
 	require.NoError(t, err)
 	require.NoError(t, ApplySourcetreeIdentityPlan(context.Background(), tree, identityPlan))
 
 	// Re-plan stripping after identity
-	stripPlan, err = PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err = PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 
 	// Bundle to ZIP
@@ -1541,7 +1541,7 @@ func TestBundler_SelfReferencingModuleDoesNotDropPackages(t *testing.T) {
 	assert.Same(t, bugMod, bugMod.Children[0], "module should reference itself as child")
 
 	// Apply sourcetree identity planning (same as bundle command)
-	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 
 	t.Logf("Before identity: %d packages in tree, %d packages in strip plan", len(tree.Packages), len(stripPlan.Packages))
@@ -1566,7 +1566,7 @@ func TestBundler_SelfReferencingModuleDoesNotDropPackages(t *testing.T) {
 	}
 
 	// Re-plan stripping
-	stripPlan, err = PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err = PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 
 	t.Logf("After identity: %d packages in tree", len(tree.Packages))
@@ -1721,7 +1721,7 @@ module "nacl_private" {
 		"account_config.accountindex.accountindex must not self-reference")
 
 	// Run through the full bundle pipeline
-	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 
 	identityPlan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
@@ -1736,7 +1736,7 @@ module "nacl_private" {
 	}
 
 	// Rebuild strip plan and bundle
-	stripPlan, err = PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err = PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 
 	archivePath := filepath.Join(t.TempDir(), "bundle.zip")
@@ -1831,7 +1831,7 @@ func TestBundler_VendorDirSkippingInternalModulesDir(t *testing.T) {
 	}
 
 	// Apply identity planning (no-op since LocalDir IS the final dir)
-	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 
 	identityPlan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
@@ -1841,7 +1841,7 @@ func TestBundler_VendorDirSkippingInternalModulesDir(t *testing.T) {
 	t.Logf("Identity: %d by final ID", len(identityPlan.ByFinalID))
 
 	// Build a fresh strip plan (after identity)
-	stripPlan, err = PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err = PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 
 	// Bundle

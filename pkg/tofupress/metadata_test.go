@@ -53,7 +53,7 @@ func TestBuildArtifactMetadataFromResolvedTree(t *testing.T) {
 		Build:      BuildInfo{Version: "v0.1.0", Commit: "abc", Time: "2026-06-21_12:00:00"},
 		Command:    "bundle",
 		Args:       []string{rootDir, "bundle.zip"},
-		Options:    BundleOptions{Format: "zip", OCICompliant: false, StripMode: "none"},
+		Options:    BundleOptions{Format: "zip", OCICompliant: false, StripMode: "full"},
 		RootSource: rootDir,
 		OutputPath: "bundle.zip",
 		CreatedAt:  createdAt,
@@ -88,19 +88,19 @@ func TestBuildArtifactMetadataIncludesStripPlanStatsAndFilesystemFunctions(t *te
 
 	tree := &ResolvedTree{Root: &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}, Packages: map[string]*DownloadedPackage{}}
 	tree.AllModules = []*ModuleNode{tree.Root}
-	stripPlan, err := PlanStripping(context.Background(), tree, StripModeModuleDir)
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
 	require.NoError(t, err)
 
 	metadata, err := BuildArtifactMetadata(tree, &MetadataRequest{
 		Build:      BuildInfo{Version: "test"},
 		Command:    "bundle",
-		Options:    BundleOptions{Format: "zip", StripMode: string(StripModeModuleDir)},
+		Options:    BundleOptions{Format: "zip", StripMode: string(StripModeOptimistic)},
 		OutputPath: "bundle.zip",
 		StripPlan:  stripPlan,
 	})
 	require.NoError(t, err)
 
-	assert.Equal(t, string(StripModeModuleDir), metadata.Command.Options.StripMode)
+	assert.Equal(t, string(StripModeOptimistic), metadata.Command.Options.StripMode)
 	assert.Equal(t, stripPlan.FinalBytes, metadata.Stats.FinalBytes)
 	assert.Equal(t, stripPlan.StrippedBytes, metadata.Stats.StrippedBytes)
 	assert.Equal(t, stripPlan.StrippedFiles, metadata.Stats.StrippedFiles)
@@ -164,7 +164,7 @@ func TestBuildArtifactMetadata_OutputPathIsRelative(t *testing.T) {
 		Build:      BuildInfo{Version: "test"},
 		Command:    "bundle",
 		Args:       []string{".", absPath},
-		Options:    BundleOptions{Format: "zip", StripMode: string(StripModeNone)},
+		Options:    BundleOptions{Format: "zip", StripMode: string(StripModeFull)},
 		OutputPath: absPath,
 		CreatedAt:  time.Now(),
 	})
@@ -235,7 +235,7 @@ func TestBuildArtifactMetadataIncludesSourcetreeDedupGroups(t *testing.T) {
 	metadata, err := BuildArtifactMetadata(tree, &MetadataRequest{
 		Command:        "bundle",
 		OutputPath:     filepath.Join(root, "bundle.zip"),
-		Options:        BundleOptions{Format: "zip", StripMode: string(StripModeModuleDir)},
+		Options:        BundleOptions{Format: "zip", StripMode: string(StripModeOptimistic)},
 		CreatedAt:      time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC),
 		SourcetreePlan: identityPlan,
 	})

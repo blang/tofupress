@@ -22,7 +22,7 @@ func TestRunBundleErrorsOnUnknownExtensionWhenFormatAuto(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.Flags().String("format", "auto", "")
 	cmd.Flags().Bool("oci-compliant", false, "")
-	cmd.Flags().String("strip", "module-dir", "")
+	cmd.Flags().String("strip", "optimistic", "")
 
 	err := runBundle(cmd, []string{tmpDir, filepath.Join(tmpDir, "bundle.unknown")})
 	require.Error(t, err)
@@ -42,7 +42,7 @@ func TestRunBundleWritesMetadataOutAndPrintsStats(t *testing.T) {
 	cmd.Flags().String("format", "zip", "")
 	cmd.Flags().Bool("oci-compliant", false, "")
 	cmd.Flags().String("metadata-out", metadataPath, "")
-	cmd.Flags().String("strip", "module-dir", "")
+	cmd.Flags().String("strip", "optimistic", "")
 
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
@@ -59,7 +59,7 @@ func TestRunBundleWritesMetadataOutAndPrintsStats(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(data), `"schema_version": "1"`)
 	assert.Contains(t, string(data), `"format": "zip"`)
-	assert.Contains(t, string(data), `"strip_mode": "module-dir"`)
+	assert.Contains(t, string(data), `"strip_mode": "optimistic"`)
 }
 
 func TestRunBundleDefaultsToModuleDirStripMode(t *testing.T) {
@@ -160,7 +160,7 @@ func newTestBundleCommand(t *testing.T, metadataPath string) *cobra.Command {
 	cmd.Flags().Bool("oci-compliant", false, "")
 	cmd.Flags().Bool("json", false, "")
 	cmd.Flags().String("metadata-out", metadataPath, "")
-	cmd.Flags().String("strip", string(tofupress.StripModeModuleDir), "")
+	cmd.Flags().String("strip", string(tofupress.StripModeOptimistic), "")
 	cmd.Flags().String("vendor-dir", "_vendor", "")
 	return cmd
 }
@@ -178,7 +178,7 @@ func TestRunBundleJSONEmitsMetadataToStdout(t *testing.T) {
 	cmd.Flags().Bool("oci-compliant", false, "")
 	cmd.Flags().Bool("json", true, "")
 	cmd.Flags().String("metadata-out", "", "")
-	cmd.Flags().String("strip", string(tofupress.StripModeModuleDir), "")
+	cmd.Flags().String("strip", string(tofupress.StripModeOptimistic), "")
 	cmd.Flags().String("vendor-dir", "_vendor", "")
 
 	var stdout bytes.Buffer
@@ -201,7 +201,7 @@ func TestRunBundleErrorsOnUnknownExtensionWithDirHint(t *testing.T) {
 	cmd.Flags().String("format", "auto", "")
 	cmd.Flags().Bool("oci-compliant", false, "")
 	cmd.Flags().Bool("json", false, "")
-	cmd.Flags().String("strip", "module-dir", "")
+	cmd.Flags().String("strip", "optimistic", "")
 
 	err := runBundle(cmd, []string{tmpDir, tmpDir + "/out/"})
 	assert.Contains(t, err.Error(), "could not infer bundle format")

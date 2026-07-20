@@ -2,12 +2,14 @@
 package tofupress
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 
+	"github.com/hashicorp/hcl/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -214,5 +216,69 @@ locals { python = "python3" }
 	for _, ref := range refs {
 		assert.NotContains(t, ref.RawPath, "escaped.txt",
 			"escaped $${path.module}/escaped.txt is a literal, must not be flagged")
+	}
+}
+
+// TestRangeEndIndex_Contains pins the O(log N + k) replaceent for the former
+// linear rangeContainedInAny (review nit #5): containment must be correct for
+// nested filesystem-call arg ranges, non-contained siblings, and the
+// edge case where an outer wider range contains a query the narrower inner
+// range does not. hcl.Range values are constructed by byte-offset bookkeeping
+// so the index's End.Byte sort + binary search is exercisable directly.
+func TestRangeEndIndex_Contains(t *testing.T) {
+	file := "main.tf"
+	mkRange := func(start, end int) hcl.Range {
+		return hcl.Range{
+			Filename: file,
+			Start:    hcl.Pos{Line: 1, Column: 1, Byte: start},
+			End:      hcl.Pos{Line: 1, Column: 1, Byte: end},
+		}
+	}
+	// outer [0,100], inner [10,20] — nested, both sorted by End via the index.
+	outer := mkRange(0, 100)
+	inner := mkRange(10, 20)
+	idx := newRangeEndIndex([]hcl.Range{outer, inner})
+
+	// query inside inner → contained by both; first hit wins.
+	assert.True(t, idx.contains(mkRange(12, 18)), "inside inner must be contained")
+	// query spanning beyond inner end but within outer — only outer contains; this
+	// is the edge case a naive "rightmost-start binary search" would miss.
+	assert.True(t, idx.contains(mkRange(15, 25)), "query past inner.End but within outer must be contained (nested edge case)")
+	// query outside both.
+	assert.False(t, idx.contains(mkRange(101, 110)), "past outer.End must not be contained")
+	// query in a different file is never contained.
+	otherFile := hcl.Range{
+		Filename: "other.tf",
+		Start:    hcl.Pos{Line: 1, Column: 1, Byte: 5},
+		End:      hcl.Pos{Line: 1, Column: 1, Byte: 15},
+	}
+	assert.False(t, idx.contains(otherFile), "different filename must not be contained")
+	// empty index contains nothing.
+	assert.False(t, newRangeEndIndex(nil).contains(mkRange(0, 10)), "empty index contains nothing")
+}
+
+// BenchmarkDetectModuleFilesystemFunctions measures detector throughput so
+// the review nit #4 (fileBytes threaded instead of re-reading disk per
+// template) and nit #5 (rangeEndIndex vs linear scan) are observable. Run
+// with: go test -bench=BenchmarkDetectModuleFilesystemFunctions -run=^$ ./pkg/tofupress/
+func BenchmarkDetectModuleFilesystemFunctions(b *testing.B) {
+	rootDir := b.TempDir()
+	// A config with many templates and several file() calls to exercise both
+	// the raw-text extraction path and the containment index.
+	var sb strings.Builder
+	sb.WriteString(`locals {` + "\n")
+	for i := range 50 {
+		fmt.Fprintf(&sb, `  p%d = file("${path.module}/data%d.txt")`+"\n", i, i)
+		fmt.Fprintf(&sb, `  r%d = "${path.module}/build%d"`+"\n", i, i)
+	}
+	sb.WriteString(`}` + "\n")
+	require.NoError(b, os.WriteFile(filepath.Join(rootDir, "main.tf"), []byte(sb.String()), 0o644))
+	module := &ModuleNode{Key: "root", Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		if _, err := DetectModuleFilesystemFunctions(rootDir, module); err != nil {
+			b.Fatal(err)
+		}
 	}
 }

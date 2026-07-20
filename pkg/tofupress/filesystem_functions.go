@@ -101,7 +101,7 @@ func DetectModuleFilesystemFunctions(rootDir string, module *ModuleNode) ([]File
 		if !ok {
 			return nil, fmt.Errorf("parsed HCL file %s did not produce a syntax body", filePath)
 		}
-		walkFilesystemNodes(syntaxBody, module, filePath, ctx, &refs)
+		walkFilesystemNodes(syntaxBody, module, filePath, data, ctx, &refs)
 	}
 
 	sort.Slice(refs, func(i, j int) bool {
@@ -134,14 +134,22 @@ type pathEvalContext struct {
 // handling), templates that are the direct argument of a filesystem-function
 // call are skipped for signal #2: a static file("${path.module}/x") is already
 // precisely resolved by signal #1 — there is no silent-loss risk to escalate.
-// The skip set is built as we visit each filesystem FunctionCallExpr (parents
-// are visited before their arg expressions).
-func walkFilesystemNodes(node hclsyntax.Node, module *ModuleNode, filePath string, ctx pathEvalContext, refs *[]FilesystemFunctionRef) {
+//
+// signal #2 templates are buffered during the walk and resolved AFTER the
+// walk, once the full set of filesystem-call arg ranges is known. That set
+// is sorted by End.Byte and queried per template in O(log R + k) via
+// rangeEndIndex.contains (review nit #5: previously O(T·R) linear). The
+// walk also threads the already-read file bytes (fileData) so raw source
+// text extraction slices memory rather than re-reading the file per
+// template/arg (review nit #4).
+func walkFilesystemNodes(node hclsyntax.Node, module *ModuleNode, filePath string, fileData []byte, ctx pathEvalContext, refs *[]FilesystemFunctionRef) {
 	var fsCallArgRanges []hcl.Range
+	type tmplCandidate struct{ tmpl *hclsyntax.TemplateExpr }
+	var templates []tmplCandidate
 	_ = hclsyntax.VisitAll(node, func(visited hclsyntax.Node) hcl.Diagnostics {
 		if call, ok := visited.(*hclsyntax.FunctionCallExpr); ok {
 			if _, isFilesystem := terraformFilesystemFunctions[call.Name]; isFilesystem {
-				*refs = append(*refs, buildFilesystemRef(call, module, filePath, ctx))
+				*refs = append(*refs, buildFilesystemRef(call, module, filePath, fileData, ctx))
 				for _, arg := range call.Args {
 					fsCallArgRanges = append(fsCallArgRanges, arg.Range())
 				}
@@ -149,15 +157,20 @@ func walkFilesystemNodes(node hclsyntax.Node, module *ModuleNode, filePath strin
 			return nil
 		}
 		if tmpl, ok := visited.(*hclsyntax.TemplateExpr); ok {
-			rng := tmpl.Range()
-			if !rangeContainedInAny(rng, fsCallArgRanges) {
-				if ref, ok := buildPathModuleRef(tmpl, module, filePath); ok {
-					*refs = append(*refs, ref)
-				}
-			}
+			templates = append(templates, tmplCandidate{tmpl: tmpl})
 		}
 		return nil
 	})
+	idx := newRangeEndIndex(fsCallArgRanges)
+	for _, cand := range templates {
+		rng := cand.tmpl.Range()
+		if idx.contains(rng) {
+			continue // template is a filesystem-function arg — handled by signal #1
+		}
+		if ref, ok := buildPathModuleRef(cand.tmpl, module, filePath, fileData); ok {
+			*refs = append(*refs, ref)
+		}
+	}
 }
 
 // buildPathModuleRef constructs a risk-signal (#2) FilesystemFunctionRef for a
@@ -185,7 +198,7 @@ func walkFilesystemNodes(node hclsyntax.Node, module *ModuleNode, filePath strin
 // Only string templates that name a module-relative (or root-relative) FILE
 // path — the headliner class: source_path, provisioner interpreter/command,
 // local-exec command, custom provider attributes — are flagged.
-func buildPathModuleRef(tmpl *hclsyntax.TemplateExpr, module *ModuleNode, filePath string) (FilesystemFunctionRef, bool) {
+func buildPathModuleRef(tmpl *hclsyntax.TemplateExpr, module *ModuleNode, filePath string, fileData []byte) (FilesystemFunctionRef, bool) {
 	parts := tmpl.Parts
 	for i := range len(parts) {
 		ste, ok := parts[i].(*hclsyntax.ScopeTraversalExpr)
@@ -223,7 +236,7 @@ func buildPathModuleRef(tmpl *hclsyntax.TemplateExpr, module *ModuleNode, filePa
 			ModuleKey:   module.Key,
 			SourceFile:  filePath,
 			SourceRange: tmpl.Range().String(),
-			RawPath:     expressionSourceText(tmpl),
+			RawPath:     expressionSourceText(tmpl, fileData),
 			Handling:    handlingDynamicFallback,
 			Static:      false,
 		}, true
@@ -246,14 +259,40 @@ func isPathScopeTraversal(trav hcl.Traversal, attr string) bool {
 	return ok && at.Name == attr
 }
 
-// rangeContainedInAny reports whether r is within any of the given ranges
-// (same file, byte-bounded). Used to skip filesystem-function-call arguments
-// during the signal #2 (path.module) scan.
-func rangeContainedInAny(r hcl.Range, ranges []hcl.Range) bool {
-	for _, within := range ranges {
-		if r.Filename == within.Filename &&
-			r.Start.Byte >= within.Start.Byte &&
-			r.End.Byte <= within.End.Byte {
+// rangeEndIndex is a sorted-by-End.Byte index of HCL ranges supporting
+// point-containment queries ("is range r inside any indexed range?") in
+// O(log N + k), where k is the number of indexed ranges whose End.Byte >=
+// r.End.Byte. It replaces the previous linear rangeContainedInAny scan
+// (O(N) per query, O(T·N) per file) — review nit #5. Built once from the
+// append-order slice collected during walkFilesystemNodes' single VisitAll
+// pass (which sees the complete arg-range set only after the walk completes,
+// so the index is constructed post-walk, not incrementally).
+type rangeEndIndex struct {
+	ranges []hcl.Range // sorted by End.Byte ascending
+}
+
+// newRangeEndIndex sorts a copy of ranges by End.Byte ascending. The input
+// slice is left untouched so callers may keep appending to it.
+func newRangeEndIndex(ranges []hcl.Range) rangeEndIndex {
+	sorted := make([]hcl.Range, len(ranges))
+	copy(sorted, ranges)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].End.Byte < sorted[j].End.Byte
+	})
+	return rangeEndIndex{ranges: sorted}
+}
+
+// contains reports whether r is wholly within any indexed range (same file,
+// byte-bounded). Entries with End.Byte < r.End.Byte cannot contain r, so a
+// binary search skips them; the remaining tail (all End.Byte >= r.End.Byte) is
+// scanned for one with a matching filename and Start.Byte <= r.Start.Byte.
+func (idx rangeEndIndex) contains(r hcl.Range) bool {
+	start := sort.Search(len(idx.ranges), func(i int) bool {
+		return idx.ranges[i].End.Byte >= r.End.Byte
+	})
+	for i := start; i < len(idx.ranges); i++ {
+		w := idx.ranges[i]
+		if w.Filename == r.Filename && w.Start.Byte <= r.Start.Byte && w.End.Byte >= r.End.Byte {
 			return true
 		}
 	}
@@ -261,7 +300,9 @@ func rangeContainedInAny(r hcl.Range, ranges []hcl.Range) bool {
 }
 
 // buildFilesystemRef constructs a FilesystemFunctionRef from a function call expression.
-func buildFilesystemRef(call *hclsyntax.FunctionCallExpr, module *ModuleNode, filePath string, ctx pathEvalContext) FilesystemFunctionRef {
+// fileData is the in-memory bytes of the .tf/.tofu file (already read by the caller)
+// so expressionSourceText can slice raw source text without re-reading disk (review nit #4).
+func buildFilesystemRef(call *hclsyntax.FunctionCallExpr, module *ModuleNode, filePath string, fileData []byte, ctx pathEvalContext) FilesystemFunctionRef {
 	ref := FilesystemFunctionRef{
 		Kind:        refKindFilesystemFunction,
 		Function:    call.Name,
@@ -274,7 +315,7 @@ func buildFilesystemRef(call *hclsyntax.FunctionCallExpr, module *ModuleNode, fi
 		return ref
 	}
 
-	rawSource := expressionSourceText(call.Args[0])
+	rawSource := expressionSourceText(call.Args[0], fileData)
 	evaluated, ok := staticString(call.Args[0], ctx)
 	if !ok {
 		return ref
@@ -312,16 +353,23 @@ func buildFilesystemRef(call *hclsyntax.FunctionCallExpr, module *ModuleNode, fi
 	return ref
 }
 
-// expressionSourceText returns the raw source text of an HCL expression from its range,
-// with surrounding HCL string quotes stripped.
-func expressionSourceText(expr hclsyntax.Expression) string {
+// expressionSourceText returns the raw source text of an HCL expression from
+// its range, with surrounding HCL string quotes stripped. fileData is the
+// already-read bytes of the file owning expr (passed by DetectedModule…
+// callers to avoid re-reading disk per template/arg — review nit #4); if it is
+// nil, the file is read on demand as a fallback for external/synthetic callers.
+func expressionSourceText(expr hclsyntax.Expression, fileData []byte) string {
 	rng := expr.Range()
 	if rng.Filename == "" {
 		return ""
 	}
-	data, err := os.ReadFile(rng.Filename) //nolint:gosec // filename comes from parsed HCL file
-	if err != nil {
-		return ""
+	data := fileData
+	if data == nil {
+		var err error
+		data, err = os.ReadFile(rng.Filename) //nolint:gosec // filename comes from parsed HCL file
+		if err != nil {
+			return ""
+		}
 	}
 	if rng.End.Byte > len(data) || rng.Start.Byte > len(data) {
 		return ""

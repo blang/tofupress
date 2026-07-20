@@ -69,7 +69,7 @@ func init() {
 
 	// Register subcommands
 	rootCmd.AddCommand(resolveCmd)
-	rootCmd.AddCommand(bundleCmd)
+	rootCmd.AddCommand(moduleCmd)
 	rootCmd.AddCommand(metadataCmd)
 	rootCmd.AddCommand(versionCmd)
 }

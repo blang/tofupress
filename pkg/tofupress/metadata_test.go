@@ -51,7 +51,7 @@ func TestBuildArtifactMetadataFromResolvedTree(t *testing.T) {
 	createdAt := time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)
 	metadata, err := BuildArtifactMetadata(tree, &MetadataRequest{
 		Build:      BuildInfo{Version: "v0.1.0", Commit: "abc", Time: "2026-06-21_12:00:00"},
-		Command:    "bundle",
+		Command:    "module",
 		Args:       []string{rootDir, "bundle.zip"},
 		Options:    BundleOptions{Format: "zip", OCICompliant: false, StripMode: "full"},
 		RootSource: rootDir,
@@ -63,7 +63,7 @@ func TestBuildArtifactMetadataFromResolvedTree(t *testing.T) {
 	assert.Equal(t, MetadataSchemaVersion, metadata.SchemaVersion)
 	assert.Equal(t, "2026-06-21T12:00:00Z", metadata.CreatedAt)
 	assert.Equal(t, "v0.1.0", metadata.TofuPress.Version)
-	assert.Equal(t, "bundle", metadata.Command.Name)
+	assert.Equal(t, "module", metadata.Command.Name)
 	assert.Equal(t, "bundle.zip", metadata.Artifact.OutputPath)
 	assert.Equal(t, "zip", metadata.Artifact.Format)
 	// InstallDir should be relative to root to avoid leaking temp paths
@@ -93,7 +93,7 @@ func TestBuildArtifactMetadataIncludesStripPlanStatsAndFilesystemFunctions(t *te
 
 	metadata, err := BuildArtifactMetadata(tree, &MetadataRequest{
 		Build:      BuildInfo{Version: "test"},
-		Command:    "bundle",
+		Command:    "module",
 		Options:    BundleOptions{Format: "zip", StripMode: string(StripModeOptimistic)},
 		OutputPath: "bundle.zip",
 		StripPlan:  stripPlan,
@@ -162,7 +162,7 @@ func TestBuildArtifactMetadata_OutputPathIsRelative(t *testing.T) {
 	absPath := filepath.Join(rootDir, "bundle.zip")
 	metadata, err := BuildArtifactMetadata(tree, &MetadataRequest{
 		Build:      BuildInfo{Version: "test"},
-		Command:    "bundle",
+		Command:    "module",
 		Args:       []string{".", absPath},
 		Options:    BundleOptions{Format: "zip", StripMode: string(StripModeFull)},
 		OutputPath: absPath,
@@ -233,7 +233,7 @@ func TestBuildArtifactMetadataIncludesSourcetreeDedupGroups(t *testing.T) {
 	}}}
 
 	metadata, err := BuildArtifactMetadata(tree, &MetadataRequest{
-		Command:        "bundle",
+		Command:        "module",
 		OutputPath:     filepath.Join(root, "bundle.zip"),
 		Options:        BundleOptions{Format: "zip", StripMode: string(StripModeOptimistic)},
 		CreatedAt:      time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC),

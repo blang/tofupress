@@ -12,10 +12,14 @@ import (
 	"github.com/blang/tofupress/pkg/tofupress"
 )
 
-var bundleCmd = &cobra.Command{
-	Use:   "bundle <directory> <output>",
-	Short: "Resolve modules and create a bundle",
-	Long: `Resolves all module dependencies and creates a self-contained bundle.
+var moduleCmd = &cobra.Command{
+	Use:   "module <subject> [output]",
+	Short: "Press one module: resolve deps and create a self-contained archive",
+	Long: `Presses ONE module: resolves all module dependencies and creates a self-contained archive,
+pivoting the entry module to the archive root (ADR-0002).
+
+The subject must contain at least one .tf/.tofu file — a no-.tf subject is refused; use
+` + "`tofupress tree`" + ` for a modules-only repository.
 
 Supported formats:
   zip     - For OCI registry distribution (default)
@@ -23,26 +27,26 @@ Supported formats:
   tar.xz  - For S3/object storage distribution
 
 Example:
-  tofupress bundle ./infra bundle.zip
+  tofupress module ./infra bundle.zip
   oras push --artifact-type=application/vnd.opentofu.modulepkg \
     registry.example.com/module:latest bundle.zip:archive/zip`,
 	Args: cobra.ExactArgs(2),
-	RunE: runBundle,
+	RunE: runPressModule,
 }
 
 func init() {
-	bundleCmd.Flags().String("format", "auto", "Bundle format: auto, zip, tar.gz, tar.xz (auto detects from output file extension)")
-	bundleCmd.Flags().Bool("oci-compliant", false, "Generate OCI-compliant bundle (no sourcetree metadata, inlined modules)")
-	bundleCmd.Flags().Bool("strict-oci", true, "Strict OCI spec enforcement: reject artifacts with empty/non-matching artifactType (review item 10; --strict-oci=false = lenient with warning)")
-	bundleCmd.Flags().Bool("json", false, "Emit the bundle metadata as JSON to stdout after success (review item 9)")
-	bundleCmd.Flags().String("metadata-out", "", "Write bundle metadata JSON to a separate path")
-	bundleCmd.Flags().String("strip", "optimistic", "Strip level: full, optimistic (default), aggressive. Legacy aliases: none=full, module-dir=optimistic, config-only/tf-only=aggressive (ADR-0001)")
-	bundleCmd.Flags().String("vendor-dir", "_vendor", "Vendored modules directory name (remote dependencies are rooted here in the bundle)")
+	moduleCmd.Flags().String("format", "auto", "Bundle format: auto, zip, tar.gz, tar.xz (auto detects from output file extension)")
+	moduleCmd.Flags().Bool("oci-compliant", false, "Generate OCI-compliant bundle (no sourcetree metadata, inlined modules)")
+	moduleCmd.Flags().Bool("strict-oci", true, "Strict OCI spec enforcement: reject artifacts with empty/non-matching artifactType (review item 10; --strict-oci=false = lenient with warning)")
+	moduleCmd.Flags().Bool("json", false, "Emit the bundle metadata as JSON to stdout after success (review item 9)")
+	moduleCmd.Flags().String("metadata-out", "", "Write bundle metadata JSON to a separate path")
+	moduleCmd.Flags().String("strip", "optimistic", "Strip level: full, optimistic (default), aggressive. Legacy aliases: none=full, module-dir=optimistic, config-only/tf-only=aggressive (ADR-0001)")
+	moduleCmd.Flags().String("vendor-dir", "_vendor", "Vendored modules directory name (remote dependencies are rooted here in the bundle)")
 }
 
 //
 //nolint:gocognit,gocyclo // CLI wiring naturally involves multiple configuration steps
-func runBundle(cmd *cobra.Command, args []string) error {
+func runPressModule(cmd *cobra.Command, args []string) error {
 	source := args[0]
 	outputPath := args[1]
 	stdout := cmd.OutOrStdout()
@@ -94,15 +98,19 @@ func runBundle(cmd *cobra.Command, args []string) error {
 			fmt.Fprintf(os.Stderr, "  ⚠ Warning: %s\n", event.Source)
 		}
 	}
+
+	// `tofupress module` refuses a no-.tf subject (ADR-0002): a module press
+	// requires at least one .tf/.tofu in the entry module; a modules-only repo is
+	// the `tofupress tree` case. Fail fast before resolution rather than warn-
+	// and-degenerate into an empty archive (the former `bundle` behaviour).
+	tfFiles, tfErr := tofupress.FindTerraformFiles(workDir)
+	if tfErr == nil && len(tfFiles) == 0 {
+		return fmt.Errorf("subject %q contains no .tf or .tofu files; `tofupress module` presses a single module — use `tofupress tree` for a modules-only repository (ADR-0002)", source)
+	}
+
 	tree, err := resolver.Resolve(cmd.Context(), workDir)
 	if err != nil {
 		return fmt.Errorf("failed to resolve modules: %w", err)
-	}
-
-	// Check for empty root module (no .tf/.tofu files)
-	tfFiles, err := tofupress.FindTerraformFiles(workDir)
-	if err == nil && len(tfFiles) == 0 {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: root module contains no .tf or .tofu files\n") //nolint:errcheck // stderr writes are best-effort
 	}
 	if !jsonOut {
 		fmt.Fprintf(stdout, "Found %d modules and %d packages\n", len(tree.AllModules), len(tree.Packages)) //nolint:errcheck // stdout writes are best-effort
@@ -179,7 +187,7 @@ func runBundle(cmd *cobra.Command, args []string) error {
 
 	metadata, err := tofupress.BuildArtifactMetadata(tree, &tofupress.MetadataRequest{
 		Build:          EffectiveBuildInfo(),
-		Command:        "bundle",
+		Command:        "module",
 		Args:           []string{source, outputPath},
 		Options:        tofupress.BundleOptions{Format: string(format), OCICompliant: ociCompliant, StripMode: string(stripMode), StripModeInput: stripStr},
 		RootSource:     source,

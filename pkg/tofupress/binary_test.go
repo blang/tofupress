@@ -203,7 +203,7 @@ func validateTarGzContents(t *testing.T, path string, expectedFiles []string) (m
 	return contents, nil
 }
 
-// TestBinary_HelpShowsCommands verifies that the CLI binary shows resolve and bundle commands in help.
+// TestBinary_HelpShowsCommands verifies that the CLI binary shows resolve and module commands in help.
 func TestBinary_HelpShowsCommands(t *testing.T) {
 	binary := buildBinary(t)
 
@@ -217,7 +217,7 @@ func TestBinary_HelpShowsCommands(t *testing.T) {
 	// Verify help output contains the expected commands
 	assert.Contains(t, outputStr, "Available Commands", "help output should have an Available Commands section")
 	assert.Contains(t, outputStr, "  resolve", "help output should list 'resolve' as a command")
-	assert.Contains(t, outputStr, "  bundle", "help output should list 'bundle' as a command")
+	assert.Contains(t, outputStr, "  module", "help output should list 'module' as a command (ADR-0002)")
 }
 
 // TestBinary_ResolveLocalDir verifies that the resolve command works on a local directory.
@@ -246,7 +246,7 @@ func TestBinary_BundleCreatesArchive(t *testing.T) {
 	outputPath := filepath.Join(t.TempDir(), "bundle.zip")
 
 	// Run the binary with bundle command
-	cmd := exec.Command(binary, "bundle", fixture, outputPath) //nolint:gosec // G204: subprocess is intentional for testing binary
+	cmd := exec.Command(binary, "module", fixture, outputPath) //nolint:gosec // G204: subprocess is intentional for testing binary
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, "binary bundle should succeed: %s", string(output))
 
@@ -298,7 +298,7 @@ func TestBinary_BundlePreservesSource(t *testing.T) {
 	originalChildModTime := originalChildInfo.ModTime()
 
 	// Run bundle command
-	cmd := exec.Command(binary, "bundle", fixture, outputPath) //nolint:gosec // G204: subprocess is intentional for testing binary
+	cmd := exec.Command(binary, "module", fixture, outputPath) //nolint:gosec // G204: subprocess is intentional for testing binary
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, "bundle should succeed: %s", string(output))
 
@@ -348,7 +348,7 @@ func TestBinary_BundleAutoDetectsFormat(t *testing.T) {
 	outputPath := filepath.Join(t.TempDir(), "bundle.tar.gz")
 
 	// Run the binary with bundle command (no --format flag)
-	cmd := exec.Command(binary, "bundle", fixture, outputPath) //nolint:gosec // G204: subprocess is intentional for testing binary
+	cmd := exec.Command(binary, "module", fixture, outputPath) //nolint:gosec // G204: subprocess is intentional for testing binary
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, "binary bundle should succeed: %s", string(output))
 
@@ -382,7 +382,7 @@ func TestBinary_BundleRemoteGitSource(t *testing.T) {
 	outputPath := filepath.Join(t.TempDir(), "bundle.zip")
 
 	// Bundle a remote git module directly — implementation accepts both local and remote sources
-	cmd := exec.Command(binary, "bundle", //nolint:gosec // G204: subprocess is intentional for testing binary
+	cmd := exec.Command(binary, "module", //nolint:gosec // G204: subprocess is intentional for testing binary
 		"git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git?ref=master",
 		outputPath)
 	out, err := cmd.CombinedOutput()
@@ -418,7 +418,7 @@ module "vpc" {
 	outputPath := filepath.Join(t.TempDir(), "bundle.zip")
 
 	// Bundle the local fixture (which will download the remote module)
-	cmd := exec.Command(binary, "bundle", fixtureDir, outputPath) //nolint:gosec // G204: subprocess is intentional for testing binary
+	cmd := exec.Command(binary, "module", fixtureDir, outputPath) //nolint:gosec // G204: subprocess is intentional for testing binary
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, "bundle should succeed: %s", string(out))
 
@@ -466,9 +466,13 @@ func TestBinary_ResolveRemoteGitJSON(t *testing.T) {
 	assert.Contains(t, result, "modules", "JSON output should contain 'modules' key")
 }
 
-// TestBinary_BundleWithSubpath verifies that bundle handles subpath sources correctly.
+// TestBinary_BundleWithSubpath verifies that `module` handles subpath sources correctly.
 // A subpath source like "git::https://github.com/user/repo.git//modules/vpc" should
-// bundle only the modules/vpc subdirectory as the root module.
+// press only the modules/vpc subdirectory as the root module. The subdir must itself
+// be a module (contain .tf at its root): `tofupress module` refuses a no-.tf subject
+// (ADR-0002) — a tree-of-modules subdir (e.g. the repo's //examples directory,
+// which has .tf only in nested example dirs) is the `tofupress tree` case, so this
+// test points at a single example module (examples/simple-vpc) that has its own main.tf.
 func TestBinary_BundleWithSubpath(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test with network access")
@@ -477,12 +481,12 @@ func TestBinary_BundleWithSubpath(t *testing.T) {
 	binary := buildBinary(t)
 	outputPath := filepath.Join(t.TempDir(), "bundle.zip")
 
-	// Bundle a subpath of a remote git module
-	cmd := exec.Command(binary, "bundle", //nolint:gosec // G204: subprocess is intentional for testing binary
-		"git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git//examples?ref=master", //nolint:lll // long URL
+	// Press a subpath of a remote git module that is itself a single module.
+	cmd := exec.Command(binary, "module", //nolint:gosec // G204: subprocess is intentional for testing binary
+		"git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git//examples/complete?ref=master", //nolint:lll // long URL
 		outputPath)
 	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, "bundle subpath source failed: %s", string(out))
+	require.NoError(t, err, "module subpath source failed: %s", string(out))
 
 	// Verify bundle was created
 	_, err = os.Stat(outputPath)
@@ -516,7 +520,7 @@ module "remote" {
 
 	// First bundle
 	firstBundlePath := filepath.Join(t.TempDir(), "first-bundle.zip")
-	cmd := exec.Command(binary, "bundle", fixtureDir, firstBundlePath) //nolint:gosec // G204: subprocess is intentional
+	cmd := exec.Command(binary, "module", fixtureDir, firstBundlePath) //nolint:gosec // G204: subprocess is intentional
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, "first bundle failed: %s", string(output))
 	require.FileExists(t, firstBundlePath)
@@ -533,7 +537,7 @@ module "remote" {
 
 	// Second bundle (bundle the extracted bundle)
 	secondBundlePath := filepath.Join(t.TempDir(), "second-bundle.zip")
-	cmd = exec.Command(binary, "bundle", extractDir, secondBundlePath) //nolint:gosec // G204: subprocess is intentional
+	cmd = exec.Command(binary, "module", extractDir, secondBundlePath) //nolint:gosec // G204: subprocess is intentional
 	output, err = cmd.CombinedOutput()
 	require.NoError(t, err, "second bundle failed: %s", string(output))
 	require.FileExists(t, secondBundlePath)
@@ -568,7 +572,7 @@ module "consul" {
 
 	// Bundle the fixture
 	bundlePath := filepath.Join(t.TempDir(), "registry-bundle.zip")
-	cmd := exec.Command(binary, "bundle", fixtureDir, bundlePath) //nolint:gosec // G204: subprocess is intentional
+	cmd := exec.Command(binary, "module", fixtureDir, bundlePath) //nolint:gosec // G204: subprocess is intentional
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, "registry bundle failed: %s", string(output))
 	require.FileExists(t, bundlePath)

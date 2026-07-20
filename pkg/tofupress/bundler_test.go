@@ -522,7 +522,7 @@ func TestDetectFormatFromPath(t *testing.T) {
 		{"output.tar.xz", BundleFormatTarXZ, true},
 		{"output.txz", BundleFormatTarXZ, true},
 		{"bundle.tar", "", false},
-		{"bundle", "", false},
+		{"module", "", false},
 		{"bundle.rar", "", false},
 	}
 
@@ -1769,7 +1769,7 @@ module "nacl_private" {
 
 	// Verify metadata matches
 	metadata, err := BuildArtifactMetadata(tree, &MetadataRequest{
-		Command:    "bundle",
+		Command:    "module",
 		RootSource: rootDir,
 		OutputPath: archivePath,
 		StripPlan:  stripPlan,

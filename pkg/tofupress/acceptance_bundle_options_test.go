@@ -106,7 +106,7 @@ func TestAcceptance_OCICompliant_RequiresZip(t *testing.T) {
 
 	artifact := filepath.Join(t.TempDir(), "bundle.tar.gz")
 
-	cmd := exec.Command(bin, "bundle", src, artifact, "--oci-compliant", "--format=tar.gz") //nolint:gosec
+	cmd := exec.Command(bin, "module", src, artifact, "--oci-compliant", "--format=tar.gz") //nolint:gosec
 	out, err := cmd.CombinedOutput()
 	require.Error(t, err, "oci-compliant with tar.gz should fail")
 	assert.True(t,
@@ -159,7 +159,7 @@ module "remote" {
 
 	// The safe default vendor dir ("_vendor") cannot collide with the user's modules/ dir,
 	// so force the legacy collision-prone name to exercise conflict detection.
-	cmd := exec.Command(bin, "bundle", src, artifact, "--format=zip", "--vendor-dir=modules") //nolint:gosec
+	cmd := exec.Command(bin, "module", src, artifact, "--format=zip", "--vendor-dir=modules") //nolint:gosec
 	out, err := cmd.CombinedOutput()
 	require.Error(t, err, "vendor dir conflict should cause error")
 	assert.Contains(t, strings.ToLower(string(out)), "conflict")

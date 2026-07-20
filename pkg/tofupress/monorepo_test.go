@@ -33,7 +33,7 @@ func TestBinary_BundleMonorepoComplex(t *testing.T) {
 	outputFile := filepath.Join(outputDir, "bundle.tar.gz")
 
 	// Bundle the prod environment
-	cmd := exec.Command(binary, "bundle", fixtureDir, outputFile) //nolint:gosec // G204: subprocess is intentional
+	cmd := exec.Command(binary, "module", fixtureDir, outputFile) //nolint:gosec // G204: subprocess is intentional
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, "binary bundle should succeed: %s", string(output))
 
@@ -119,7 +119,7 @@ func TestBinary_BundleMonorepoMultipleEnvs(t *testing.T) {
 			outputFile := filepath.Join(outputDir, "bundle.tar.gz")
 
 			// Bundle
-			cmd := exec.Command(binary, "bundle", tc.fixtureDir, outputFile) //nolint:gosec // G204: subprocess is intentional
+			cmd := exec.Command(binary, "module", tc.fixtureDir, outputFile) //nolint:gosec // G204: subprocess is intentional
 			output, err := cmd.CombinedOutput()
 			require.NoError(t, err, "binary bundle should succeed: %s", string(output))
 

@@ -113,7 +113,7 @@ func runTofuPressBundle(t *testing.T, bin, source, output string, flags ...strin
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
-	args := append([]string{"bundle", source, output}, flags...)
+	args := append([]string{"module", source, output}, flags...)
 	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Dir = projectRoot(t)
 	cmd.Env = append(os.Environ(), "TF_IN_AUTOMATION=1")

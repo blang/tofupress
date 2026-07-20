@@ -140,7 +140,7 @@ func TestAcceptance_Metadata_CommandInfo(t *testing.T) {
 	runTofuPressBundle(t, bin, src, artifact, "--format=zip")
 
 	m := metadataFromArtifact(t, artifact)
-	assert.Equal(t, "bundle", m.Command.Name)
+	assert.Equal(t, "module", m.Command.Name)
 	assert.NotEmpty(t, m.Command.Options.Format)
 }
 

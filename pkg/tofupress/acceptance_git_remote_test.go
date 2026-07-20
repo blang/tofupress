@@ -28,7 +28,11 @@ func TestAcceptance_Git_SubdirHostShorthand(t *testing.T) {
 	}
 
 	bin := buildBinary(t)
-	source := "github.com/terraform-aws-modules/terraform-aws-vpc?ref=v5.0.0//examples"
+	// The subdir must itself be a module (with .tf at its root): `tofupress module`
+	// refuses a no-.tf subject (ADR-0002). The repo's //examples directory is a tree
+	// of example modules (no .tf at examples/ root) — the `tofupress tree` case —
+	// so point at a single example module that has its own main.tf.
+	source := "github.com/terraform-aws-modules/terraform-aws-vpc//examples/complete?ref=v5.0.0"
 
 	artifact := filepath.Join(t.TempDir(), "bundle.zip")
 	runTofuPressBundle(t, bin, source, artifact, "--format=zip")

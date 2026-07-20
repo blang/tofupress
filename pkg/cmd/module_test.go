@@ -17,20 +17,21 @@ import (
 	"github.com/blang/tofupress/pkg/tofupress"
 )
 
-func TestRunBundleErrorsOnUnknownExtensionWhenFormatAuto(t *testing.T) {
+func TestRunModuleErrorsOnUnknownExtensionWhenFormatAuto(t *testing.T) {
 	tmpDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "main.tf"), []byte(`output "name" { value = "root" }`), 0o644)) // a .tf so the no-.tf refusal (ADR-0002) is bypassed and we reach the format check
 	cmd := &cobra.Command{}
 	cmd.Flags().String("format", "auto", "")
 	cmd.Flags().Bool("oci-compliant", false, "")
 	cmd.Flags().String("strip", "optimistic", "")
 
-	err := runBundle(cmd, []string{tmpDir, filepath.Join(tmpDir, "bundle.unknown")})
+	err := runPressModule(cmd, []string{tmpDir, filepath.Join(tmpDir, "bundle.unknown")})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "could not infer bundle format")
 	assert.Contains(t, err.Error(), "--format")
 }
 
-func TestRunBundleWritesMetadataOutAndPrintsStats(t *testing.T) {
+func TestRunModuleWritesMetadataOutAndPrintsStats(t *testing.T) {
 	tmpDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "main.tf"), []byte(`output "name" { value = "root" }`), 0o644))
 
@@ -47,7 +48,7 @@ func TestRunBundleWritesMetadataOutAndPrintsStats(t *testing.T) {
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 
-	require.NoError(t, runBundle(cmd, []string{tmpDir, bundlePath}))
+	require.NoError(t, runPressModule(cmd, []string{tmpDir, bundlePath}))
 
 	assert.FileExists(t, bundlePath)
 	assert.FileExists(t, metadataPath)
@@ -62,33 +63,33 @@ func TestRunBundleWritesMetadataOutAndPrintsStats(t *testing.T) {
 	assert.Contains(t, string(data), `"strip_mode": "optimistic"`)
 }
 
-func TestRunBundleDefaultsToModuleDirStripMode(t *testing.T) {
+func TestRunModuleDefaultsToModuleDirStripMode(t *testing.T) {
 	sourceDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, "main.tf"), []byte(`output "name" { value = "root" }`), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, "README.md"), []byte("strip"), 0o644))
 
 	bundlePath := filepath.Join(t.TempDir(), "bundle.zip")
 
-	cmd := newTestBundleCommand(t, "")
-	require.NoError(t, runBundle(cmd, []string{sourceDir, bundlePath}))
+	cmd := newTestModuleCommand(t, "")
+	require.NoError(t, runPressModule(cmd, []string{sourceDir, bundlePath}))
 
 	assert.Contains(t, zipFileNamesForCmdTest(t, bundlePath), "main.tf")
 }
 
-func TestRunBundleStripNoneKeepsReadme(t *testing.T) {
+func TestRunModuleStripNoneKeepsReadme(t *testing.T) {
 	sourceDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, "main.tf"), []byte(`output "name" { value = "root" }`), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, "README.md"), []byte("keep"), 0o644))
 	bundlePath := filepath.Join(t.TempDir(), "bundle.zip")
 
-	cmd := newTestBundleCommand(t, "")
+	cmd := newTestModuleCommand(t, "")
 	require.NoError(t, cmd.Flags().Set("strip", "none"))
-	require.NoError(t, runBundle(cmd, []string{sourceDir, bundlePath}))
+	require.NoError(t, runPressModule(cmd, []string{sourceDir, bundlePath}))
 
 	assert.Contains(t, zipFileNamesForCmdTest(t, bundlePath), "README.md")
 }
 
-func TestRunBundleConfigOnlyWarnsForFilesystemReads(t *testing.T) {
+func TestRunModuleConfigOnlyWarnsForFilesystemReads(t *testing.T) {
 	sourceDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, "main.tf"), []byte(`variable "name" { type = string }
 locals { rendered = file("templates/${var.name}.tftpl") }`), 0o644))
@@ -96,12 +97,12 @@ locals { rendered = file("templates/${var.name}.tftpl") }`), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, "templates", "x.tftpl"), []byte("strip"), 0o644))
 	bundlePath := filepath.Join(t.TempDir(), "bundle.zip")
 
-	cmd := newTestBundleCommand(t, "")
+	cmd := newTestModuleCommand(t, "")
 	require.NoError(t, cmd.Flags().Set("strip", "config-only"))
 	var stderr bytes.Buffer
 	cmd.SetErr(&stderr)
 
-	require.NoError(t, runBundle(cmd, []string{sourceDir, bundlePath}))
+	require.NoError(t, runPressModule(cmd, []string{sourceDir, bundlePath}))
 	assert.Contains(t, stderr.String(), "Warning:")
 	assert.Contains(t, stderr.String(), "filesystem reads were detected")
 }
@@ -111,26 +112,26 @@ func TestBundleCommandPrintsDeduplicatedPackages(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(root, "main.tf"), []byte(`output "x" { value = "root" }`), 0o644))
 	output := filepath.Join(t.TempDir(), "bundle.zip")
 
-	cmd := newTestBundleCommand(t, "")
+	cmd := newTestModuleCommand(t, "")
 	buf := new(bytes.Buffer)
 	cmd.SetOut(buf)
 	cmd.SetErr(new(bytes.Buffer))
 
-	require.NoError(t, runBundle(cmd, []string{root, output}))
+	require.NoError(t, runPressModule(cmd, []string{root, output}))
 	assert.Contains(t, buf.String(), "Deduplicated packages: 0")
 }
 
-// TestRunBundleEmbedsNonEmptyProvenanceUnderPlainGoBuild guards review item 7 /
+// TestRunModuleEmbedsNonEmptyProvenanceUnderPlainGoBuild guards review item 7 /
 // QA-6: a binary built with plain `go build` (no ldflags) must still embed
 // non-empty tofupress.{version,commit,time} provenance into meta.json. `go
 // test` does not inject ldflags, so this exercise is exactly that scenario.
-func TestRunBundleEmbedsNonEmptyProvenanceUnderPlainGoBuild(t *testing.T) {
+func TestRunModuleEmbedsNonEmptyProvenanceUnderPlainGoBuild(t *testing.T) {
 	sourceDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, "main.tf"), []byte(`output "x" { value = "root" }`), 0o644))
 	bundlePath := filepath.Join(t.TempDir(), "bundle.zip")
 
-	cmd := newTestBundleCommand(t, "")
-	require.NoError(t, runBundle(cmd, []string{sourceDir, bundlePath}))
+	cmd := newTestModuleCommand(t, "")
+	require.NoError(t, runPressModule(cmd, []string{sourceDir, bundlePath}))
 
 	meta, err := tofupress.ReadMetadataFromArtifact(bundlePath)
 	require.NoError(t, err)
@@ -153,7 +154,7 @@ func TestEffectiveBuildInfoNeverBlankVersion(t *testing.T) {
 }
 
 //nolint:unparam // metadataPath is always empty string; kept as parameter for test readability
-func newTestBundleCommand(t *testing.T, metadataPath string) *cobra.Command {
+func newTestModuleCommand(t *testing.T, metadataPath string) *cobra.Command {
 	t.Helper()
 	cmd := &cobra.Command{}
 	cmd.Flags().String("format", "zip", "")
@@ -165,9 +166,9 @@ func newTestBundleCommand(t *testing.T, metadataPath string) *cobra.Command {
 	return cmd
 }
 
-// TestRunBundleJSONEmitsMetadataToStdout (review item 9) verifies --json
+// TestRunModuleJSONEmitsMetadataToStdout (review item 9) verifies --json
 // emits the artifact metadata as indented JSON to stdout (scriptable CI).
-func TestRunBundleJSONEmitsMetadataToStdout(t *testing.T) {
+func TestRunModuleJSONEmitsMetadataToStdout(t *testing.T) {
 	tmpDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "main.tf"), []byte(`output "name" { value = "root" }`), 0o644))
 	bundlePath := filepath.Join(t.TempDir(), "bundle.zip")
@@ -184,18 +185,18 @@ func TestRunBundleJSONEmitsMetadataToStdout(t *testing.T) {
 	var stdout bytes.Buffer
 	cmd.SetOut(&stdout)
 
-	require.NoError(t, runBundle(cmd, []string{tmpDir, bundlePath}))
+	require.NoError(t, runPressModule(cmd, []string{tmpDir, bundlePath}))
 	out := stdout.String()
 	assert.Contains(t, out, `"schema_version"`)
 	assert.Contains(t, out, `"command": {`)
-	assert.Contains(t, out, `"name": "bundle"`)
+	assert.Contains(t, out, `"name": "module"`)
 	assert.NotContains(t, out, "Bundle created successfully", "--json must not emit human text")
 	assert.NotContains(t, out, "Resolving modules in", "--json must not emit human preamble")
 }
 
-// TestRunBundleErrorsOnUnknownExtensionWithDirHint (review item 9 / QA-12)
+// TestRunModuleErrorsOnUnknownExtensionWithDirHint (review item 9 / QA-12)
 // verifies a trailing-slash output path gets the directory-shape hint.
-func TestRunBundleErrorsOnUnknownExtensionWithDirHint(t *testing.T) {
+func TestRunModuleErrorsOnUnknownExtensionWithDirHint(t *testing.T) {
 	tmpDir := t.TempDir()
 	cmd := &cobra.Command{}
 	cmd.Flags().String("format", "auto", "")
@@ -203,7 +204,8 @@ func TestRunBundleErrorsOnUnknownExtensionWithDirHint(t *testing.T) {
 	cmd.Flags().Bool("json", false, "")
 	cmd.Flags().String("strip", "optimistic", "")
 
-	err := runBundle(cmd, []string{tmpDir, tmpDir + "/out/"})
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "main.tf"), []byte(`output "name" { value = "root" }`), 0o644)) // bypass the no-.tf refusal (ADR-0002) so we reach the format check
+	err := runPressModule(cmd, []string{tmpDir, tmpDir + "/out/"})
 	assert.Contains(t, err.Error(), "could not infer bundle format")
 	assert.Contains(t, err.Error(), "looks like a directory")
 }
@@ -253,4 +255,16 @@ func TestInstallSignalCleanupRunsOnStop(t *testing.T) {
 	// once-guarded: stop fires cleanup exactly once; the deferred cleanup is
 	// the same guarded target, so the count stays 1.
 	assert.Equal(t, int32(1), ran.Load(), "stop should fire cleanup exactly once")
+}
+
+// TestRunModuleRefusesNoTfSubject pins ADR-0002: `tofupress module` refuses a
+// subject with no .tf/.tofu files instead of warn-and-degenerate into an empty
+// archive (the former `bundle` behaviour). A modules-only repo is `tofupress tree`.
+func TestRunModuleRefusesNoTfSubject(t *testing.T) {
+	tmpDir := t.TempDir() // intentionally no .tf/.tofu files
+	cmd := newTestModuleCommand(t, "")
+	err := runPressModule(cmd, []string{tmpDir, filepath.Join(t.TempDir(), "out.zip")})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "contains no .tf or .tofu files")
+	assert.Contains(t, err.Error(), "tofupress tree")
 }

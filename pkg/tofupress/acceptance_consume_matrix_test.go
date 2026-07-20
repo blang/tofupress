@@ -99,11 +99,11 @@ func runMatrixCell(t *testing.T, bin string, cell matrixCell) {
 
 	fix := prepareCellFixture(t, cell)
 	artifactPath := filepath.Join(t.TempDir(), "bundle."+cell.format)
-	args := []string{"bundle", fix.source, artifactPath, "--format=" + cell.format}
+	args := []string{"module", fix.source, artifactPath, "--format=" + cell.format}
 	if cell.ociCompliant {
 		args = append(args, "--oci-compliant")
 	}
-	runBundleCmd(t, bin, fix.bundleEnv, args)
+	runModuleCmd(t, bin, fix.bundleEnv, args)
 
 	extractDir := t.TempDir()
 	require.NoError(t, matrixExtractArchive(t, artifactPath, cell.format, extractDir),
@@ -136,7 +136,7 @@ func skipIfNoTofu(t *testing.T) {
 	}
 }
 
-func runBundleCmd(t *testing.T, bin string, extraEnv []string, args []string) {
+func runModuleCmd(t *testing.T, bin string, extraEnv []string, args []string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()

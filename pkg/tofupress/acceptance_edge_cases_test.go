@@ -38,7 +38,7 @@ module "bad" {
 }
 `)
 
-	cmd := exec.Command(bin, "bundle", src, filepath.Join(t.TempDir(), "b.zip"))
+	cmd := exec.Command(bin, "module", src, filepath.Join(t.TempDir(), "b.zip"))
 	out, err := cmd.CombinedOutput()
 	require.Error(t, err, "missing source should error")
 	assert.True(t,
@@ -132,7 +132,7 @@ func TestAcceptance_Error_InvalidFormat(t *testing.T) {
 	src := createSimpleFixture(t)
 	artifact := filepath.Join(t.TempDir(), "bad.rar")
 
-	cmd := exec.Command(bin, "bundle", src, artifact, "--format=rar")
+	cmd := exec.Command(bin, "module", src, artifact, "--format=rar")
 	out, err := cmd.CombinedOutput()
 	require.Error(t, err, "invalid format should error")
 	assert.True(t,
@@ -146,7 +146,7 @@ func TestAcceptance_Error_InvalidStrip(t *testing.T) {
 	src := createSimpleFixture(t)
 	artifact := filepath.Join(t.TempDir(), "bundle.zip")
 
-	cmd := exec.Command(bin, "bundle", src, artifact, "--strip=delete-everything")
+	cmd := exec.Command(bin, "module", src, artifact, "--strip=delete-everything")
 	out, err := cmd.CombinedOutput()
 	require.Error(t, err, "invalid strip level should error")
 	assert.True(t,
@@ -171,7 +171,7 @@ func TestAcceptance_Error_NonexistentSource(t *testing.T) {
 func TestAcceptance_Error_BundleNoArgs(t *testing.T) {
 	bin := buildBinary(t)
 
-	cmd := exec.Command(bin, "bundle")
+	cmd := exec.Command(bin, "module")
 	out, err := cmd.CombinedOutput()
 	require.Error(t, err, "bundle with no args should error")
 	assert.True(t,

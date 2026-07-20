@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -162,6 +163,100 @@ func TestBundler_AggregationPreservesRootInstallDir(t *testing.T) {
 	require.Equal(t, wantSnapshot, gotSnapshot,
 		"Bundle must not modify the caller's tree (review item 5 / F9): "+
 			"non-destructive aggregation contract violated")
+}
+
+// TestBundler_AggregatedVendorPackageRespectsStripLevel pins review finding G6
+// (ADR-0001): a pressed module's nested vendor package is flattened into the
+// staging root's vendor dir by aggregatePressedModulesInStaging, and the plan
+// registered for the aggregated target must honor the active strip level.
+// Before the G6 fix, includeResolvedModuleDirs kept the nested vendor module
+// dir wholesale under optimistic (via includeDir), so the flattened package
+// carried README/docs verbatim regardless of strip level — a divergence from
+// the ADR keep-set (".tf/.tofu config kept"; non-.tf is NOT kept wholesale).
+// After the fix, optimistic trims non-.tf in the aggregated vendor package
+// just like aggressive; full keeps everything verbatim.
+//
+//nolint:gocognit // table-driven strip-level matrix with a shared helper is inherently branchy
+func TestBundler_AggregatedVendorPackageRespectsStripLevel(t *testing.T) {
+	cases := []struct {
+		mode       StripMode
+		wantReadme bool // non-.tf content (README.md) in aggregated _vendor/abc123
+		wantGuide  bool // non-.tf content (docs/guide.md) in aggregated _vendor/abc123
+		wantMainTF bool // .tf config always kept
+	}{
+		{StripModeFull, true, true, true},
+		{StripModeOptimistic, false, false, true}, // G6 fix: optimistic trims non-.tf
+		{StripModeAggressive, false, false, true},
+	}
+	for _, tc := range cases {
+		t.Run(string(tc.mode), func(t *testing.T) {
+			tmpDir := t.TempDir()
+			pressedDir := filepath.Join(tmpDir, "pressed-module")
+			require.NoError(t, os.MkdirAll(pressedDir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(pressedDir, "main.tf"),
+				[]byte(`module "inner" { source = "./`+defaultVendorDir+`/abc123" }`), 0o644))
+			innerPkg := filepath.Join(pressedDir, defaultVendorDir, "abc123")
+			require.NoError(t, os.MkdirAll(innerPkg, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(innerPkg, "main.tf"),
+				[]byte(`resource "null_resource" "inner" {}`), 0o644))
+			require.NoError(t, os.WriteFile(filepath.Join(innerPkg, "README.md"), []byte("trim me under optimistic/aggressive"), 0o644))
+			require.NoError(t, os.MkdirAll(filepath.Join(innerPkg, "docs"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(innerPkg, "docs", "guide.md"), []byte("docs"), 0o644))
+
+			rootDir := filepath.Join(tmpDir, "root")
+			require.NoError(t, os.MkdirAll(rootDir, 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(rootDir, "main.tf"),
+				[]byte(`module "pressed" { source = "../pressed-module" }`), 0o644))
+
+			tree, err := NewResolver().Resolve(context.Background(), rootDir)
+			require.NoError(t, err)
+
+			plan, err := PlanStripping(context.Background(), tree, tc.mode)
+			require.NoError(t, err)
+			bundler := NewBundler(BundleFormatTarGZ, WithStripPlan(plan))
+			bundlePath := filepath.Join(t.TempDir(), "out.tar.gz")
+			require.NoError(t, bundler.Bundle(context.Background(), tree, bundlePath))
+
+			extractDir := filepath.Join(t.TempDir(), "ex")
+			require.NoError(t, os.MkdirAll(extractDir, 0o755))
+			extractTarGz(t, bundlePath, extractDir)
+
+			aggregated := filepath.Join(extractDir, defaultVendorDir, "abc123")
+			checkFile := func(rel string, want bool) {
+				t.Helper()
+				_, statErr := os.Stat(filepath.Join(aggregated, rel))
+				present := !os.IsNotExist(statErr)
+				if want {
+					assert.True(t, present, "mode=%s: aggregated _vendor/abc123/%s must be kept", tc.mode, rel)
+				} else {
+					assert.False(t, present, "mode=%s: aggregated _vendor/abc123/%s must be trimmed (ADR-0001 non-.tf not kept wholesale)", tc.mode, rel)
+				}
+			}
+			checkFile("main.tf", tc.wantMainTF)
+			checkFile("README.md", tc.wantReadme)
+			checkFile(filepath.Join("docs", "guide.md"), tc.wantGuide)
+
+			// The aggregation plan registered for the flattened target must reflect
+			// the strip level truthfully in the strip plan (G6: plan no longer lies —
+			// it used to be IncludeAll unconditionally). The aggregated plan is keyed
+			// by the bundler's internal staging dir path, so locate it by suffix.
+			var aggregatedPlan *PackageStripPlan
+			suffix := filepath.FromSlash(defaultVendorDir + "/abc123")
+			for _, pp := range plan.Packages {
+				if strings.HasSuffix(pp.PackageRoot, suffix) && pp.PackageRoot != innerPkg {
+					aggregatedPlan = pp
+					break
+				}
+			}
+			if assert.NotNil(t, aggregatedPlan, "aggregated package plan must be registered for the staged _vendor/abc123 target") {
+				if tc.mode.IsAggressive() {
+					assert.False(t, aggregatedPlan.IncludeAll, "aggressive aggregated plan must be config-only, not IncludeAll")
+				} else {
+					assert.True(t, aggregatedPlan.IncludeAll, "full/optimistic aggregated plan must be IncludeAll")
+				}
+			}
+		})
+	}
 }
 
 // snapshotTree walks dir and returns a deterministic hash of its contents

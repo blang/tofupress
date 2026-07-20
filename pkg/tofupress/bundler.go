@@ -846,9 +846,15 @@ func (b *Bundler) aggregatePressedModulesInStaging(tree *ResolvedTree, stagingDi
 	stagingVendorRoot := filepath.Join(stagingDir, vDir)
 
 	// Aggregated packages land under the staging root vendor dir. Register a
-	// dedicated IncludeAll plan keyed by the staged target path so the archive
-	// writer's strip-plan check keeps each aggregated package whole (longest-
-	// match in PackageForPath makes the package plan win over the root plan).
+	// dedicated per-package plan keyed by the staged target path so the archive
+	// writer's strip-plan check keeps each aggregated package per the active
+	// strip level (longest-match in PackageForPath makes the package plan win
+	// over the root plan). Under full/optimistic the plan is IncludeAll (the
+	// whole flattened package survives — optimistic's risk-escalation is already
+	// encoded by the strip plan on the ORIGINAL paths; aggregated targets are
+	// re-flattenings of bytes already kept). Under aggressive the plan is
+	// config-only (.tf/.tofu), honoring ADR-0001's "aggressive: .tf/.tofu files
+	// only" contract for the aggregated-vendor path (review finding G6).
 	aggregatedPlans := make(map[string]*PackageStripPlan)
 
 	for _, module := range tree.AllModules {
@@ -956,7 +962,16 @@ func (b *Bundler) aggregatePressedModulesInStaging(tree *ResolvedTree, stagingDi
 
 	if b.StripPlan != nil {
 		for _, pkgPlan := range aggregatedPlans {
-			pkgPlan.IncludeAll = true
+			if b.StripPlan.Mode.IsAggressive() {
+				// ADR-0001 aggressive: .tf/.tofu only. Populate IncludedFiles with
+				// the config files present at the aggregated target so the final
+				// staging walk trims non-.tf even if a future staging change copies
+				// wholesale (belt-and-suspenders; stageBundle already pre-trims
+				// under aggressive today).
+				includeModuleConfigFiles(pkgPlan, pkgPlan.PackageRoot)
+			} else {
+				pkgPlan.IncludeAll = true
+			}
 			b.StripPlan.Packages[pkgPlan.PackageRoot] = pkgPlan
 		}
 	}

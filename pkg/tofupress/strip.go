@@ -88,6 +88,14 @@ func newPackageStripPlan(packageRoot string) *PackageStripPlan {
 	}
 }
 
+// includeDir would keep an entire directory verbatim (short of IncludeAll).
+// It is currently unused by the optimistic/aggressive paths — ADR-0001 has
+// them keep config files only (via includeFile) and escalate to IncludeAll
+// for risk signals — but is retained as a primitive for future strip levels
+// and external plan constructors. The IncludedDirs map it would populate is
+// still consulted by includePath's dir-inclusion check.
+//
+//nolint:unused // retained primitive; see comment above
 func (p *PackageStripPlan) includeDir(absDir string) {
 	rel := cleanRel(p.PackageRoot, absDir)
 	if rel != "" {
@@ -210,29 +218,49 @@ func includeResolvedModuleDirs(plan *StripPlan, tree *ResolvedTree) {
 		if pkgPlan == nil {
 			continue
 		}
-		// If the module's install dir is the package root, include config files
-		// rather than the entire package (so fileset patterns can still restrict).
-		if module.InstallDir == pkgPlan.PackageRoot {
-			files, err := FindTerraformFiles(module.InstallDir)
-			if err == nil {
-				for _, file := range files {
-					pkgPlan.includeFile(file)
-				}
-			}
-		} else {
-			pkgPlan.includeDir(module.InstallDir)
-		}
+		// ADR-0001 optimistic keep-set: ".tf/.tofu config kept" for reachable
+		// modules. We include ONLY the module's config files — never the whole
+		// install dir wholesale — because the ADR's principle is uniform across
+		// subject and packages: "non-.tf content is not kept wholesale"; it
+		// follows the keep-set (static file()/fileset() matches, risk-escalated
+		// whole owning package). The previous else-branch did includeDir
+		// (wholesale) for modules whose install dir is a subdir of their
+		// package root (e.g. //subdir modules, pressed-module nested vendor
+		// local modules), which silently kept README/docs/examples of
+		// referenced modules under optimistic — a legacy deviation from the
+		// ADR keep-set that also surfaced as review finding G6 (aggregated
+		// vendor packages kept verbatim regardless of strip level). Reaching
+		// the module's dir from the package root still works: includePath(dir,
+		// isDir=true) returns true when any IncludedFile lives under it.
+		includeModuleConfigFiles(pkgPlan, module.InstallDir)
 
-		// Also include the module directory in any broader parent package plan
-		// so the walker from the package root can reach //subdir modules.
+		// Also surface the module's config files in any broader parent package
+		// plan so the walker from the package root can reach //subdir modules
+		// (reachability only — config files, not the dir wholesale, so non-.tf
+		// is still trimmed by the keep-set).
 		for _, parentPlan := range plan.Packages {
 			if parentPlan == pkgPlan {
 				continue
 			}
 			if strings.HasPrefix(module.InstallDir, parentPlan.PackageRoot+string(filepath.Separator)) {
-				parentPlan.includeDir(module.InstallDir)
+				includeModuleConfigFiles(parentPlan, module.InstallDir)
 			}
 		}
+	}
+}
+
+// includeModuleConfigFiles adds the .tf/.tofu config files found under dir to
+// pkgPlan's IncludedFiles. It is the single shared "reachable module config"
+// step used by includeResolvedModuleDirs for both the install-dir-is-package-
+// root case and the subdir-of-package-root case (ADR-0001: config-only, never
+// wholesale).
+func includeModuleConfigFiles(pkgPlan *PackageStripPlan, dir string) {
+	files, err := FindTerraformFiles(dir)
+	if err != nil {
+		return
+	}
+	for _, file := range files {
+		pkgPlan.includeFile(file)
 	}
 }
 

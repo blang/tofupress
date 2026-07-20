@@ -205,16 +205,28 @@ func TestPlanStrippingModuleDirWarnsOnExcludedRemotePackageSibling(t *testing.T)
 	require.NoError(t, err)
 
 	var found bool
-	for _, w := range plan.Warnings {
+	var foundWarning *StripWarning
+	for i := range plan.Warnings {
+		w := &plan.Warnings[i]
 		if strings.Contains(w.Message, "modules") && strings.Contains(w.Message, "pkg-a.git") &&
 			strings.Contains(w.Message, "review item 4") {
 			found = true
+			foundWarning = w
 			break
 		}
 	}
 	assert.True(t, found,
 		"item 4: expected a warning about the excluded 'modules' sibling in remote package pkg-a.git, got %+v",
 		plan.Warnings)
+	// Review nit #1: StripWarning.ModuleKey must be populated with the package's
+	// owning module key so a metadata consumer can link the warning back to the
+	// implicated module (the field was previously declared but never set).
+	if assert.NotNil(t, foundWarning, "expected the excluded-sibling warning to be present") {
+		assert.Contains(t, foundWarning.ModuleKey, "ext",
+			"ModuleKey must name the owning module of the excluded-sibling package")
+		assert.NotEmpty(t, foundWarning.ModuleKey,
+			"ModuleKey must not be empty for a package-scoped warning")
+	}
 }
 
 func writeFile(t *testing.T, root, rel, content string) {

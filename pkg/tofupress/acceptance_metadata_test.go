@@ -153,10 +153,14 @@ func TestAcceptance_Metadata_StripStats(t *testing.T) {
 		writeIntegrationFile(t, src, "README.md", `# strip me`)
 
 		artifact := filepath.Join(t.TempDir(), "bundle1.zip")
-		runTofuPressBundle(t, bin, src, artifact, "--format=zip")
+		runTofuPressBundle(t, bin, src, artifact, "--format=zip", "--strip=module-dir")
 		m := metadataFromArtifact(t, artifact)
 		assert.Greater(t, m.Stats.StrippedFiles, 0)
 		assert.Greater(t, m.Stats.StrippedBytes, int64(0))
+		// G9 alias traceability: canonical strip_mode is the resolved level,
+		// strip_mode_input records the legacy alias the user actually passed.
+		assert.Equal(t, "optimistic", m.Command.Options.StripMode)
+		assert.Equal(t, "module-dir", m.Command.Options.StripModeInput)
 	})
 
 	t.Run("none", func(t *testing.T) {
@@ -168,6 +172,9 @@ func TestAcceptance_Metadata_StripStats(t *testing.T) {
 		runTofuPressBundle(t, bin, src, artifact, "--format=zip", "--strip=none")
 		m := metadataFromArtifact(t, artifact)
 		assert.Equal(t, 0, m.Stats.StrippedFiles)
+		// G9 alias traceability for the `none` → `full` alias.
+		assert.Equal(t, "full", m.Command.Options.StripMode)
+		assert.Equal(t, "none", m.Command.Options.StripModeInput)
 	})
 }
 

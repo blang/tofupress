@@ -181,7 +181,7 @@ func runBundle(cmd *cobra.Command, args []string) error {
 		Build:          EffectiveBuildInfo(),
 		Command:        "bundle",
 		Args:           []string{source, outputPath},
-		Options:        tofupress.BundleOptions{Format: string(format), OCICompliant: ociCompliant, StripMode: string(stripMode)},
+		Options:        tofupress.BundleOptions{Format: string(format), OCICompliant: ociCompliant, StripMode: string(stripMode), StripModeInput: stripStr},
 		RootSource:     source,
 		OutputPath:     outputPath,
 		StripPlan:      stripPlan,

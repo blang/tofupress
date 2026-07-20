@@ -36,10 +36,17 @@ type BuildInfo struct {
 }
 
 // BundleOptions records the options used during bundling.
+// StripMode is the canonical strip level (full/optimistic/aggressive) the
+// plan ran under; StripModeInput records the user's original --strip flag
+// value verbatim (e.g. the legacy alias "module-dir") so alpha migrations
+// stay traceable even when an alias was passed (review finding G9's alias
+// traceability half). StripModeInput is empty only if the option was never
+// set.
 type BundleOptions struct {
-	Format       string `json:"format"`
-	OCICompliant bool   `json:"oci_compliant"`
-	StripMode    string `json:"strip_mode"`
+	Format         string `json:"format"`
+	OCICompliant   bool   `json:"oci_compliant"`
+	StripMode      string `json:"strip_mode"`
+	StripModeInput string `json:"strip_mode_input,omitempty"`
 }
 
 // MetadataRequest contains the inputs needed to build artifact metadata.

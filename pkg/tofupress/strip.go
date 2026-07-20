@@ -45,6 +45,13 @@ func (m StripMode) IsAggressive() bool {
 }
 
 // StripWarning is a user-visible warning produced while planning stripping.
+// ModuleKey carries the module key(s) the warning concerns, for machine-
+// readable traceability in artifact metadata. For package-scoped warnings
+// (e.g. an excluded sibling dir inside a downloaded package) this is the
+// comma-joined set of module keys whose owning package is implicated; for
+// plan-wide warnings (e.g. the aggressive "filesystem reads detected" notice)
+// it is empty, since no single module is the subject. (Review nit: the field
+// was previously declared but never populated.)
 type StripWarning struct {
 	ModuleKey string `json:"module_key,omitempty"`
 	Message   string `json:"message"`
@@ -413,7 +420,12 @@ func warnExcludedRemotePackageDirs(plan *StripPlan, tree *ResolvedTree) {
 				continue
 			}
 			if !plan.IncludePath(childDir, true) {
+				// Attach the package's owning module key(s) so a metadata consumer
+				// can link the warning back to the implicated module (review
+				// nit: StripWarning.ModuleKey was previously never populated).
+				keys := moduleKeysForPackage(tree, root)
 				plan.Warnings = append(plan.Warnings, StripWarning{
+					ModuleKey: strings.Join(keys, ","),
 					Message: fmt.Sprintf(
 						"optimistic strip level excludes directory %q inside the "+
 							"downloaded remote package %s; a conditional ../%s reference "+
@@ -541,6 +553,17 @@ func owningPlanForEscalation(plan *StripPlan, ref *FilesystemFunctionRef, tree *
 // fixes the scope bug documented in ADR-0001 ("Owning package"), where a
 // dynamic fallback previously escalated to the broadest ancestor and
 // over-included the user's repo when a vendored module triggered the signal.
+//
+// Equivalence note (review nit): the narrowest containing root in plan.Packages
+// IS the module's owning package by construction — collectPackageRoots
+// (called in PlanStripping before any escalation) registers every package
+// LocalDir and every module PackageRoot, so path-containment over plan.Packages
+// resolves identically to an explicit tree.Packages[addr].LocalDir lookup. The
+// path-containment form is kept because PackageForModuleKey is a public
+// StripPlan API with no tree handle, and because it stays correct even for
+// synthetically-constructed plans in tests.
+//
+// Returns nil if the module key is not referenced by any FilesystemFunctionRef.
 func (p *StripPlan) PackageForModuleKey(moduleKey string) *PackageStripPlan {
 	for i := range p.FilesystemFunctions {
 		ref := &p.FilesystemFunctions[i]

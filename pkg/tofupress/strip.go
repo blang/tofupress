@@ -147,10 +147,13 @@ func PlanStripping(ctx context.Context, tree *ResolvedTree, mode StripMode) (*St
 		//   2. resolver-descended module dirs reachable
 		//   3. static file()/fileset()/... matches with literal args
 		//   4. whole owning package verbatim for any module with a risk signal
-		//      (dynamic file() OR any ${path.module}/${path.root} string value)
+		//      (dynamic file() OR any ${path.module}/${path.root} string value).
+		//      For ${path.root} the referenced file lives in the ROOT module's
+		//      directory (not the module the ref appears in), so escalation
+		//      targets the root/entry owning package — see applyFilesystemFunctionRefs.
 		markAnchors(plan, tree)
 		includeResolvedModuleDirs(plan, tree)
-		applyFilesystemFunctionRefs(plan, refs, true)
+		applyFilesystemFunctionRefs(plan, refs, tree, true)
 	case StripModeAggressive:
 		includeConfigFilesOnly(plan, tree)
 		if len(refs) > 0 {
@@ -259,40 +262,74 @@ func includeResolvedModuleDirs(plan *StripPlan, tree *ResolvedTree) {
 // IncludedFile lives under it, so the archiver descends into the anchor dir
 // and reaches the .tf config without retaining the dir's non-.tf siblings.
 func markAnchors(plan *StripPlan, tree *ResolvedTree) {
+	walkSubjectAnchors(tree, func(dir string, tfFiles []string) {
+		pkgPlan := plan.PackageForPath(dir)
+		if pkgPlan == nil {
+			return
+		}
+		for _, f := range tfFiles {
+			pkgPlan.includeFile(f)
+		}
+	})
+}
+
+// walkSubjectAnchors walks every directory under the press subject
+// (tree.Root.InstallDir) and invokes visit for each directory that contains at
+// least one .tf/.tofu file (an anchor), passing the OpenTofu-priority-deduped
+// config file list. It uses a single os.ReadDir per directory (recursing into
+// non-hidden subdirs itself) rather than filepath.WalkDir + FindTerraformFiles
+// (which would ReadDir twice per dir), and applies the vendor carveout
+// (directories at or under a downloaded package's LocalDir are never anchors)
+// plus the standard .terraform/.git skip. Tolerates vanished paths during
+// planning (best-effort, no error surfaced — strip planning is read-only).
+func walkSubjectAnchors(tree *ResolvedTree, visit func(dir string, tfFiles []string)) {
 	subject := filepath.Clean(tree.Root.InstallDir)
 	if subject == "" {
 		return
 	}
 	vendorRoots := collectVendorRoots(tree)
-	_ = filepath.WalkDir(subject, func(path string, d fs.DirEntry, err error) error {
+	var walk func(dir string)
+	walk = func(dir string) {
+		if isGeneratedOrVCSPath(dir) || isInsideAnyVendorRoot(dir, vendorRoots) {
+			return
+		}
+		entries, err := os.ReadDir(dir)
 		if err != nil {
-			return filepath.SkipDir // tolerate vanished paths during planning
+			return // tolerate vanished paths during planning
 		}
-		if !d.IsDir() {
-			return nil
+		subdirs, hasTF := classifyAnchorEntries(entries, dir)
+		if hasTF {
+			if tfFiles, ferr := FindTerraformFiles(dir); ferr == nil {
+				visit(dir, tfFiles)
+			}
 		}
-		if isGeneratedOrVCSPath(path) {
-			return filepath.SkipDir
+		for _, sub := range subdirs {
+			walk(sub)
 		}
-		if isInsideAnyVendorRoot(path, vendorRoots) {
-			return filepath.SkipDir
+	}
+	walk(subject)
+}
+
+// classifyAnchorEntries splits a directory's entries into the non-hidden
+// subdirectory paths to recurse into and reports whether the directory itself
+// is config-bearing (contains at least one non-hidden .tf/.tofu file). It is a
+// single os.ReadDir-based scan used by walkSubjectAnchors so the anchor walk
+// does not ReadDir twice per directory.
+func classifyAnchorEntries(entries []os.DirEntry, dir string) (subdirs []string, hasTF bool) {
+	for _, entry := range entries {
+		name := entry.Name()
+		if strings.HasPrefix(name, ".") {
+			continue
 		}
-		tfFiles, ferr := FindTerraformFiles(path)
-		if ferr != nil {
-			return filepath.SkipDir
+		if entry.IsDir() {
+			subdirs = append(subdirs, filepath.Join(dir, name))
+			continue
 		}
-		if len(tfFiles) == 0 {
-			return nil
+		if isTerraformConfigFile(name) {
+			hasTF = true
 		}
-		pkgPlan := plan.PackageForPath(path)
-		if pkgPlan == nil {
-			return nil
-		}
-		for _, f := range tfFiles {
-			pkgPlan.includeFile(f)
-		}
-		return nil
-	})
+	}
+	return subdirs, hasTF
 }
 
 // collectVendorRoots returns the cleaned LocalDir of every downloaded package
@@ -361,7 +398,21 @@ func warnExcludedRemotePackageDirs(plan *StripPlan, tree *ResolvedTree) {
 	}
 }
 
+// includeConfigFilesOnly implements the aggressive strip level (ADR-0001):
+// keep `.tf`/`.tofu` config files only; trim everything else. The contract is
+// ALL config-bearing files in scope, not just resolver-reachable modules' — an
+// unreferenced subject `.tf`-anchor dir (e.g. examples/big-example/main.tf) is
+// still config and is kept (only its non-`.tf` siblings are trimmed). This
+// matches the ADR ladder wording "aggressive: .tf/.tofu files only; trim
+// everything else" and the corrected anchor reading's config-preservation
+// spirit, applied uniformly to the subject tree AND every reachable (local +
+// vendored) module's install dir. Risk-signaled whole-owning-package escalation
+// is intentionally NOT applied — aggressive opts into the breakage risk.
 func includeConfigFilesOnly(plan *StripPlan, tree *ResolvedTree) {
+	// All .tf/.tofu under the press subject (referenced or not).
+	markSubjectConfigFiles(plan, tree)
+	// Plus reachable local/vendored modules' config (the subject walk covers the
+	// entry + its subtree but not //subdir siblings or vendored packages).
 	for _, module := range tree.AllModules {
 		pkgPlan := plan.PackageForPath(module.InstallDir)
 		if pkgPlan == nil {
@@ -377,25 +428,82 @@ func includeConfigFilesOnly(plan *StripPlan, tree *ResolvedTree) {
 	}
 }
 
-func applyFilesystemFunctionRefs(plan *StripPlan, refs []FilesystemFunctionRef, safe bool) {
+// markSubjectConfigFiles walks the press subject (tree.Root.InstallDir) and
+// includes every .tf/.tofu file it finds, mirroring markAnchors' subject walk
+// (same vendor carveout and .terraform/.git skip, via walkSubjectAnchors) — but
+// it is called under aggressive where EVERY subject .tf/.tofu config file is
+// kept (referenced or not), while non-`.tf` content is trimmed. Walker
+// reachability for the kept config is preserved because includePath(dir,
+// isDir=true) returns true when any IncludedFile lives under it.
+func markSubjectConfigFiles(plan *StripPlan, tree *ResolvedTree) {
+	walkSubjectAnchors(tree, func(dir string, tfFiles []string) {
+		pkgPlan := plan.PackageForPath(dir)
+		if pkgPlan == nil {
+			return
+		}
+		for _, f := range tfFiles {
+			pkgPlan.includeFile(f)
+		}
+	})
+}
+
+// applyFilesystemFunctionRefs resolves the keep-set contribution of each
+// detected filesystem/risk ref. Static refs with a known owning package include
+// their precise matched files; non-static refs (and static refs whose resolved
+// base is outside any known package) escalate an owning package to verbatim
+// (IncludeAll) as the dynamic-package-fallback.
+//
+// G4 (ADR-0001 clarification): for a `${path.root}/...` risk signal, the
+// referenced file lives in the ROOT module's directory (tree.Root.InstallDir),
+// not the module the ref textually appears in. Escalating the module's own
+// owning package (the narrowest root containing ref.SourceFile) would keep the
+// vendor/child package verbatim but would NOT save the path.root-referenced
+// file in the repo. We therefore escalate the ROOT/entry owning package for
+// path.root refs, and the module's own owning package for everything else
+// (path.module and dynamic file()/fileset() — the referenced file lives in
+// the module's own package there).
+func applyFilesystemFunctionRefs(plan *StripPlan, refs []FilesystemFunctionRef, tree *ResolvedTree, safe bool) {
+	var rootPlan *PackageStripPlan
 	for i := range refs {
 		ref := &refs[i]
-		pkgPlan := plan.PackageForPath(ref.ResolvedBase)
-		if !ref.Static || pkgPlan == nil {
-			modulePlan := plan.PackageForModuleKey(ref.ModuleKey)
-			if safe && modulePlan != nil {
-				modulePlan.IncludeAll = true
-				ref.Handling = handlingDynamicFallback
+		if ref.Static {
+			if pkgPlan := plan.PackageForPath(ref.ResolvedBase); pkgPlan != nil {
+				for _, included := range ref.IncludedPaths {
+					if targetPlan := plan.PackageForPath(included); targetPlan != nil {
+						targetPlan.includeFile(included)
+					}
+				}
+				continue
 			}
+		}
+		// Non-static ref (or static ref whose base is outside any known package):
+		// escalate an owning package to verbatim as the dynamic-package-fallback.
+		if !safe {
 			continue
 		}
-		for _, included := range ref.IncludedPaths {
-			if targetPlan := plan.PackageForPath(included); targetPlan != nil {
-				targetPlan.includeFile(included)
-			}
+		modulePlan := owningPlanForEscalation(plan, ref, tree, &rootPlan)
+		if modulePlan != nil {
+			modulePlan.IncludeAll = true
+			ref.Handling = handlingDynamicFallback
 		}
 	}
 	plan.FilesystemFunctions = refs
+}
+
+// owningPlanForEscalation selects the package plan to escalate to IncludeAll
+// for a non-static (risk-signaled) ref. For `${path.root}/...` refs the
+// referenced file lives at the root/entry module, so escalate the root's owning
+// package; otherwise escalate the module's own (narrowest) owning package.
+func owningPlanForEscalation(plan *StripPlan, ref *FilesystemFunctionRef, tree *ResolvedTree, rootPlan **PackageStripPlan) *PackageStripPlan {
+	if ref.Function == "path.root" && tree != nil && tree.Root != nil && tree.Root.InstallDir != "" {
+		if *rootPlan == nil {
+			*rootPlan = plan.PackageForPath(tree.Root.InstallDir)
+		}
+		if *rootPlan != nil {
+			return *rootPlan
+		}
+	}
+	return plan.PackageForModuleKey(ref.ModuleKey)
 }
 
 // PackageForModuleKey finds the OWNING package plan for a module flagged with a

@@ -12,6 +12,20 @@ import (
 	"github.com/zclconf/go-cty/cty"
 )
 
+// Terraform/OpenTofu config file extensions and the shared priority logic.
+// Centralized so strip/anchor walks and FindTerraformFiles agree on what counts
+// as a config file (and do not each re-literal the strings, which trips goconst).
+const (
+	extTerraform = ".tf"
+	extOpenTofu  = ".tofu"
+)
+
+// isTerraformConfigFile reports whether name has a .tf or .tofu extension.
+func isTerraformConfigFile(name string) bool {
+	ext := filepath.Ext(name)
+	return ext == extTerraform || ext == extOpenTofu
+}
+
 // ModuleBlock represents a Terraform module block extracted from an HCL file.
 type ModuleBlock struct {
 	Name          string
@@ -44,12 +58,12 @@ func FindTerraformFiles(dir string) ([]string, error) {
 		}
 
 		ext := filepath.Ext(name)
-		if ext != ".tf" && ext != ".tofu" {
+		if ext != extTerraform && ext != extOpenTofu {
 			continue
 		}
 
 		base := strings.TrimSuffix(name, ext)
-		if ext == ".tofu" || byBase[base] == "" {
+		if ext == extOpenTofu || byBase[base] == "" {
 			byBase[base] = filepath.Join(dir, name)
 		}
 	}

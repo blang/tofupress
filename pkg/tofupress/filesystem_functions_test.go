@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -120,4 +121,98 @@ func TestDetectModuleFilesystemFunctionsExpandsStaticFileset(t *testing.T) {
 		filepath.Join(moduleDir, "policies", "a.json"),
 		filepath.Join(moduleDir, "policies", "nested", "c.json"),
 	}, refs[0].IncludedPaths)
+}
+
+// TestDetectModuleFilesystemFunctions_PathModuleRiskSignals (ADR-0001 signal #2)
+// verifies the detector emits a non-static path.module/path.root risk-signal ref
+// for the headliner classes a file() detector cannot see: plain attributes,
+// provisioner interpreter/commands, and ${path.root} templates. It also pins
+// the boundaries: filesystem-function-call args are NOT double-counted as
+// signal #2 (their static match is precise), a trailing slash is required
+// (bare ${path.module} is not a file ref), and an escaped interpolation is a
+// literal string, not a signal.
+func TestDetectModuleFilesystemFunctions_PathModuleRiskSignals(t *testing.T) {
+	moduleDir := t.TempDir()
+	rootDir := filepath.Dir(moduleDir)
+	content := `
+locals {
+  build_dir   = "${path.module}/build"
+  root_cfg    = "${path.root}/global.yaml"
+  bare_module = "${path.module}"
+  escaped     = "$${path.module}/escaped.txt"
+  static_file = file("${path.module}/data.txt")
+}
+resource "null_resource" "archive" {
+  provisioner "local-exec" {
+    interpreter = [local.python, "${path.module}/package.py", "build"]
+    command     = "cd ${path.module}/src && go build"
+  }
+}
+locals { python = "python3" }
+`
+	require.NoError(t, os.WriteFile(filepath.Join(moduleDir, "main.tf"), []byte(content), 0o644))
+
+	module := &ModuleNode{Key: "child", Name: "child", InstallDir: moduleDir, PackageRoot: rootDir, IsLocal: true}
+	refs, err := DetectModuleFilesystemFunctions(rootDir, module)
+	require.NoError(t, err)
+
+	byFunction := make(map[string][]FilesystemFunctionRef)
+	for _, ref := range refs {
+		byFunction[ref.Function] = append(byFunction[ref.Function], ref)
+	}
+
+	// Plain attribute referencing a module-relative file/dir.
+	pathModuleRefs := byFunction["path.module"]
+	require.NotEmpty(t, pathModuleRefs, "expected path.module risk-signal refs")
+	var foundBuildDir, foundInterpreter, foundCommand, foundBareAggressive bool
+	for _, ref := range pathModuleRefs {
+		assert.Equal(t, refKindPathTemplateRisk, ref.Kind, "path.module ref Kind discriminator")
+		assert.False(t, ref.Static, "path.module risk signal must be non-static")
+		assert.Equal(t, handlingDynamicFallback, ref.Handling)
+		switch {
+		case strings.Contains(ref.RawPath, "${path.module}/build"):
+			foundBuildDir = true
+		case strings.Contains(ref.RawPath, "${path.module}/package.py"):
+			foundInterpreter = true
+		case strings.Contains(ref.RawPath, "${path.module}/src"):
+			foundCommand = true
+		case ref.RawPath == "${path.module}":
+			foundBareAggressive = true
+		}
+	}
+	assert.True(t, foundBuildDir, "plain attribute build_dir = \"${path.module}/build\" must be flagged")
+	assert.True(t, foundInterpreter, "provisioner interpreter ${path.module}/package.py must be flagged (Ex 3)")
+	assert.True(t, foundCommand, "provisioner command cd ${path.module}/src must be flagged")
+	assert.False(t, foundBareAggressive, "bare ${path.module} (no trailing slash) must NOT be flagged — it names the dir, not a file")
+
+	// ${path.root} produces a path.root risk-signal ref.
+	pathRootRefs := byFunction["path.root"]
+	require.NotEmpty(t, pathRootRefs, "expected a path.root risk-signal ref")
+	for _, ref := range pathRootRefs {
+		assert.Equal(t, refKindPathTemplateRisk, ref.Kind)
+		assert.False(t, ref.Static)
+		assert.Equal(t, handlingDynamicFallback, ref.Handling)
+	}
+	assert.True(t, func() bool {
+		for _, ref := range pathRootRefs {
+			if strings.Contains(ref.RawPath, "${path.root}/global.yaml") {
+				return true
+			}
+		}
+		return false
+	}(), "locals root_cfg = \"${path.root}/global.yaml\" must be flagged")
+
+	// The static file("${path.module}/data.txt") is signal #1, NOT signal #2:
+	// it appears once as a `file` filesystem-function ref, and is NOT
+	// double-counted as a path.module risk-signal ref.
+	fileRefs := byFunction["file"]
+	require.Len(t, fileRefs, 1, "exactly one file() call, counted once as a filesystem-function ref")
+	assert.Equal(t, refKindFilesystemFunction, fileRefs[0].Kind)
+	assert.True(t, fileRefs[0].Static, "static file(\"${path.module}/data.txt\") is precise (signal #1)")
+
+	// Escaped interpolation is a literal string, not a signal of either kind.
+	for _, ref := range refs {
+		assert.NotContains(t, ref.RawPath, "escaped.txt",
+			"escaped $${path.module}/escaped.txt is a literal, must not be flagged")
+	}
 }

@@ -17,6 +17,15 @@ import (
 const handlingDynamicFallback = "dynamic-package-fallback"
 const handlingStaticInclude = "static-include"
 
+// Ref kinds for the FilesystemFunctionRef discriminator. The Function field is
+// overloaded between real terraform filesystem functions (file/fileset/...) and
+// the ADR-0001 path-template risk signals (path.module/path.root); Kind lets
+// consumers tell them apart without parsing Function.
+const (
+	refKindFilesystemFunction = "filesystem-function"
+	refKindPathTemplateRisk   = "path-template-risk"
+)
+
 var terraformFilesystemFunctions = map[string]struct{}{
 	"file":             {},
 	"filebase64":       {},
@@ -31,8 +40,13 @@ var terraformFilesystemFunctions = map[string]struct{}{
 	"filebase64sha512": {},
 }
 
-// FilesystemFunctionRef records one Terraform/OpenTofu filesystem-function call.
+// FilesystemFunctionRef records one Terraform/OpenTofu filesystem-function
+// call OR one ADR-0001 path-template risk signal (${path.module}/${path.root}).
+// The Kind field discriminates the two: `filesystem-function` for real
+// file()/fileset()/... calls, `path-template-risk` for path-module/root risk
+// signal #2.
 type FilesystemFunctionRef struct {
+	Kind          string   `json:"kind"`
 	Function      string   `json:"function"`
 	ModuleKey     string   `json:"module_key"`
 	SourceFile    string   `json:"source_file"`
@@ -149,30 +163,87 @@ func walkFilesystemNodes(node hclsyntax.Node, module *ModuleNode, filePath strin
 // buildPathModuleRef constructs a risk-signal (#2) FilesystemFunctionRef for a
 // template string that contains a ${path.module}/... or ${path.root}/...
 // interpolation. The ref is marked non-static with the dynamic-package-fallback
-// handling, so applyFilesystemFunctionRefs escalates the module's whole owning
-// package to IncludeAll. The decision is whole-owning-package (not the named
-// subtree) because the referenced file (e.g. package.py) may itself read
-// arbitrary siblings at runtime (ADR-0001 "Risk signals").
+// handling, so applyFilesystemFunctionRefs escalates an owning package to
+// IncludeAll. The decision is whole-owning-package (not the named subtree)
+// because the referenced file (e.g. package.py) may itself read arbitrary
+// siblings at runtime (ADR-0001 "Risk signals").
+//
+// Detection is STRUCTURAL, not raw-substring: it inspects the template's
+// Parts for a path.module/path.root scope traversal directly followed by a
+// literal part whose evaluated string starts with "/". This precisely matches
+// the ADR's value shape "${path.module}/..." and excludes the cases a naive
+// substring scan would mis-handle:
+//   - a bare "${path.module}" (no trailing slash) parses as a TemplateWrapExpr
+//     around a ScopeTraversalExpr, not a TemplateExpr, so it is never visited
+//     here; and even a multi-part template ending in a bare traversal (no
+//     following literal) is not flagged — a bare module-dir ref names the dir,
+//     not a file, so there is nothing the strip filter would drop;
+//   - an escaped interpolation "\${path.module}/x" parses to a single literal
+//     part (no traversal), so it is correctly seen as the literal string it
+//     is and not flagged.
+//
+// Only string templates that name a module-relative (or root-relative) FILE
+// path — the headliner class: source_path, provisioner interpreter/command,
+// local-exec command, custom provider attributes — are flagged.
 func buildPathModuleRef(tmpl *hclsyntax.TemplateExpr, module *ModuleNode, filePath string) (FilesystemFunctionRef, bool) {
-	raw := expressionSourceText(tmpl)
-	var function string
-	switch {
-	case strings.Contains(raw, "${path.module}/"):
-		function = "path.module"
-	case strings.Contains(raw, "${path.root}/"):
-		function = "path.root"
-	default:
-		return FilesystemFunctionRef{}, false
+	parts := tmpl.Parts
+	for i := range len(parts) {
+		ste, ok := parts[i].(*hclsyntax.ScopeTraversalExpr)
+		if !ok {
+			continue
+		}
+		var function string
+		switch {
+		case isPathScopeTraversal(ste.Traversal, "module"):
+			function = "path.module"
+		case isPathScopeTraversal(ste.Traversal, "root"):
+			function = "path.root"
+		default:
+			continue
+		}
+		// Require a trailing slash: the next part must be a string literal whose
+		// evaluated value starts with "/" (the "/..." of "${path.module}/...").
+		if i+1 >= len(parts) {
+			continue
+		}
+		lit, ok := parts[i+1].(*hclsyntax.LiteralValueExpr)
+		if !ok {
+			continue
+		}
+		litVal, err := lit.Value(nil)
+		if err != nil || litVal.Type() != cty.String {
+			continue
+		}
+		if !strings.HasPrefix(litVal.AsString(), "/") {
+			continue
+		}
+		return FilesystemFunctionRef{
+			Kind:        refKindPathTemplateRisk,
+			Function:    function,
+			ModuleKey:   module.Key,
+			SourceFile:  filePath,
+			SourceRange: tmpl.Range().String(),
+			RawPath:     expressionSourceText(tmpl),
+			Handling:    handlingDynamicFallback,
+			Static:      false,
+		}, true
 	}
-	return FilesystemFunctionRef{
-		Function:    function,
-		ModuleKey:   module.Key,
-		SourceFile:  filePath,
-		SourceRange: tmpl.Range().String(),
-		RawPath:     raw,
-		Handling:    handlingDynamicFallback,
-		Static:      false,
-	}, true
+	return FilesystemFunctionRef{}, false
+}
+
+// isPathScopeTraversal reports whether trav is exactly `path.<attr>` (i.e.
+// a two-step traversal Root["path"].Attr[<attr>]). Used by buildPathModuleRef
+// to structurally detect ${path.module}/${path.root} interpolations.
+func isPathScopeTraversal(trav hcl.Traversal, attr string) bool {
+	if len(trav) != 2 {
+		return false
+	}
+	root, ok := trav[0].(hcl.TraverseRoot)
+	if !ok || root.Name != "path" {
+		return false
+	}
+	at, ok := trav[1].(hcl.TraverseAttr)
+	return ok && at.Name == attr
 }
 
 // rangeContainedInAny reports whether r is within any of the given ranges
@@ -192,6 +263,7 @@ func rangeContainedInAny(r hcl.Range, ranges []hcl.Range) bool {
 // buildFilesystemRef constructs a FilesystemFunctionRef from a function call expression.
 func buildFilesystemRef(call *hclsyntax.FunctionCallExpr, module *ModuleNode, filePath string, ctx pathEvalContext) FilesystemFunctionRef {
 	ref := FilesystemFunctionRef{
+		Kind:        refKindFilesystemFunction,
 		Function:    call.Name,
 		ModuleKey:   module.Key,
 		SourceFile:  filePath,

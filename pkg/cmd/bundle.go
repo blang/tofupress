@@ -150,11 +150,6 @@ func runBundle(cmd *cobra.Command, args []string) error {
 	}
 	bundler.StripPlan = stripPlan
 
-	// Print strip warnings
-	for _, warning := range stripPlan.Warnings {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", warning.Message) //nolint:errcheck // stderr writes are best-effort
-	}
-
 	// Plan and apply sourcetree identity (archive-only; OCI-compliant inlines modules)
 	var sourcetreePlan *tofupress.SourcetreeIdentityPlan
 	if !ociCompliant {
@@ -171,6 +166,15 @@ func runBundle(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to plan final stripping: %w", err)
 		}
 		bundler.StripPlan = stripPlan
+	}
+
+	// Print strip warnings from the FINAL applied strip plan (post-identity
+	// re-plan for non-OCI builds), so the warnings a user sees match the
+	// package layout actually archived and embedded in metadata. Printing the
+	// pre-identity plan's warnings would surface stale excluded-dir hints
+	// when identity moved the package roots.
+	for _, warning := range stripPlan.Warnings {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: %s\n", warning.Message) //nolint:errcheck // stderr writes are best-effort
 	}
 
 	metadata, err := tofupress.BuildArtifactMetadata(tree, &tofupress.MetadataRequest{

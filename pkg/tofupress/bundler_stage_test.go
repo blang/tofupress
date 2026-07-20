@@ -135,7 +135,10 @@ func TestStageBundle_StripPlanApplied(t *testing.T) {
 
 	assert.FileExists(t, filepath.Join(stagingDir, "main.tf"))
 	assert.NoFileExists(t, filepath.Join(stagingDir, "README.md"))
-	assert.NoFileExists(t, filepath.Join(stagingDir, "examples", "example.tf"))
+	// ADR-0001 aggressive keeps .tf/.tofu config files only — including
+	// unreferenced subject .tf-anchor dirs (e.g. examples/example.tf). Only
+	// non-`.tf` content is trimmed. README.md (non-`.tf`) is stripped.
+	assert.FileExists(t, filepath.Join(stagingDir, "examples", "example.tf"))
 }
 
 func TestStageBundle_PreservesDirectoryStructure(t *testing.T) {

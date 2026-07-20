@@ -658,7 +658,10 @@ func TestBundlerZIPAppliesModuleDirStripPlanWithoutMutatingSource(t *testing.T) 
 
 	assert.Contains(t, zipFileNames(t, archivePath), "main.tf")
 	assert.NotContains(t, zipFileNames(t, archivePath), "README.md")
-	assert.NotContains(t, zipFileNames(t, archivePath), "examples/example.tf")
+	// ADR-0001 aggressive keeps .tf/.tofu config files only, INCLUDING
+	// unreferenced subject .tf-anchor dirs (examples/example.tf is .tf). Only
+	// non-`.tf` content (README.md) is trimmed.
+	assert.Contains(t, zipFileNames(t, archivePath), "examples/example.tf")
 	assert.FileExists(t, filepath.Join(rootDir, "README.md"), "source tree must not be mutated")
 }
 

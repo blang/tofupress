@@ -218,6 +218,7 @@ func TestBinary_HelpShowsCommands(t *testing.T) {
 	assert.Contains(t, outputStr, "Available Commands", "help output should have an Available Commands section")
 	assert.Contains(t, outputStr, "  resolve", "help output should list 'resolve' as a command")
 	assert.Contains(t, outputStr, "  module", "help output should list 'module' as a command (ADR-0002)")
+	assert.Contains(t, outputStr, "  tree", "help output should list 'tree' as a command (ADR-0002)")
 }
 
 // TestBinary_ResolveLocalDir verifies that the resolve command works on a local directory.

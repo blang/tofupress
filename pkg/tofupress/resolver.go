@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -213,11 +214,43 @@ func (r *Resolver) downloadPackagesParallel(ctx context.Context, requests []down
 	return results, nil
 }
 
-// Resolve performs BFS module resolution starting from the root directory.
-// It discovers all modules, downloads remote ones, and rewrites sources to local paths.
+// Resolve performs BFS module resolution starting from a single root directory
+// (the `tofupress module` entry). It discovers the root's module dependencies,
+// downloads remote ones, and rewrites remote sources to local vendor paths.
+// For multi-entry resolution (the `tofupress tree` case — every .tf-dir under the
+// subject is an entry pressed as-is), use ResolveTree.
 //
 //nolint:gocognit,gocyclo // BFS resolution is inherently complex
 func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, error) {
+	return r.resolve(ctx, rootDir, false)
+}
+
+// ResolveTree performs multi-entry BFS module resolution for the `tofupress tree`
+// command (ADR-0002): the subject is pressed UNPIVOTED, so every .tf/.tofu-bearing
+// directory under the subject is discovered as an independent entry and resolved.
+// Local ../ cross-references between entries are preserved verbatim (layout
+// unchanged — only remote/registry sources are rewritten and vendored). The
+// package boundary for every entry is the subject itself (r.PackageRoot), so a
+// local reference escaping the subject is a boundary error.
+//
+// The synthetic tree.Root has InstallDir = PackageRoot = subject and is never
+// scanned for .tf (it is a container, not a module); the discovered entries are
+// its children and are the BFS seeds. The bundler stages tree.Root.InstallDir
+// (the subject) as-is, so the archive preserves the subject's directory shape.
+//
+//nolint:gocognit,gocyclo // BFS resolution is inherently complex
+func (r *Resolver) ResolveTree(ctx context.Context, subjectDir string) (*ResolvedTree, error) {
+	return r.resolve(ctx, subjectDir, true)
+}
+
+// resolve is the shared BFS body behind Resolve (single-entry, `module`) and
+// ResolveTree (multi-entry, `tree`). multiEntry selects the seed strategy:
+// false seeds the single root node (the entry module, scanned for .tf); true
+// discovers every .tf/.tofu-bearing directory under rootDir as an entry and
+// seeds ALL of them, with the synthetic root as an un-scanned container.
+//
+//nolint:gocognit,gocyclo // BFS resolution is inherently complex
+func (r *Resolver) resolve(ctx context.Context, rootDir string, multiEntry bool) (*ResolvedTree, error) {
 	rootPackage := r.PackageRoot
 
 	tree := &ResolvedTree{
@@ -270,9 +303,51 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 		modName   string
 	}
 
-	queue := []queueItem{{node: tree.Root, dir: rootDir}}
-	tree.AllModules = append(tree.AllModules, tree.Root)
-	visitedPaths[rootDir] = true
+	// Seed the BFS queue. `module` (single entry): the root node IS the entry
+	// module — scan it for .tf and descend. `tree` (multi entry): the root node is
+	// a synthetic container (never scanned); every .tf/.tofu-bearing directory
+	// under rootDir is discovered as an entry and seeded, with rootDir as the
+	// shared package boundary (ADR-0002). Local ../ refs between entries resolve
+	// verbatim because the layout is staged as-is; the BFS dedups a module
+	// referenced by several entries via visitedPaths (shared module scanned once).
+	var queue []queueItem
+	if !multiEntry {
+		queue = []queueItem{{node: tree.Root, dir: rootDir}}
+		tree.AllModules = append(tree.AllModules, tree.Root)
+		visitedPaths[rootDir] = true
+	} else {
+		entries := discoverSubjectAnchors(rootDir, vendorDirName)
+		if len(entries) == 0 {
+			return nil, fmt.Errorf("subject %q contains no .tf or .tofu directories; `tofupress tree` presses a tree of modules — use `tofupress module` to press a single module (ADR-0002)", rootDir)
+		}
+		for _, entryDir := range entries {
+			rel, relErr := filepath.Rel(rootDir, entryDir)
+			if relErr != nil {
+				return nil, fmt.Errorf("failed to compute entry path: %w", relErr)
+			}
+			rel = filepath.ToSlash(rel)
+			name := filepath.Base(entryDir)
+			var key string
+			if rel == "." {
+				name = "root_entry" //nolint:goconst // entry name
+				key = "entry.root_entry"
+			} else {
+				key = "entry." + strings.ReplaceAll(rel, "/", ".")
+			}
+			entry := &ModuleNode{
+				Key:         key,
+				Name:        name,
+				InstallDir:  entryDir,
+				PackageRoot: rootPackage,
+				Parent:      tree.Root,
+				IsLocal:     true,
+			}
+			tree.Root.Children = append(tree.Root.Children, entry)
+			queue = append(queue, queueItem{node: entry, dir: entryDir})
+			tree.AllModules = append(tree.AllModules, entry)
+			visitedPaths[entryDir] = true
+		}
+	}
 
 	// Process modules in BFS order (level by level for parallel downloads)
 	for len(queue) > 0 {
@@ -640,6 +715,67 @@ func (r *Resolver) Resolve(ctx context.Context, rootDir string) (*ResolvedTree, 
 	}
 
 	return tree, nil
+}
+
+// discoverSubjectAnchors walks the subject directory recursively and returns the
+// sorted absolute paths of every directory that directly contains at least one
+// .tf/.tofu file (an anchor per ADR-0001 / an entry per ADR-0002). It skips VCS
+// and generated dirs (.git, .terraform) AND the vendor directory name, because
+// vendored content is never an anchor (ADR-0001) — pre-resolution there are no
+// tree.Packages yet, so the vendor carveout is by name here, not by collected
+// package roots. Hidden dirs are skipped to avoid descending into .git etc.;
+// the vendor dir itself is hidden by convention (_vendor) but is skipped by
+// exact name match in case a user picks a non-hidden --vendor-dir.
+func discoverSubjectAnchors(subjectDir, vendorDirName string) []string {
+	subject := filepath.Clean(subjectDir)
+	var anchors []string
+	var walk func(dir string)
+	walk = func(dir string) {
+		if isGeneratedOrVCSPath(dir) {
+			return
+		}
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return // tolerate vanished paths during discovery
+		}
+		subdirs, hasTF := classifySubjectDirEntries(entries, dir, vendorDirName)
+		if hasTF {
+			anchors = append(anchors, dir)
+		}
+		for _, sub := range subdirs {
+			walk(sub)
+		}
+	}
+	walk(subject)
+	sort.Strings(anchors)
+	return anchors
+}
+
+// classifySubjectDirEntries splits a directory's entries into the subdirectory
+// paths to recurse into (skipping the vendor dir by name and hidden dirs) and
+// reports whether the directory directly contains at least one .tf/.tofu file.
+// Single os.ReadDir scan; mirrors strip.go's classifyAnchorEntries but skips
+// the vendor dir by name (pre-resolution there are no tree.Packages yet).
+func classifySubjectDirEntries(entries []os.DirEntry, dir, vendorDirName string) (subdirs []string, hasTF bool) {
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() {
+			// Skip the vendor dir by name (vendored content is never an anchor).
+			if name == vendorDirName {
+				continue
+			}
+			// Skip hidden directories (.git, .terraform, .github, ...).
+			if strings.HasPrefix(name, ".") {
+				continue
+			}
+			subdirs = append(subdirs, filepath.Join(dir, name))
+			continue
+		}
+		if isTerraformConfigFile(name) {
+			hasTF = true
+		}
+	}
+	return subdirs, hasTF
 }
 
 // generateUniqueID creates a unique identifier for a package address.

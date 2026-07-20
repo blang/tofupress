@@ -70,6 +70,7 @@ func init() {
 	// Register subcommands
 	rootCmd.AddCommand(resolveCmd)
 	rootCmd.AddCommand(moduleCmd)
+	rootCmd.AddCommand(treeCmd)
 	rootCmd.AddCommand(metadataCmd)
 	rootCmd.AddCommand(versionCmd)
 }

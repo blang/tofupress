@@ -1,6 +1,29 @@
 # `tofupress module` vs `tofupress tree` — two commands, not a flag
 
-Status: proposed
+Status: implemented
+
+Implemented on `feature/dev` (commits `6d033a0` phase 1, `3a09e0d` phase 2).
+`bundle` is dropped (alpha clean cut); legacy `bundle <dir> <out>` maps to
+`tofupress module <dir> <out>`. ParseStripMode accepts the legacy aliases from
+ADR-0001 unchanged. Two clarifications resolved during implementation are
+normative for this ADR:
+
+- **The shared pressing pipeline**: `module` and `tree` share one resolution
+  core (`resolve(ctx, rootDir, multiEntry)`) and one pressing pipeline
+  (`runPress`); the two commands are thin adapters differing only in the
+  resolveFn (`Resolve` vs `ResolveTree`) and the package boundary. The ADR's
+  "commands, not a flag" decision is honored at the CLI surface; internally
+  the dimensions that differ (archive shape, entry validation, anchor set) are
+  encoded as the seed strategy + boundary, not as post-resolution filters.
+- **`tree` boundary = subject, not the `//`-expanded package root**.
+  `resolveSource` returns the `//subdir`-expanded package root for `module`
+  (so `../` from the entry resolves inside the package); `tree` overrides that
+  with the subject itself, so a local ref escaping the subject is a boundary
+  error. Pressing the layout as-is within the subject is the `tree` contract.
+- **Per-module N-artifact output is deferred** as a future output flag on
+  `tofupress tree` (pivot each discovered entry to its own archive root), as
+  the ADR stated; this implementation presses one tree-shaped artifact per
+  invocation.
 
 ## Context
 

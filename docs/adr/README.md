@@ -6,7 +6,7 @@ Decisions that are hard to reverse, surprising without context, and the result o
 
 | # | Title | Status |
 |---|-------|--------|
-| [0001](0001-strip-levels-and-anchor-rule.md) | Strip levels (`full`/`optimistic`/`aggressive`) and the anchor rule | proposed |
+| [0001](0001-strip-levels-and-anchor-rule.md) | Strip levels (`full`/`optimistic`/`aggressive`) and the anchor rule | implemented |
 | [0002](0002-press-module-vs-press-tree.md) | `tofupress module` vs `tofupress tree` — two commands, not a flag | proposed |
 
 ## Format

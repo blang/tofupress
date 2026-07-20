@@ -1,6 +1,25 @@
 # Strip levels: `full` / `optimistic` / `aggressive`, with the anchor rule
 
-Status: proposed
+Status: implemented
+
+Implemented on `feature/dev` (commits `b740001`, `2a5377e`, `5051324`,
+`6ce3652`, `4a4f874`). `ParseStripMode` accepts the legacy aliases (`none`→full,
+`module-dir`→optimistic, `config-only`/`tf-only`→aggressive) for alpha
+migration. Two clarifications resolved during review are reflected in the
+code and are normative for this ADR:
+
+- **`path.root` escalation**: for a `${path.root}/...` signal in a child or
+  vendored module, the referenced file lives in the **root** module's directory,
+  not the referencing module's own owning package. Escalation therefore targets
+  the **root/entry owning package**, not the module's narrowest owning package
+  (which remains correct for `${path.module}/...` and dynamic `file()`). The
+  "whole owning package kept verbatim" wording above is read with this
+  refinement: the owning package is the one that *contains the referenced file*.
+- **Aggressive keeps all `.tf`/`.tofu` config files** in the press subject,
+  including anchors no module block references (an unreferenced subject
+  `examples/big-example/main.tf` survives under `aggressive`). The ladder
+  line `aggressive: .tf/.tofu files only` is the contract; it is not
+  scoped to reachable modules only.
 
 ## Context
 

@@ -2,6 +2,8 @@
 package tofupress
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
 	"fmt"
 	"net/http"
@@ -17,6 +19,42 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestResolver_SerializesProgressCallbacks(t *testing.T) {
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{}, 2)
+	done := make(chan struct{}, 2)
+	resolver := NewResolver(WithProgress(func(*ProgressEvent) {
+		entered <- struct{}{}
+		<-release
+	}))
+
+	go func() {
+		resolver.report(&ProgressEvent{Type: "first"})
+		done <- struct{}{}
+	}()
+	<-entered
+	go func() {
+		resolver.report(&ProgressEvent{Type: "second"})
+		done <- struct{}{}
+	}()
+
+	concurrent := false
+	select {
+	case <-entered:
+		concurrent = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	release <- struct{}{}
+	if !concurrent {
+		<-entered
+	}
+	release <- struct{}{}
+	<-done
+	<-done
+
+	assert.False(t, concurrent, "parallel downloads must not invoke a caller's progress callback concurrently")
+}
 
 // TestGenerateUniqueID_Length verifies that unique IDs are at least 16 hex characters (64 bits)
 // to avoid collision risk. 32-bit hashes have collision risk at ~65K modules.
@@ -361,8 +399,34 @@ module "invalid" {
 	// Resolve should fail
 	resolver := NewResolver()
 	tree, err := resolver.Resolve(context.Background(), tmpDir)
-	assert.Error(t, err)
+	require.Error(t, err)
 	assert.Nil(t, tree)
+	assert.Contains(t, err.Error(), "unsupported module source")
+	assert.Contains(t, err.Error(), "invalid::source::format")
+}
+
+func TestResolver_RejectsInvalidModuleLabel(t *testing.T) {
+	rootDir := t.TempDir()
+	writeTerraformFile(t, rootDir, "main.tf", `module "../../escape" { source = "./child" }`)
+
+	resolver := NewResolver()
+	_, err := resolver.Resolve(context.Background(), rootDir)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "is not a valid Terraform identifier")
+}
+
+func TestResolver_RejectsUnsafeVendorDirBeforeCreatingIt(t *testing.T) {
+	rootDir := t.TempDir()
+	writeTerraformFile(t, rootDir, "main.tf", `output "x" { value = true }`)
+	escapeDir := filepath.Join(filepath.Dir(rootDir), "escaped-vendor")
+
+	resolver := NewResolver(WithResolverVendorDir("../escaped-vendor"))
+	_, err := resolver.Resolve(context.Background(), rootDir)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "vendor directory")
+	assert.NoDirExists(t, escapeDir)
 }
 
 func TestNewResolver(t *testing.T) {
@@ -481,6 +545,52 @@ module "a_back" {
 	assert.Contains(t, err.Error(), "circular")
 }
 
+func TestResolver_RejectsTerraformFileSymlinkOutsidePackage(t *testing.T) {
+	rootDir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "outside.tf")
+	require.NoError(t, os.WriteFile(outsideFile, []byte(`output "secret" { value = true }`), 0o600))
+	if err := os.Symlink(outsideFile, filepath.Join(rootDir, "main.tf")); err != nil {
+		t.Skip("symlinks not supported on this system")
+	}
+
+	resolver := NewResolver(WithPackageRoot(rootDir))
+	_, err := resolver.Resolve(context.Background(), rootDir)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "terraform configuration main.tf escapes package boundary")
+}
+
+func TestResolver_DetectsCycleThroughSymlinkAlias(t *testing.T) {
+	rootDir := t.TempDir()
+	writeTerraformFile(t, rootDir, "main.tf", `module "again" { source = "./again" }`)
+	if err := os.Symlink(".", filepath.Join(rootDir, "again")); err != nil {
+		t.Skip("symlinks not supported on this system")
+	}
+
+	resolver := NewResolver(WithPackageRoot(rootDir))
+	_, err := resolver.Resolve(context.Background(), rootDir)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "circular dependency detected")
+}
+
+func TestResolver_RejectsLocalModuleSymlinkOutsidePackage(t *testing.T) {
+	rootDir := t.TempDir()
+	outsideDir := t.TempDir()
+	writeTerraformFile(t, rootDir, "main.tf", `module "outside" { source = "./linked" }`)
+	writeTerraformFile(t, outsideDir, "main.tf", `output "secret" { value = true }`)
+	if err := os.Symlink(outsideDir, filepath.Join(rootDir, "linked")); err != nil {
+		t.Skip("symlinks not supported on this system")
+	}
+
+	resolver := NewResolver(WithPackageRoot(rootDir))
+	_, err := resolver.Resolve(context.Background(), rootDir)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "escapes package boundary")
+}
+
 func TestResolver_MaxDepth(t *testing.T) {
 	// Create a deep chain of nested modules, all within the same package
 	tmpDir := t.TempDir()
@@ -524,6 +634,50 @@ module "%s" {
 	assert.Contains(t, err.Error(), "depth")
 }
 
+func TestResolver_MaxModulesAllowsExactRemoteLimit(t *testing.T) {
+	var archive bytes.Buffer
+	zw := zip.NewWriter(&archive)
+	entry, err := zw.Create("main.tf")
+	require.NoError(t, err)
+	_, err = entry.Write([]byte(`output "x" { value = true }`))
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/zip")
+		_, _ = w.Write(archive.Bytes())
+	}))
+	defer server.Close()
+
+	rootDir := t.TempDir()
+	writeTerraformFile(t, rootDir, "main.tf", fmt.Sprintf(`module "remote" { source = %q }`, server.URL+"/module.zip"))
+
+	resolver := NewResolver(WithMaxModules(2))
+	tree, err := resolver.Resolve(context.Background(), rootDir)
+
+	require.NoError(t, err)
+	assert.Len(t, tree.AllModules, 2)
+}
+
+func TestResolver_MaxModulesStopsBeforeRemoteFetch(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		http.Error(w, "must not be fetched", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	rootDir := t.TempDir()
+	writeTerraformFile(t, rootDir, "main.tf", fmt.Sprintf(`module "remote" { source = %q }`, server.URL+"/module.zip"))
+
+	resolver := NewResolver(WithMaxModules(1))
+	_, err := resolver.Resolve(context.Background(), rootDir)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "module limit 1 exceeded")
+	assert.Zero(t, requests, "limit must be enforced before network I/O")
+}
+
 func TestResolver_MaxModules(t *testing.T) {
 	// Create many sibling modules
 	tmpDir := t.TempDir()
@@ -547,6 +701,21 @@ func TestResolver_MaxModules(t *testing.T) {
 	_, err := resolver.Resolve(context.Background(), tmpDir)
 	require.Error(t, err, "should reject when module count exceeds limit")
 	assert.Contains(t, err.Error(), "module")
+}
+
+func TestResolveTree_MaxModulesIncludesEntrySeeds(t *testing.T) {
+	subject := t.TempDir()
+	for _, rel := range []string{"modules/a/main.tf", "modules/b/main.tf"} {
+		path := filepath.Join(subject, rel)
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+		writeTerraformFile(t, filepath.Dir(path), filepath.Base(path), `output "x" { value = true }`)
+	}
+
+	resolver := NewResolver(WithPackageRoot(subject), WithMaxModules(1))
+	_, err := resolver.ResolveTree(context.Background(), subject)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "module limit 1 exceeded")
 }
 
 func TestResolver_NoCycle_SharedModule(t *testing.T) {
@@ -745,7 +914,7 @@ func TestQueryRegistryAPI_ContextCancelled(t *testing.T) {
 }
 
 func TestResolver_SelfReferenceErrorMessage(t *testing.T) {
-	// A module that references itself (source = ".") must be rejected.
+	// A module that references itself with a valid local source must be rejected.
 	// Regression test for QA Finding #8: the error message should name the
 	// ancestor explicitly when the root module is involved, not show an empty
 	// key (ancestor module "").
@@ -753,7 +922,7 @@ func TestResolver_SelfReferenceErrorMessage(t *testing.T) {
 
 	writeTerraformFile(t, tmpDir, "main.tf", `
 module "self" {
-  source = "."
+  source = "./"
 }
 `)
 
@@ -761,10 +930,7 @@ module "self" {
 	_, err := resolver.Resolve(context.Background(), tmpDir)
 	require.Error(t, err, "self-referencing modules must be rejected")
 	assert.Contains(t, err.Error(), "circular")
-
-	// Known issue: the root module has an empty Key so the error currently
-	// shows `ancestor module ""`. Once fixed, flip this assertion.
-	// TODO(#8): change to assert.NotContains when root key is rendered as "root".
+	assert.Contains(t, err.Error(), `ancestor module "root"`)
 }
 
 func TestResolver_SharedPathDeduplication(t *testing.T) {
@@ -796,6 +962,22 @@ module "b" {
 	require.NotNil(t, a)
 	require.NotNil(t, b)
 	assert.Equal(t, a.InstallDir, b.InstallDir, "same path should produce same install dir")
+}
+
+func TestResolver_RejectsDuplicateModuleNamesAcrossFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, "child"), 0o755))
+	writeTerraformFile(t, filepath.Join(tmpDir, "child"), "main.tf", `output "x" { value = true }`)
+	writeTerraformFile(t, tmpDir, "a.tf", `module "vpc" { source = "./child" }`)
+	writeTerraformFile(t, tmpDir, "b.tf", `module "vpc" { source = "./child" }`)
+
+	resolver := NewResolver()
+	_, err := resolver.Resolve(context.Background(), tmpDir)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `duplicate module "vpc"`)
+	assert.Contains(t, err.Error(), "a.tf")
+	assert.Contains(t, err.Error(), "b.tf")
 }
 
 func TestResolver_DuplicateModuleNamesCreatesConflictingKeys(t *testing.T) {

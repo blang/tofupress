@@ -467,14 +467,10 @@ func TestBinary_ResolveRemoteGitJSON(t *testing.T) {
 	assert.Contains(t, result, "modules", "JSON output should contain 'modules' key")
 }
 
-// TestBinary_BundleWithSubpath verifies that `module` handles subpath sources correctly.
-// A subpath source like "git::https://github.com/user/repo.git//modules/vpc" should
-// press only the modules/vpc subdirectory as the root module. The subdir must itself
-// be a module (contain .tf at its root): `tofupress module` refuses a no-.tf subject
-// (ADR-0002) — a tree-of-modules subdir (e.g. the repo's //examples directory,
-// which has .tf only in nested example dirs) is the `tofupress tree` case, so this
-// test points at a single example module (examples/simple-vpc) that has its own main.tf.
-func TestBinary_BundleWithSubpath(t *testing.T) {
+// TestBinary_ModuleWithSubpathRefusesPackageRootCollision verifies that a
+// valid subpath is acquired but a pivot that also needs the package root fails
+// closed rather than silently overwriting the selected entry at archive root.
+func TestBinary_ModuleWithSubpathRefusesPackageRootCollision(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping integration test with network access")
 	}
@@ -482,20 +478,14 @@ func TestBinary_BundleWithSubpath(t *testing.T) {
 	binary := buildBinary(t)
 	outputPath := filepath.Join(t.TempDir(), "bundle.zip")
 
-	// Press a subpath of a remote git module that is itself a single module.
 	cmd := exec.Command(binary, "module", //nolint:gosec // G204: subprocess is intentional for testing binary
 		"git::https://github.com/terraform-aws-modules/terraform-aws-vpc.git//examples/complete?ref=master", //nolint:lll // long URL
 		outputPath)
 	out, err := cmd.CombinedOutput()
-	require.NoError(t, err, "module subpath source failed: %s", string(out))
-
-	// Verify bundle was created
-	_, err = os.Stat(outputPath)
-	require.NoError(t, err, "bundle file should exist")
-
-	// Verify it's a valid zip
-	err = validateZipFile(t, outputPath)
-	require.NoError(t, err, "bundle should be a valid zip archive")
+	require.Error(t, err, "unpreservable module pivot unexpectedly succeeded: %s", string(out))
+	assert.Contains(t, string(out), "cannot preserve")
+	assert.Contains(t, string(out), "tofupress tree")
+	assert.NoFileExists(t, outputPath)
 }
 
 // TestBinary_BundleNestedArchive verifies that bundling a directory that was itself

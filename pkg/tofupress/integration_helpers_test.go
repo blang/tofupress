@@ -110,6 +110,20 @@ func buildTofuPressBinary(t *testing.T) string {
 
 func runTofuPressBundle(t *testing.T, bin, source, output string, flags ...string) (stdout string, stderr string) {
 	t.Helper()
+	stdout, stderr, err := runTofuPressBundleCommand(t, bin, source, output, flags...)
+	require.NoError(t, err, "tofupress module failed\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	return stdout, stderr
+}
+
+func runTofuPressBundleExpectFailure(t *testing.T, bin, source, output string, flags ...string) (stdout string, stderr string) {
+	t.Helper()
+	stdout, stderr, err := runTofuPressBundleCommand(t, bin, source, output, flags...)
+	require.Error(t, err, "tofupress module unexpectedly succeeded\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+	return stdout, stderr
+}
+
+func runTofuPressBundleCommand(t *testing.T, bin, source, output string, flags ...string) (stdout string, stderr string, runErr error) {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 
@@ -121,9 +135,8 @@ func runTofuPressBundle(t *testing.T, bin, source, output string, flags ...strin
 	var errBuilder strings.Builder
 	cmd.Stdout = &outBuilder
 	cmd.Stderr = &errBuilder
-	err := cmd.Run()
-	require.NoError(t, err, "tofupress %s failed\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), outBuilder.String(), errBuilder.String())
-	return outBuilder.String(), errBuilder.String()
+	runErr = cmd.Run()
+	return outBuilder.String(), errBuilder.String(), runErr
 }
 
 func serveArtifact(t *testing.T, artifactPath string) string {

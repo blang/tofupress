@@ -119,7 +119,7 @@ func (p *PackageStripPlan) includeFile(absFile string) {
 
 func cleanRel(root, absPath string) string {
 	rel, err := filepath.Rel(root, absPath)
-	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+	if err != nil || rel == "." || relativePathEscapesRoot(rel) {
 		return ""
 	}
 	return filepath.ToSlash(filepath.Clean(rel))
@@ -431,7 +431,7 @@ func warnExcludedRemotePackageDirs(plan *StripPlan, tree *ResolvedTree) {
 							"downloaded remote package %s; a conditional ../%s reference "+
 							"in this third-party module could reach it at runtime and fail. "+
 							"Re-run with --strip=full to keep it (review item 4 / ADR-0001)",
-						entry.Name(), pkg.PackageAddr, entry.Name()),
+						entry.Name(), RedactSourceAddress(pkg.PackageAddr), entry.Name()),
 				})
 			}
 		}
@@ -660,7 +660,14 @@ func isGeneratedOrVCSPath(absPath string) bool {
 
 //nolint:gocognit // directory walking with stats accounting requires branching
 func (p *StripPlan) computeStats() error {
+	p.OriginalBytes = 0
+	p.FinalBytes = 0
+	p.StrippedBytes = 0
+	p.StrippedFiles = 0
 	for _, pkgPlan := range p.Packages {
+		pkgPlan.OriginalBytes = 0
+		pkgPlan.FinalBytes = 0
+		pkgPlan.StrippedFiles = nil
 		// Guard against directories that may have been removed during identity
 		// planning (e.g., superseded package temp dirs). Skip gracefully.
 		if _, statErr := os.Stat(pkgPlan.PackageRoot); statErr != nil {
@@ -672,6 +679,15 @@ func (p *StripPlan) computeStats() error {
 		if err := filepath.WalkDir(pkgPlan.PackageRoot, func(path string, entry fs.DirEntry, err error) error {
 			if err != nil {
 				return err
+			}
+			// Package roots can be nested. Attribute each path only to its
+			// narrowest owning plan so bytes are neither double-counted nor
+			// classified by conflicting outer/inner policies.
+			if owner := p.PackageForPath(path); owner != pkgPlan {
+				if entry.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
 			}
 			if entry.IsDir() {
 				if isGeneratedOrVCSPath(path) {

@@ -1,10 +1,10 @@
 # tofupress
 
-A CLI that takes an OpenTofu/Terraform root module, recursively resolves all referenced modules, and bundles everything into a single self-contained artifact — no external module sources left to resolve at runtime.
+TofuPress recursively resolves OpenTofu/Terraform modules and presses them into a self-contained archive with no remote module sources left to fetch at runtime.
 
 ## Why
 
-Terraform's module system is great for sharing code, but it creates a dependency tree of arbitrary depth that consumers must resolve at init time. The usual alternative — vendoring all modules into the repository — is tedious to manage and clutters git history, especially when those modules recursively pull in submodules of their own. **tofupress** lets you keep using modules the way Terraform intended while producing a single, hermetic artifact at release time. As a bonus, the recursive condensing step can deduplicate modules that appear multiple times in the tree.
+Terraform modules can form dependency trees of arbitrary depth. Consumers normally resolve that tree during `init`, while manually vendoring it clutters source repositories and is difficult to maintain. TofuPress resolves, rewrites, and deduplicates the tree once at release time so the resulting artifact is hermetic.
 
 ## Installation
 
@@ -14,135 +14,137 @@ go install github.com/blang/tofupress/cmd/tofupress@latest
 
 ## Usage
 
-### Resolve modules
-
-Scan and resolve all module dependencies, displaying the resolved tree:
+### Inspect a module tree
 
 ```bash
 tofupress resolve ./my-infra
-```
-
-Output as JSON for programmatic use:
-
-```bash
 tofupress resolve ./my-infra --json
 ```
 
-### Bundle modules
+### Press one module
 
-Resolve and create a self-contained archive:
+`module` selects one entry module and pivots it to the archive root:
 
 ```bash
-tofupress bundle ./my-infra bundle.zip
+tofupress module ./my-infra module.zip
 ```
 
-#### Monorepo support
+The subject must contain a top-level `.tf` or `.tofu` file.
 
-For monorepo layouts where Terraform root modules live deep inside a repository, use the `//` syntax to separate the package root from the entry subdirectory:
+For a module inside a larger package, use `//` to select the entry explicitly:
 
 ```bash
-# The monorepo root is the package; infra/environments/prod is the entry point
-# All ../ references resolve relative to the monorepo root
-tofupress bundle ./my-monorepo//infra/environments/prod bundle.zip
-
-# Same syntax works with resolve
-tofupress resolve ./my-monorepo//infra/environments/prod --json
+# Package = ./my-monorepo; entry = infra/environments/prod
+tofupress module ./my-monorepo//infra/environments/prod prod.zip
 ```
 
-Without `//`, TofuPress only copies the specified directory. With `//`, the entire repository is the package root, so sibling and parent directory references (e.g., `../../modules/network`) resolve correctly.
+TofuPress does not infer a package by searching for a surrounding Git repository. Without `//`, the specified directory is the package boundary. This keeps parent/sibling inclusion explicit and prevents unrelated repository content from being copied. Internal symlinks are dereferenced for portability; dangling/cyclic links or targets outside that explicit boundary are refused.
 
-#### Bundle formats
+Local module references to siblings can be relocated during the pivot. An entry module filesystem read that escapes through `../`, or a local module source that resolves to the package root itself, cannot preserve its meaning after the entry moves to archive root; TofuPress refuses those cases and directs you to `tree`.
 
-TofuPress supports multiple archive formats for different distribution channels:
+### Press a tree of modules
 
-| Format | Use Case | Distribution |
-|--------|----------|--------------|
-| **zip** (default) | OCI registries | `oras push` + `source = "oci://..."` |
-| **tar.gz** | HTTP servers | `source = "https://..."` |
-| **tar.xz** | S3/object storage | `source = "s3::https://..."` |
-
-Specify the format with `--format`:
+`tree` preserves the subject layout without pivoting it. Every directory containing a `.tf` or `.tofu` file is an entry anchor:
 
 ```bash
-tofupress bundle ./my-infra bundle.tar.gz --format tar.gz
-tofupress bundle ./my-infra bundle.tar.xz --format tar.xz
+tofupress tree ./my-monorepo monorepo.zip
 ```
 
-## Distributing bundles
+Consumers select an anchor with Terraform's package-subdirectory syntax:
 
-### OCI registry distribution (recommended)
+```hcl
+module "prod" {
+  source = "https://modules.example.com/monorepo.zip//infra/environments/prod"
+}
+```
 
-OpenTofu supports installing modules directly from OCI-compliant registries. TofuPress creates OCI-compatible ZIP bundles that you can push with [oras](https://oras.land/):
+Use `tree` for module repositories, multiple entry modules, and package-relative filesystem reads that depend on the original directory geometry.
+
+### Artifact formats
+
+| Format | Typical distribution |
+|---|---|
+| **zip** | OCI registry or HTTP |
+| **tar.gz** | HTTP server |
+| **tar.xz** | Object storage |
+
+The output extension is used when `--format=auto` (the default), or the format can be explicit:
 
 ```bash
-# 1. Create ZIP bundle
-tofupress bundle ./my-infra bundle.zip
+tofupress module ./my-infra module.tar.gz --format=tar.gz
+tofupress tree ./my-monorepo modules.tar.xz --format=tar.xz
+```
 
-# 2. Push to OCI registry
+### Strip levels
+
+The default `optimistic` level keeps configuration, statically detected filesystem inputs, and risk-signaled owning packages. Other levels are:
+
+- `full`: retain all relevant package content.
+- `aggressive`: retain configuration and statically proven inputs, even when runtime reads may be omitted.
+
+```bash
+tofupress module ./my-infra module.zip --strip=full
+```
+
+Legacy alpha aliases (`none`, `module-dir`, `config-only`, and `tf-only`) remain accepted and are recorded in metadata.
+
+## Distribution
+
+### OCI registry
+
+Create an OCI-compliant ZIP and push it with [ORAS](https://oras.land/):
+
+```bash
+tofupress module ./my-infra module.zip --oci-compliant
+
 oras push \
   --artifact-type=application/vnd.opentofu.modulepkg \
   registry.example.com/my-module:v1.0.0 \
-  bundle.zip:archive/zip
+  module.zip:archive/zip
 ```
 
-Consumers can then use the module in their Terraform/OpenTofu configurations:
-
 ```hcl
-module "my-infra" {
+module "my_infra" {
   source = "oci://registry.example.com/my-module?tag=v1.0.0"
 }
 ```
 
-**Note:** The `--artifact-type` flag must be set to exactly `application/vnd.opentofu.modulepkg` for OpenTofu to recognize the artifact as a module package.
+The artifact type must be `application/vnd.opentofu.modulepkg`. OCI reads are strict by default; `--strict-oci=false` is an explicit compatibility escape hatch.
 
-### HTTP server distribution
-
-For HTTP distribution, create a tar.gz bundle and host it on any web server:
+### HTTP
 
 ```bash
-# 1. Create tar.gz bundle
-tofupress bundle ./my-infra bundle.tar.gz --format tar.gz
-
-# 2. Upload to your web server
-scp bundle.tar.gz webserver:/var/www/modules/
+tofupress module ./my-infra module.tar.gz
+scp module.tar.gz webserver:/var/www/modules/
 ```
 
-Consumers reference it via HTTPS:
-
 ```hcl
-module "my-infra" {
-  source = "https://modules.example.com/bundle.tar.gz"
+module "my_infra" {
+  source = "https://modules.example.com/module.tar.gz"
 }
 ```
 
-### S3/object storage distribution
-
-For S3 distribution, create a tar.xz bundle (smaller size) and upload to your bucket:
+### S3 or other object storage
 
 ```bash
-# 1. Create tar.xz bundle
-tofupress bundle ./my-infra bundle.tar.xz --format tar.xz
-
-# 2. Upload to S3
-aws s3 cp bundle.tar.xz s3://my-modules/bundle.tar.xz
+tofupress module ./my-infra module.tar.xz
+aws s3 cp module.tar.xz s3://my-modules/module.tar.xz
 ```
 
-Consumers reference it via S3:
-
 ```hcl
-module "my-infra" {
-  source = "s3::https://my-modules.s3.amazonaws.com/bundle.tar.xz"
+module "my_infra" {
+  source = "s3::https://my-modules.s3.amazonaws.com/module.tar.xz"
 }
 ```
 
 ## How it works
 
-1. **Discovery**: Scans all `.tf` files in the target directory
-2. **Parsing**: Extracts `module` blocks and their `source` attributes
-3. **Classification**: Determines the source type (local, git, registry, HTTP, S3, GCS, OCI)
-4. **Resolution**: Recursively downloads remote modules using breadth-first search
-5. **Deduplication**: Modules referenced multiple times are downloaded once
-6. **Rewriting**: Updates `source` attributes to point to local `./sourcetree/` paths
-7. **Bundling**: Creates an archive with the root module and all dependencies
+1. Finds `.tf` and `.tofu` configuration at the selected entry or entries.
+2. Parses and classifies local, Git, registry, HTTP, S3, GCS, and OCI sources.
+3. Resolves the graph breadth-first within explicit package boundaries.
+4. Downloads remote packages under a private `_vendor` directory.
+5. Rewrites remote references and relocates local module references when a module is pivoted.
+6. Applies the selected strip policy and content-based deduplication.
+7. Stages one canonical layout, embeds `.tofupress/meta.json`, and atomically commits the requested archive format.
 
-The resulting bundle is completely self-contained — running `terraform init` or `tofu init` on it requires no network access to external module sources.
+The resulting artifact is self-contained: `tofu init` or `terraform init` does not need the original external module sources.

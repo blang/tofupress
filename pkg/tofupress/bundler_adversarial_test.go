@@ -5,11 +5,125 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestBundler_CanceledWritePreservesExistingArtifact(t *testing.T) {
+	rootDir := t.TempDir()
+	writeTerraformFile(t, rootDir, "main.tf", `output "x" { value = true }`)
+	root := &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}
+	tree := &ResolvedTree{Root: root, AllModules: []*ModuleNode{root}, Packages: map[string]*DownloadedPackage{}}
+
+	for _, format := range []BundleFormat{BundleFormatZIP, BundleFormatTarGZ, BundleFormatTarXZ} {
+		t.Run(string(format), func(t *testing.T) {
+			outputDir := t.TempDir()
+			outputPath := filepath.Join(outputDir, "existing.artifact")
+			require.NoError(t, os.WriteFile(outputPath, []byte("previous-good-artifact"), 0o644))
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			err := NewBundler(format).Bundle(ctx, tree, outputPath)
+
+			require.ErrorIs(t, err, context.Canceled)
+			assert.Equal(t, "previous-good-artifact", string(mustReadFile(t, outputPath)))
+			temps, globErr := filepath.Glob(filepath.Join(outputDir, ".existing.artifact.tmp-*"))
+			require.NoError(t, globErr)
+			assert.Empty(t, temps, "failed writes must remove transaction files")
+		})
+	}
+}
+
+func TestBundler_WithVendorDirIsHonoredWithoutMutatingTree(t *testing.T) {
+	rootDir := t.TempDir()
+	packageDir := t.TempDir()
+	writeTerraformFile(t, rootDir, "main.tf", `output "root" { value = true }`)
+	writeTerraformFile(t, packageDir, "main.tf", `output "dependency" { value = true }`)
+	root := &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}
+	tree := &ResolvedTree{
+		Root:       root,
+		AllModules: []*ModuleNode{root},
+		Packages: map[string]*DownloadedPackage{
+			"pkg-safe": {PackageAddr: "https://example.invalid/package.zip", LocalDir: packageDir},
+		},
+	}
+	outputPath := filepath.Join(t.TempDir(), "bundle.zip")
+
+	err := NewBundler(BundleFormatZIP, WithVendorDir("dependencies")).Bundle(context.Background(), tree, outputPath)
+	require.NoError(t, err)
+
+	extracted := t.TempDir()
+	extractZip(t, outputPath, extracted)
+	assert.FileExists(t, filepath.Join(extracted, "dependencies", "pkg-safe", "main.tf"))
+	assert.Empty(t, tree.VendorDir)
+}
+
+func TestBundler_PivotRewritesOnlyStagedEntry(t *testing.T) {
+	packageRoot := t.TempDir()
+	entryDir := filepath.Join(packageRoot, "modules", "a")
+	siblingDir := filepath.Join(packageRoot, "modules", "b")
+	require.NoError(t, os.MkdirAll(entryDir, 0o755))
+	require.NoError(t, os.MkdirAll(siblingDir, 0o755))
+	entryConfig := `module "b" { source = "../b" }`
+	writeTerraformFile(t, entryDir, "main.tf", entryConfig)
+	writeTerraformFile(t, siblingDir, "main.tf", `output "b" { value = true }`)
+	root := &ModuleNode{Name: "root", InstallDir: entryDir, PackageRoot: packageRoot, IsLocal: true}
+	sibling := &ModuleNode{Key: "b", Name: "b", InstallDir: siblingDir, PackageRoot: packageRoot, IsLocal: true, Parent: root}
+	root.Children = []*ModuleNode{sibling}
+	tree := &ResolvedTree{Root: root, AllModules: []*ModuleNode{root, sibling}, Packages: map[string]*DownloadedPackage{}}
+	outputPath := filepath.Join(t.TempDir(), "bundle.zip")
+
+	err := NewBundler(BundleFormatZIP).Bundle(context.Background(), tree, outputPath)
+	require.NoError(t, err)
+
+	assert.Equal(t, entryConfig, string(mustReadFile(t, filepath.Join(entryDir, "main.tf"))))
+	extracted := t.TempDir()
+	extractZip(t, outputPath, extracted)
+	assert.Contains(t, string(mustReadFile(t, filepath.Join(extracted, "main.tf"))), `source = "./modules/b"`)
+	assert.FileExists(t, filepath.Join(extracted, "modules", "b", "main.tf"))
+}
+
+func TestBundler_RefusesPivotWhenLocalModuleTargetsPackageRoot(t *testing.T) {
+	packageRoot := t.TempDir()
+	entryDir := filepath.Join(packageRoot, "examples", "complete")
+	require.NoError(t, os.MkdirAll(entryDir, 0o755))
+	writeTerraformFile(t, entryDir, "main.tf", `module "package" { source = "../.." }`)
+	writeTerraformFile(t, packageRoot, "main.tf", `output "package" { value = true }`)
+	root := &ModuleNode{Name: "root", InstallDir: entryDir, PackageRoot: packageRoot, IsLocal: true}
+	packageModule := &ModuleNode{Key: "package", Name: "package", InstallDir: packageRoot, PackageRoot: packageRoot, IsLocal: true, Parent: root}
+	root.Children = []*ModuleNode{packageModule}
+	tree := &ResolvedTree{Root: root, AllModules: []*ModuleNode{root, packageModule}, Packages: map[string]*DownloadedPackage{}}
+	outputPath := filepath.Join(t.TempDir(), "bundle.zip")
+
+	err := NewBundler(BundleFormatZIP).Bundle(context.Background(), tree, outputPath)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot preserve")
+	assert.Contains(t, err.Error(), "tofupress tree")
+	assert.NoFileExists(t, outputPath)
+}
+
+func TestBundler_RejectsCrossPlatformTraversingArchiveName(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("backslash is a native separator on Windows")
+	}
+	rootDir := t.TempDir()
+	unsafeName := ".." + string('\\') + "escape.tf"
+	require.NoError(t, os.WriteFile(filepath.Join(rootDir, unsafeName), []byte("secret"), 0o644))
+	root := &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}
+	tree := &ResolvedTree{Root: root, AllModules: []*ModuleNode{root}, Packages: map[string]*DownloadedPackage{}}
+	outputPath := filepath.Join(t.TempDir(), "bundle.zip")
+	require.NoError(t, os.WriteFile(outputPath, []byte("previous-good-artifact"), 0o644))
+
+	err := NewBundler(BundleFormatZIP).Bundle(context.Background(), tree, outputPath)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsafe portable archive path")
+	assert.Equal(t, "previous-good-artifact", string(mustReadFile(t, outputPath)))
+}
 
 func TestStageBundle_SymlinksResolved(t *testing.T) {
 	rootDir := t.TempDir()
@@ -35,6 +149,102 @@ func TestStageBundle_SymlinksResolved(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(stagingDir, "link.tf"))
 	require.NoError(t, err)
 	assert.Equal(t, targetContent, data)
+}
+
+func TestStageBundle_RejectsSymlinkOutsidePackage(t *testing.T) {
+	rootDir := t.TempDir()
+	outsideDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(outsideDir, "secret.tf"), []byte("secret"), 0o600))
+	if err := os.Symlink(filepath.Join(outsideDir, "secret.tf"), filepath.Join(rootDir, "leak.tf")); err != nil {
+		t.Skip("symlinks not supported on this system")
+	}
+	root := &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}
+	tree := &ResolvedTree{Root: root, AllModules: []*ModuleNode{root}, Packages: map[string]*DownloadedPackage{}}
+
+	stagingDir, err := stageBundle(tree, "modules", nil, nil)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "outside package root")
+	assert.Empty(t, stagingDir)
+}
+
+func TestStageBundle_RejectsSymlinkDirectoryCycle(t *testing.T) {
+	rootDir := t.TempDir()
+	subDir := filepath.Join(rootDir, "sub")
+	require.NoError(t, os.Mkdir(subDir, 0o750))
+	if err := os.Symlink("..", filepath.Join(subDir, "back")); err != nil {
+		t.Skip("symlinks not supported on this system")
+	}
+	root := &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}
+	tree := &ResolvedTree{Root: root, AllModules: []*ModuleNode{root}, Packages: map[string]*DownloadedPackage{}}
+
+	stagingDir, err := stageBundle(tree, "modules", nil, nil)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "symlink cycle")
+	assert.Empty(t, stagingDir)
+}
+
+func TestStageBundle_DoesNotDuplicateModulesOwnedByDownloadedPackage(t *testing.T) {
+	rootDir := t.TempDir()
+	packageDir := t.TempDir()
+	helperDir := filepath.Join(packageDir, "helper")
+	require.NoError(t, os.MkdirAll(helperDir, 0o755))
+	writeTerraformFile(t, rootDir, "main.tf", `output "root" { value = true }`)
+	writeTerraformFile(t, helperDir, "main.tf", `output "helper" { value = true }`)
+	root := &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}
+	helper := &ModuleNode{Key: "remote.helper", Name: "helper", InstallDir: helperDir, PackageRoot: packageDir, IsLocal: true, Parent: root}
+	tree := &ResolvedTree{
+		Root:       root,
+		AllModules: []*ModuleNode{root, helper},
+		Packages: map[string]*DownloadedPackage{
+			"pkg-safe": {PackageAddr: "https://example.invalid/package.zip", LocalDir: packageDir},
+		},
+	}
+
+	stagingDir, err := stageBundle(tree, "modules", nil, nil)
+	require.NoError(t, err)
+	defer os.RemoveAll(stagingDir)
+
+	assert.FileExists(t, filepath.Join(stagingDir, "modules", "pkg-safe", "helper", "main.tf"))
+	assert.NoFileExists(t, filepath.Join(stagingDir, "remote", "helper", "main.tf"))
+}
+
+func TestStageBundle_RejectsTraversingPackageIdentity(t *testing.T) {
+	rootDir := t.TempDir()
+	packageDir := t.TempDir()
+	writeTerraformFile(t, rootDir, "main.tf", `output "root" { value = true }`)
+	writeTerraformFile(t, packageDir, "main.tf", `output "package" { value = true }`)
+	root := &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}
+	tree := &ResolvedTree{
+		Root:       root,
+		AllModules: []*ModuleNode{root},
+		Packages: map[string]*DownloadedPackage{
+			"../../escape": {PackageAddr: "https://example.invalid/package.zip", LocalDir: packageDir},
+		},
+	}
+
+	stagingDir, err := stageBundle(tree, "modules", nil, nil)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid package identity")
+	assert.Empty(t, stagingDir)
+}
+
+func TestStageBundle_RejectsTraversingModuleKey(t *testing.T) {
+	rootDir := t.TempDir()
+	moduleDir := t.TempDir()
+	writeTerraformFile(t, rootDir, "main.tf", `output "root" { value = true }`)
+	writeTerraformFile(t, moduleDir, "main.tf", `output "module" { value = true }`)
+	root := &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}
+	module := &ModuleNode{Key: "../../escape", Name: "escape", InstallDir: moduleDir, PackageRoot: moduleDir, IsLocal: true, Parent: root}
+	tree := &ResolvedTree{Root: root, AllModules: []*ModuleNode{root, module}, Packages: map[string]*DownloadedPackage{}}
+
+	stagingDir, err := stageBundle(tree, "modules", nil, nil)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid archive path for local module")
+	assert.Empty(t, stagingDir)
 }
 
 func TestStageBundle_SpecialCharactersInFilenames(t *testing.T) {
@@ -104,6 +314,58 @@ func TestStageBundle_CrossFilesystem(t *testing.T) {
 
 	assert.FileExists(t, filepath.Join(stagingDir, "main.tf"))
 	assert.FileExists(t, filepath.Join(stagingDir, "modules", "pkg-abc123", "main.tf"))
+}
+
+func TestStageBundle_PreservesLegacyNamedUserDirectory(t *testing.T) {
+	rootDir := t.TempDir()
+	writeTerraformFile(t, rootDir, "main.tf", `output "x" { value = true }`)
+	require.NoError(t, os.MkdirAll(filepath.Join(rootDir, "sourcetree"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(rootDir, "sourcetree", "user-data.txt"), []byte("keep"), 0o644))
+
+	root := &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}
+	tree := &ResolvedTree{Root: root, AllModules: []*ModuleNode{root}, Packages: map[string]*DownloadedPackage{}}
+
+	stagingDir, err := stageBundle(tree, defaultVendorDir, nil, nil)
+	require.NoError(t, err)
+	defer os.RemoveAll(stagingDir)
+
+	assert.FileExists(t, filepath.Join(stagingDir, "sourcetree", "user-data.txt"))
+}
+
+func TestStageBundle_RejectsMetadataPathCollision(t *testing.T) {
+	rootDir := t.TempDir()
+	writeTerraformFile(t, rootDir, "main.tf", `output "x" { value = true }`)
+	require.NoError(t, os.MkdirAll(filepath.Join(rootDir, MetadataDir), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(rootDir, MetadataRelPath), []byte(`{"owner":"user"}`), 0o644))
+
+	root := &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}
+	tree := &ResolvedTree{Root: root, AllModules: []*ModuleNode{root}, Packages: map[string]*DownloadedPackage{}}
+
+	_, err := stageBundle(tree, defaultVendorDir, nil, &ArtifactMetadata{SchemaVersion: MetadataSchemaVersion})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), MetadataRelPath)
+	assert.Contains(t, err.Error(), "reserved")
+	assert.JSONEq(t, `{"owner":"user"}`, string(mustReadFile(t, filepath.Join(rootDir, MetadataRelPath))))
+}
+
+func TestValidateVendorDir(t *testing.T) {
+	for _, valid := range []string{"", "_vendor", ".vendor", "terraform-modules"} {
+		t.Run("valid_"+valid, func(t *testing.T) {
+			require.NoError(t, ValidateVendorDir(valid))
+		})
+	}
+	for _, invalid := range []string{".", "..", "../escape", "nested/vendor", `nested\\vendor`, ".git", ".terraform", MetadataDir, " vendor"} {
+		t.Run("invalid_"+invalid, func(t *testing.T) {
+			require.Error(t, ValidateVendorDir(invalid))
+		})
+	}
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return data
 }
 
 func TestStageBundle_SkipsGeneratedDirs(t *testing.T) {

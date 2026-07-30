@@ -6,10 +6,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io/fs"
 	"net/url"
 	"os"
-	pathpkg "path"
 	"path/filepath"
 	"slices"
 	"sort"
@@ -110,12 +108,14 @@ func deriveGitNamespace(addr string) string {
 	if len(segs) < 2 {
 		return ""
 	}
-	// Take the last two segments: namespace/name.
-	ns := strings.Join(segs[len(segs)-2:], "/")
-	ns = pathpkg.Clean(ns)
-	// Sanitize: the vendor path must be filesystem-safe.
-	ns = strings.ReplaceAll(ns, " ", "-")
-	return ns
+	// Take the last two segments only when both are portable path components.
+	// Falling back to the content hash is safer than allowing a remote URL to
+	// turn provenance into `../` traversal or a platform-specific absolute path.
+	namespace, name := segs[len(segs)-2], segs[len(segs)-1]
+	if !safeNamespaceSegment(namespace) || !safeNamespaceSegment(name) {
+		return ""
+	}
+	return namespace + "/" + name
 }
 
 // deriveRegistryNamespace extracts <namespace>/<name> from a Terraform registry
@@ -131,76 +131,33 @@ func deriveRegistryNamespace(addr string) string {
 	if len(segs) != 3 {
 		return ""
 	}
-	if slices.Contains(segs, "") {
+	if slices.Contains(segs, "") || !safeNamespaceSegment(segs[0]) || !safeNamespaceSegment(segs[1]) {
 		return ""
 	}
 	// namespace/name (drop the provider segment to keep the path short; the
 	// provider is implied by the content).
-	return pathpkg.Clean(segs[0] + "/" + segs[1])
+	return segs[0] + "/" + segs[1]
 }
 
-// SnapshotDirectoryWithStrip computes the deterministic identity of files that will be visible
-// in the archive, respecting the strip plan's include/exclude decisions.
-//
-//nolint:gocognit,gocyclo // directory walking with strip-filtering requires branching
+func safeNamespaceSegment(segment string) bool {
+	if segment == "" || segment == "." || segment == ".." || strings.TrimSpace(segment) != segment {
+		return false
+	}
+	if strings.ContainsAny(segment, "/\\:\x00") {
+		return false
+	}
+	for _, r := range segment {
+		if r < ' ' || r == 0x7f {
+			return false
+		}
+	}
+	return true
+}
+
+// SnapshotDirectoryWithStrip computes the deterministic identity of files that
+// staging will expose after applying strip decisions.
 func SnapshotDirectoryWithStrip(dir string, stripPlan *StripPlan) (DirectorySnapshot, error) {
-	if stripPlan == nil {
-		return SnapshotDirectory(dir)
-	}
-	info, err := os.Stat(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return DirectorySnapshot{}, fmt.Errorf("failed to read directory %s: directory does not exist", dir)
-		}
-		return DirectorySnapshot{}, fmt.Errorf("failed to read directory %s: %w", dir, err)
-	}
-	if !info.IsDir() {
-		return DirectorySnapshot{}, fmt.Errorf("failed to read directory %s: not a directory", dir)
-	}
-
-	var entries []hashEntry
-	var totalBytes int64
-	walkErr := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			if isGeneratedOrVCSPath(path) {
-				return filepath.SkipDir
-			}
-			if !stripPlan.IncludePath(path, true) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.Type()&fs.ModeSymlink != 0 || !d.Type().IsRegular() {
-			return nil
-		}
-		if !stripPlan.IncludePath(path, false) {
-			return nil
-		}
-		fileInfo, err := d.Info()
-		if err != nil {
-			return err
-		}
-		content, err := os.ReadFile(path) //nolint:gosec // path comes from controlled directory walk
-		if err != nil {
-			return fmt.Errorf("failed to read file %s: %w", path, err)
-		}
-		relPath, err := filepath.Rel(dir, path)
-		if err != nil {
-			return err
-		}
-		entries = append(entries, hashEntry{relPath: filepath.ToSlash(relPath), mode: fileInfo.Mode().Perm(), content: content})
-		totalBytes += int64(len(content))
-		return nil
-	})
-	if walkErr != nil {
-		return DirectorySnapshot{}, fmt.Errorf("failed to walk directory %s: %w", dir, walkErr)
-	}
-
-	sort.Slice(entries, func(i, j int) bool { return entries[i].relPath < entries[j].relPath })
-	return hashEntries(entries, totalBytes), nil
+	return snapshotDirectory(dir, stripPlan)
 }
 
 // BuildSourcetreeIdentityPlan computes content-addressed sourcetree identities for all
@@ -212,7 +169,11 @@ func BuildSourcetreeIdentityPlan(ctx context.Context, tree *ResolvedTree, stripP
 	if tree == nil || tree.Root == nil {
 		return nil, fmt.Errorf("cannot build sourcetree identity plan for empty tree")
 	}
-	rootSourcetreeDir := filepath.Join(rootArchiveDir(tree), vendorDirName(tree))
+	vendorDir := vendorDirName(tree)
+	if err := ValidateVendorDir(vendorDir); err != nil {
+		return nil, err
+	}
+	rootSourcetreeDir := filepath.Join(rootArchiveDir(tree), vendorDir)
 	plan := &SourcetreeIdentityPlan{
 		RootSourcetreeDir: rootSourcetreeDir,
 		Packages:          make(map[string]*PackageIdentity),
@@ -238,7 +199,7 @@ func BuildSourcetreeIdentityPlan(ctx context.Context, tree *ResolvedTree, stripP
 		}
 		snapshot, err := SnapshotDirectoryWithStrip(pkg.LocalDir, stripPlan)
 		if err != nil {
-			return nil, fmt.Errorf("failed to snapshot package %s: %w", pkg.PackageAddr, err)
+			return nil, fmt.Errorf("failed to snapshot package %s: %w", RedactSourceAddress(pkg.PackageAddr), err)
 		}
 		// The dedup key is content-addressed so identical content always collapses
 		// to one directory (review item 5 / dedup contract). The visible final ID is
@@ -256,13 +217,17 @@ func BuildSourcetreeIdentityPlan(ctx context.Context, tree *ResolvedTree, stripP
 			finalID = finalID + "-" + snapshot.Hash[:8]
 		}
 		seenNamespaced[finalID] = true
+		finalLocalDir, pathErr := joinPathWithin(rootSourcetreeDir, finalID)
+		if pathErr != nil {
+			return nil, fmt.Errorf("invalid final package identity %q: %w", finalID, pathErr)
+		}
 		identity := &PackageIdentity{
 			OldID:                oldID,
 			FinalID:              finalID,
 			PackageAddr:          pkg.PackageAddr,
 			CanonicalPackageAddr: pkg.PackageAddr,
 			OldLocalDir:          pkg.LocalDir,
-			FinalLocalDir:        filepath.Join(rootSourcetreeDir, finalID),
+			FinalLocalDir:        finalLocalDir,
 			FinalHash:            snapshot.Hash,
 			FileCount:            snapshot.FileCount,
 			SizeBytes:            snapshot.TotalBytes,

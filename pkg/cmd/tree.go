@@ -4,6 +4,8 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
+
+	"github.com/blang/tofupress/pkg/tofupress"
 )
 
 var treeCmd = &cobra.Command{
@@ -54,9 +56,13 @@ func runPressTree(cmd *cobra.Command, args []string) error {
 	outputPath := args[1]
 	stdout := cmd.OutOrStdout()
 
+	if err := validatePressFlags(cmd, outputPath); err != nil {
+		return err
+	}
+
 	jsonOut, _ := cmd.Flags().GetBool("json")
 	if !jsonOut {
-		fmt.Fprintf(stdout, "Pressing tree at %s...\n", source) //nolint:errcheck // stdout writes are best-effort
+		fmt.Fprintf(stdout, "Pressing tree at %s...\n", tofupress.RedactSourceAddress(source)) //nolint:errcheck // stdout writes are best-effort
 	}
 
 	// resolveSource fetches the subject (local copy or remote download) into a
@@ -64,7 +70,8 @@ func runPressTree(cmd *cobra.Command, args []string) error {
 	// package; `tree` overrides the boundary to workDir (the subject), so refs
 	// escaping the subject are flagged rather than resolved against the enclosing
 	// package — `tree` presses the subject as-is within its own boundary.
-	workDir, _, cleanup, err := resolveSource(cmd.Context(), source)
+	fetcher := newCommandFetcher(cmd)
+	workDir, _, cleanup, err := resolveTreeSourceWithFetcher(cmd.Context(), source, fetcher)
 	if err != nil {
 		return err
 	}
@@ -72,6 +79,6 @@ func runPressTree(cmd *cobra.Command, args []string) error {
 	stopSig := installSignalCleanup(cleanup)
 	defer stopSig()
 
-	resolver := newPressResolver(cmd, workDir, workDir)
+	resolver := newPressResolverWithFetcher(cmd, fetcher, workDir, workDir)
 	return runPress(cmd, source, outputPath, workDir, resolver.ResolveTree, "tree")
 }

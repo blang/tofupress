@@ -119,6 +119,40 @@ resource "null_resource" "test2" {}
 	assert.NotEqual(t, hash1, hash2, "Different content should produce different hashes")
 }
 
+func TestHashModule_DifferentSymlinkTargetsDifferentHash(t *testing.T) {
+	first := t.TempDir()
+	second := t.TempDir()
+	for _, dir := range []string{first, second} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "a.txt"), []byte("A"), 0o644))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "b.txt"), []byte("B"), 0o644))
+	}
+	if err := os.Symlink("a.txt", filepath.Join(first, "selected.txt")); err != nil {
+		t.Skip("symlinks not supported on this system")
+	}
+	require.NoError(t, os.Symlink("b.txt", filepath.Join(second, "selected.txt")))
+
+	firstHash, err := HashModule(first)
+	require.NoError(t, err)
+	secondHash, err := HashModule(second)
+	require.NoError(t, err)
+
+	assert.NotEqual(t, firstHash, secondHash, "dereferenced archive content must participate in package identity")
+}
+
+func TestSnapshotDirectoryRejectsSymlinkOutsidePackage(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	require.NoError(t, os.WriteFile(outside, []byte("secret"), 0o600))
+	if err := os.Symlink(outside, filepath.Join(root, "leak.txt")); err != nil {
+		t.Skip("symlinks not supported on this system")
+	}
+
+	_, err := SnapshotDirectory(root)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "outside package root")
+}
+
 func TestHashModule_IncludesNonTerraformFiles(t *testing.T) {
 	tmpDir1 := t.TempDir()
 	tfFile1 := filepath.Join(tmpDir1, "main.tf")

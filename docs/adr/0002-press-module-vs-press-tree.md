@@ -3,8 +3,9 @@
 Status: implemented
 
 Implemented on `feature/dev` (commits `6d033a0` phase 1, `3a09e0d` phase 2).
-`bundle` is dropped (alpha clean cut); legacy `bundle <dir> <out>` maps to
-`tofupress module <dir> <out>`. ParseStripMode accepts the legacy aliases from
+`bundle` is dropped (alpha clean cut); the replacement for the former
+`bundle <dir> <out>` invocation is `tofupress module <dir> <out>` (there is no
+runtime alias). ParseStripMode accepts the legacy aliases from
 ADR-0001 unchanged. Two clarifications resolved during implementation are
 normative for this ADR:
 
@@ -20,6 +21,15 @@ normative for this ADR:
   (so `../` from the entry resolves inside the package); `tree` overrides that
   with the subject itself, so a local ref escaping the subject is a boundary
   error. Pressing the layout as-is within the subject is the `tree` contract.
+- **Local package boundaries are explicit**. An unqualified local source is
+  copied as exactly that package; TofuPress does not sniff for and expand to a
+  surrounding Git repository. Callers opt into parent/sibling package content
+  with `package//entry`. In `module` mode, an entry filesystem read that escapes
+  the selected entry cannot survive the archive-root pivot, so the press is
+  refused with `tree` as the layout-preserving remedy. The same refusal applies
+  when a local module source resolves to the package root: the selected entry and
+  package-root module cannot both occupy archive root without one overwriting the
+  other.
 - **Per-module N-artifact output is deferred** as a future output flag on
   `tofupress tree` (pivot each discovered entry to its own archive root), as
   the ADR stated; this implementation presses one tree-shaped artifact per
@@ -81,7 +91,7 @@ Under `tofupress tree`, a stray `scripts/deploy.tf` five levels deep is also an 
 
 ## Consequences
 
-- The `bundle` command is **dropped** (alpha clean cut). Legacy `bundle <dir> <out>` maps to `tofupress module <dir> <out>`.
+- The `bundle` command is **dropped** (alpha clean cut). The former `bundle <dir> <out>` spelling must be changed to `tofupress module <dir> <out>`; no alias is registered.
 - `tofupress tree`'s multi-entry resolution is new resolver machinery (discover every `.tf`-dir under subject as an entry; merge trees; dedup local modules by InstallDir and remote packages by content hash). The archiver is largely reusable: `tree` = unpivoted staging of the subject as-is + vendor dir (no pivot, no `repivotMonorepoSources`). The per-module N-artifact output (pivot each discovered entry to its own archive root) is a **future output flag** on `tofupress tree`, not part of this ADR.
 - `tofupress module`'s refusal of a no-`.tf` subject is a behavior change from `bundle` (which only warned). Justified: a no-`.tf` "module" is the modules-repo case, which `tofupress tree` is the correct tool for; warning-and-degenerating silently produced broken/empty bundles.
 - Cross-module local refs (`moda` → `../modb`) in `tofupress tree` are **not rewritten** (layout preserved); in `tofupress module` they **are** repivoted (`../modb` → `./modules/modb`) because the entry is flattened to the archive root. This asymmetry is deliberate and follows from the pivot decision.

@@ -66,7 +66,7 @@ func main() { fmt.Println("hello") }
 		// The path.module risk signal surfaces in metadata.
 		var foundPathModule bool
 		for _, ref := range m.FilesystemFunctions {
-			if ref.Kind == refKindPathTemplateRisk && ref.Function == "path.module" {
+			if ref.Kind == refKindPathTemplateRisk && ref.Function == pathModuleFunction {
 				foundPathModule = true
 				break
 			}

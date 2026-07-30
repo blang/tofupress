@@ -34,9 +34,10 @@ var zipLayerMediaTypes = []string{"application/zip", "archive/zip"}
 // OCIGetter implements go-getter's Getter interface for OCI registries.
 // It supports the oci:// URL scheme for fetching OpenTofu module packages.
 type OCIGetter struct {
-	client       *getter.Client    // set by SetClient; carries the caller's context (F8)
-	roundTripper http.RoundTripper // optional; injected by NewFetcher(WithRoundTripper(...))
-	strictOCI    bool              // review item 10: when true (default), reject empty artifactType
+	client        *getter.Client    // set by SetClient; carries the caller's context (F8)
+	roundTripper  http.RoundTripper // optional; injected by NewFetcher(WithRoundTripper(...))
+	warningWriter io.Writer         // injected destination for lenient interoperability warnings
+	strictOCI     bool              // review item 10: when true (default), reject empty artifactType
 }
 
 // SetStrictOCI configures whether the getter enforces the spec's non-empty
@@ -108,7 +109,7 @@ func (g *OCIGetter) Get(dst string, u *url.URL) error {
 	// module package per spec: strict mode (default) rejects it; lenient mode
 	// (--strict-oci=false) accepts it with a warning, for interop with registries
 	// that set the type only on the layer.
-	if atErr := enforceArtifactType(g.strictOCI, ref.String(), manifest.ArtifactType); atErr != nil {
+	if atErr := enforceArtifactType(g.strictOCI, g.warningWriter, ref.String(), manifest.ArtifactType); atErr != nil {
 		return atErr
 	}
 
@@ -234,20 +235,28 @@ func verifyBlobDigest(computedHex, expectedDigest string) error {
 // — including an empty one. Lenient (strict=false) accepts a non-matching
 // artifactType with a stderr warning, for interop with registries that set the
 // type only on the layer. Returns an error only in strict mode.
-func enforceArtifactType(strict bool, ref, artifactType string) error {
+func enforceArtifactType(strict bool, warningWriter io.Writer, ref, artifactType string) error {
 	if artifactType == modulepkgArtifactType {
 		return nil
 	}
+	safeRef := redactOCIReference(ref)
 	if strict {
 		return fmt.Errorf("oci: artifact %s is not an OpenTofu module package (artifactType=%q, want %q)",
-			ref, artifactType, modulepkgArtifactType)
+			safeRef, artifactType, modulepkgArtifactType)
+	}
+	if warningWriter == nil {
+		return nil
 	}
 	if artifactType == "" {
-		fmt.Fprintf(os.Stderr, "warning: oci artifact %s has empty artifactType; accepted in lenient mode (--strict-oci=false); spec requires %q\n", ref, modulepkgArtifactType) //nolint:errcheck,lll // stderr warning
+		fmt.Fprintf(warningWriter, "warning: oci artifact %s has empty artifactType; accepted in lenient mode (--strict-oci=false); spec requires %q\n", safeRef, modulepkgArtifactType) //nolint:errcheck,lll // warning writes are best-effort
 	} else {
-		fmt.Fprintf(os.Stderr, "warning: oci artifact %s has unexpected artifactType=%q; accepted in lenient mode (--strict-oci=false)\n", ref, artifactType) //nolint:errcheck,lll // stderr warning
+		fmt.Fprintf(warningWriter, "warning: oci artifact %s has unexpected artifactType=%q; accepted in lenient mode (--strict-oci=false)\n", safeRef, artifactType) //nolint:errcheck,lll // warning writes are best-effort
 	}
 	return nil
+}
+
+func redactOCIReference(ref string) string {
+	return strings.TrimPrefix(RedactSourceAddress("oci://"+ref), "oci://")
 }
 
 // authClient creates an authenticated HTTP client. When a custom RoundTripper

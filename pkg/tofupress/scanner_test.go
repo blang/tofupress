@@ -293,6 +293,16 @@ func TestModuleBlock_String(t *testing.T) {
 	assert.Contains(t, str, "./modules/test")
 }
 
+func TestModuleBlock_StringRedactsSourceCredentials(t *testing.T) {
+	mb := ModuleBlock{Name: "private", Source: "git::https://user:" + "secret@example.com/repo.git?token=signed"}
+
+	text := mb.String()
+
+	assert.Contains(t, text, "example.com/repo.git")
+	assert.NotContains(t, text, "secret")
+	assert.NotContains(t, text, "signed")
+}
+
 func TestExtractModuleBlocks_HeredocSource(t *testing.T) {
 	// Heredoc syntax is valid Terraform for module sources.
 	// The scanner trims whitespace so heredoc bodies with indentation

@@ -50,12 +50,17 @@ func runPressModule(cmd *cobra.Command, args []string) error {
 	outputPath := args[1]
 	stdout := cmd.OutOrStdout()
 
-	jsonOut, _ := cmd.Flags().GetBool("json")
-	if !jsonOut {
-		fmt.Fprintf(stdout, "Resolving modules in %s...\n", source) //nolint:errcheck // stdout writes are best-effort
+	if err := validatePressFlags(cmd, outputPath); err != nil {
+		return err
 	}
 
-	workDir, packageRoot, cleanup, err := resolveSource(cmd.Context(), source)
+	jsonOut, _ := cmd.Flags().GetBool("json")
+	if !jsonOut {
+		fmt.Fprintf(stdout, "Resolving modules in %s...\n", tofupress.RedactSourceAddress(source)) //nolint:errcheck // stdout writes are best-effort
+	}
+
+	fetcher := newCommandFetcher(cmd)
+	workDir, packageRoot, cleanup, err := resolveSourceWithFetcher(cmd.Context(), source, fetcher)
 	if err != nil {
 		return err
 	}
@@ -69,9 +74,9 @@ func runPressModule(cmd *cobra.Command, args []string) error {
 	// and-degenerate into an empty archive (the former `bundle` behaviour).
 	tfFiles, tfErr := tofupress.FindTerraformFiles(workDir)
 	if tfErr == nil && len(tfFiles) == 0 {
-		return fmt.Errorf("subject %q contains no .tf or .tofu files; `tofupress module` presses a single module — use `tofupress tree` for a modules-only repository (ADR-0002)", source)
+		return fmt.Errorf("subject %q contains no .tf or .tofu files; `tofupress module` presses a single module — use `tofupress tree` for a modules-only repository (ADR-0002)", tofupress.RedactSourceAddress(source))
 	}
 
-	resolver := newPressResolver(cmd, packageRoot, workDir)
+	resolver := newPressResolverWithFetcher(cmd, fetcher, packageRoot, workDir)
 	return runPress(cmd, source, outputPath, workDir, resolver.Resolve, "module")
 }

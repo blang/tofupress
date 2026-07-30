@@ -3,6 +3,7 @@ package tofupress
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"net/url"
 	"strings"
 	"testing"
@@ -228,31 +229,38 @@ func TestFindZipLayer(t *testing.T) {
 }
 
 // TestEnforceArtifactType (review item 10) verifies strict mode (default)
-// rejects an artifact with empty or non-matching artifactType, and lenient
-// mode accepts both with nil error (the warning goes to stderr).
+// rejects an artifact with empty or non-matching artifactType, while lenient
+// warnings use the injected writer and redact reference credentials.
 func TestEnforceArtifactType(t *testing.T) {
 	const ref = "registry.example.com/repo:latest"
+	var warnings strings.Builder
 
 	// Matching artifact type is accepted in both modes.
-	assert.NoError(t, enforceArtifactType(true, ref, modulepkgArtifactType))
-	assert.NoError(t, enforceArtifactType(false, ref, modulepkgArtifactType))
+	assert.NoError(t, enforceArtifactType(true, &warnings, ref, modulepkgArtifactType))
+	assert.NoError(t, enforceArtifactType(false, &warnings, ref, modulepkgArtifactType))
 
 	// Strict rejects empty artifactType (the spec gap the review flags).
-	err := enforceArtifactType(true, ref, "")
+	err := enforceArtifactType(true, &warnings, ref, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), modulepkgArtifactType)
 	assert.Contains(t, err.Error(), `artifactType=""`, "strict mode must name the empty artifactType in the error")
 
 	// Strict rejects a non-matching artifact type.
-	err = enforceArtifactType(true, ref, "application/vnd.oci.image.manifest.v1+json")
+	err = enforceArtifactType(true, &warnings, ref, "application/vnd.oci.image.manifest.v1+json")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "application/vnd.oci.image.manifest.v1+json")
 
-	// Lenient accepts empty artifactType with no error (warning is on stderr).
-	assert.NoError(t, enforceArtifactType(false, ref, ""))
+	// Lenient accepts mismatches and emits warnings to the configured destination.
+	assert.NoError(t, enforceArtifactType(false, &warnings, ref, ""))
+	assert.NoError(t, enforceArtifactType(false, &warnings, ref, "application/vnd.other"))
+	assert.Contains(t, warnings.String(), "warning: oci artifact "+ref)
 
-	// Lenient accepts a non-matching artifact type with no error.
-	assert.NoError(t, enforceArtifactType(false, ref, "application/vnd.other"))
+	warnings.Reset()
+	secretRef := "alice:hunter2@registry.example.com/repo:latest"
+	assert.NoError(t, enforceArtifactType(false, &warnings, secretRef, ""))
+	assert.NotContains(t, warnings.String(), "alice")
+	assert.NotContains(t, warnings.String(), "hunter2")
+	assert.Contains(t, warnings.String(), "registry.example.com/repo:latest")
 }
 
 // TestNewFetcherStrictOCIDefault (review item 10) verifies the OCI getter
@@ -263,10 +271,10 @@ func TestNewFetcherStrictOCIDefault(t *testing.T) {
 	og := f.ociGetter
 	require.NotNil(t, og)
 	// Strict default: empty artifactType must error.
-	err := enforceArtifactType(og.strictOCI, "reg/repo:tag", "")
+	err := enforceArtifactType(og.strictOCI, og.warningWriter, "reg/repo:tag", "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), modulepkgArtifactType)
 	// WithStrictOCI(false) flips to lenient.
-	f2 := NewFetcher(WithStrictOCI(false))
-	assert.NoError(t, enforceArtifactType(f2.ociGetter.strictOCI, "reg/repo:tag", ""))
+	f2 := NewFetcher(WithStrictOCI(false), WithWarningWriter(io.Discard))
+	assert.NoError(t, enforceArtifactType(f2.ociGetter.strictOCI, f2.ociGetter.warningWriter, "reg/repo:tag", ""))
 }

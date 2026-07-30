@@ -158,6 +158,9 @@ func BuildArtifactMetadata(tree *ResolvedTree, req *MetadataRequest) (*ArtifactM
 	if tree == nil || tree.Root == nil {
 		return nil, fmt.Errorf("cannot build metadata for empty resolved tree")
 	}
+	if req == nil {
+		return nil, fmt.Errorf("metadata request is nil")
+	}
 
 	createdAt := req.CreatedAt
 	if createdAt.IsZero() {
@@ -221,8 +224,8 @@ func BuildArtifactMetadata(tree *ResolvedTree, req *MetadataRequest) (*ArtifactM
 	}
 
 	if req.StripPlan != nil {
-		artifact.FilesystemFunctions = req.StripPlan.FilesystemFunctions
-		artifact.StripWarnings = req.StripPlan.Warnings
+		artifact.FilesystemFunctions = sanitizeFilesystemFunctionRefs(req.StripPlan.FilesystemFunctions, tree.Root.InstallDir)
+		artifact.StripWarnings = sanitizeStripWarnings(req.StripPlan.Warnings, tree)
 	}
 
 	if req.SourcetreePlan != nil {
@@ -250,9 +253,9 @@ func moduleToMetadata(node *ModuleNode, rootDir string) ModuleMetadata {
 	return ModuleMetadata{
 		Key:         node.Key,
 		Name:        node.Name,
-		SourceRaw:   node.Source.Raw,
+		SourceRaw:   RedactSourceAddress(node.Source.Raw),
 		SourceType:  node.Source.Type.String(),
-		PackageAddr: node.Source.PackageAddr,
+		PackageAddr: RedactSourceAddress(node.Source.PackageAddr),
 		SubDir:      node.Source.SubDir,
 		InstallDir:  relPathNoLeak(node.InstallDir, rootDir),
 		PackageRoot: relPathNoLeak(node.PackageRoot, rootDir),
@@ -272,22 +275,25 @@ func buildPackageMetadata(packages map[string]*DownloadedPackage, rootDir string
 	var totalBytes int64
 	for _, id := range ids {
 		pkg := packages[id]
+		if pkg == nil || pkg.LocalDir == "" {
+			return nil, 0, fmt.Errorf("package %q has no local directory", id)
+		}
 		snapshot, err := SnapshotDirectory(pkg.LocalDir)
 		if err != nil {
-			return nil, 0, fmt.Errorf("failed to snapshot package %s: %w", pkg.PackageAddr, err)
+			return nil, 0, fmt.Errorf("failed to snapshot package %s: %w", RedactSourceAddress(pkg.PackageAddr), err)
 		}
 		totalBytes += snapshot.TotalBytes
 		result = append(result, PackageMetadata{
 			ID:                   id,
-			PackageAddr:          pkg.PackageAddr,
+			PackageAddr:          RedactSourceAddress(pkg.PackageAddr),
 			LocalDir:             relPathNoLeak(pkg.LocalDir, rootDir),
 			DownloadedHash:       pkg.ContentHash,
 			FinalHash:            snapshot.Hash,
 			FileCount:            snapshot.FileCount,
 			SizeBytes:            snapshot.TotalBytes,
 			SourcetreeID:         pkg.SourcetreeID,
-			CanonicalPackageAddr: pkg.CanonicalPackageAddr,
-			PackageAddrs:         append([]string(nil), pkg.PackageAddrs...),
+			CanonicalPackageAddr: RedactSourceAddress(pkg.CanonicalPackageAddr),
+			PackageAddrs:         redactSourceAddresses(pkg.PackageAddrs),
 			ModuleKeys:           append([]string(nil), pkg.ModuleKeys...),
 			Deduplicated:         pkg.Deduplicated,
 		})
@@ -332,6 +338,78 @@ func FormatInstallDir(path, rootDir string) string {
 	return relPathNoLeak(path, rootDir)
 }
 
+func redactSourceAddresses(addresses []string) []string {
+	if len(addresses) == 0 {
+		return nil
+	}
+	redacted := make([]string, len(addresses))
+	for i, address := range addresses {
+		redacted[i] = RedactSourceAddress(address)
+	}
+	return redacted
+}
+
+func sanitizeFilesystemFunctionRefs(refs []FilesystemFunctionRef, rootDir string) []FilesystemFunctionRef {
+	if len(refs) == 0 {
+		return nil
+	}
+	out := make([]FilesystemFunctionRef, len(refs))
+	for i := range refs {
+		ref := &refs[i]
+		out[i] = *ref
+		out[i].IncludedPaths = append([]string(nil), ref.IncludedPaths...)
+		if ref.SourceFile != "" {
+			safeSource := relPathNoLeak(ref.SourceFile, rootDir)
+			out[i].SourceRange = strings.Replace(ref.SourceRange, ref.SourceFile, safeSource, 1)
+			out[i].SourceFile = safeSource
+		}
+		out[i].ResolvedBase = relPathNoLeak(ref.ResolvedBase, rootDir)
+		for j, included := range out[i].IncludedPaths {
+			out[i].IncludedPaths[j] = relPathNoLeak(included, rootDir)
+		}
+	}
+	return out
+}
+
+func sanitizeStripWarnings(warnings []StripWarning, tree *ResolvedTree) []StripWarning {
+	if len(warnings) == 0 {
+		return nil
+	}
+	replacements := make(map[string]string)
+	add := func(address string) {
+		if address == "" {
+			return
+		}
+		if redacted := RedactSourceAddress(address); redacted != address {
+			replacements[address] = redacted
+		}
+	}
+	for _, node := range tree.AllModules {
+		if node != nil {
+			add(node.Source.Raw)
+			add(node.Source.PackageAddr)
+		}
+	}
+	for _, pkg := range tree.Packages {
+		if pkg == nil {
+			continue
+		}
+		add(pkg.PackageAddr)
+		add(pkg.CanonicalPackageAddr)
+		for _, address := range pkg.PackageAddrs {
+			add(address)
+		}
+	}
+
+	out := append([]StripWarning(nil), warnings...)
+	for i := range out {
+		for original, redacted := range replacements {
+			out[i].Message = strings.ReplaceAll(out[i].Message, original, redacted)
+		}
+	}
+	return out
+}
+
 // buildDedupGroupMetadata converts internal dedup groups to their metadata representation.
 func buildDedupGroupMetadata(groups []DedupGroup) []DedupGroupMetadata {
 	out := make([]DedupGroupMetadata, 0, len(groups))
@@ -339,8 +417,8 @@ func buildDedupGroupMetadata(groups []DedupGroup) []DedupGroupMetadata {
 		out = append(out, DedupGroupMetadata{
 			ID:                   group.ID,
 			FinalHash:            group.FinalHash,
-			CanonicalPackageAddr: group.CanonicalPackageAddr,
-			PackageAddrs:         append([]string(nil), group.PackageAddrs...),
+			CanonicalPackageAddr: RedactSourceAddress(group.CanonicalPackageAddr),
+			PackageAddrs:         redactSourceAddresses(group.PackageAddrs),
 			ModuleKeys:           append([]string(nil), group.ModuleKeys...),
 		})
 	}
@@ -356,7 +434,7 @@ func relPathNoLeak(path, rootDir string) string {
 		return path
 	}
 	rel, err := filepath.Rel(filepath.Clean(rootDir), filepath.Clean(path))
-	if err != nil || strings.HasPrefix(rel, "..") {
+	if err != nil || relativePathEscapesRoot(rel) {
 		return filepath.Base(path)
 	}
 	return rel
@@ -374,7 +452,7 @@ func safeOutputPath(p string) string {
 		return filepath.Base(p)
 	}
 	rel, err := filepath.Rel(cwd, p)
-	if err != nil || strings.HasPrefix(rel, "..") {
+	if err != nil || relativePathEscapesRoot(rel) {
 		return filepath.Base(p)
 	}
 	return rel
@@ -387,7 +465,7 @@ func safeArgs(args []string) []string {
 	}
 	out := make([]string, len(args))
 	for i, a := range args {
-		out[i] = safeOutputPath(a)
+		out[i] = RedactSourceAddress(safeOutputPath(a))
 	}
 	return out
 }

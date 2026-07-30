@@ -13,9 +13,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestBinary_BundleMonorepoComplex validates TofuPress handles realistic monorepo structures
+// TestBinary_ModuleMonorepoComplex validates TofuPress handles realistic monorepo structures
 // with complex module references: relative paths, deep nesting, mixed local/remote, deduplication
-func TestBinary_BundleMonorepoComplex(t *testing.T) {
+func TestBinary_ModuleMonorepoComplex(t *testing.T) {
 	binary := buildBinary(t)
 
 	// Use the monorepo fixture - resolve absolute path
@@ -47,10 +47,9 @@ func TestBinary_BundleMonorepoComplex(t *testing.T) {
 	extractDir := t.TempDir()
 	extractTarGz(t, outputFile, extractDir)
 
-	// Verify main.tf exists in the bundle (archived from PackageRoot for //subdir inputs)
-	// For subdir inputs (e.g., monorepo//infra/environments/prod), the archive preserves
-	// the full package structure: infra/environments/prod/main.tf
-	mainTf := filepath.Join(extractDir, "infra", "environments", "prod", "main.tf")
+	// `module` pivots the selected entry to archive root (ADR-0002). Referenced
+	// sibling modules retain package-relative paths around that root.
+	mainTf := filepath.Join(extractDir, "main.tf")
 	content, err := os.ReadFile(mainTf)
 	require.NoError(t, err, "main.tf should be readable")
 
@@ -75,16 +74,15 @@ func TestBinary_BundleMonorepoComplex(t *testing.T) {
 		}
 	}
 
-	// Verify sourcetree directory does NOT exist (no remote packages downloaded)
-	// The monorepo fixture has only local modules with no remote dependencies.
-	sourcetreeDir := filepath.Join(extractDir, "infra", "environments", "prod", "modules")
-	_, err = os.Stat(sourcetreeDir)
-	assert.True(t, os.IsNotExist(err), "sourcetree should not exist for local-only modules: %v", err)
+	// Verify the private vendor directory does NOT exist (no remote packages).
+	vendorDir := filepath.Join(extractDir, "_vendor")
+	_, err = os.Stat(vendorDir)
+	assert.True(t, os.IsNotExist(err), "vendor directory should not exist for local-only modules: %v", err)
 }
 
-// TestBinary_BundleMonorepoMultipleEnvs validates bundling different environments
+// TestBinary_ModuleMonorepoMultipleEnvs validates pressing different environments
 // from the same monorepo works correctly
-func TestBinary_BundleMonorepoMultipleEnvs(t *testing.T) {
+func TestBinary_ModuleMonorepoMultipleEnvs(t *testing.T) {
 	binary := buildBinary(t)
 
 	cwd, err := os.Getwd()

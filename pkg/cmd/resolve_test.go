@@ -116,6 +116,12 @@ func TestOutputJSON_WithChildren(t *testing.T) {
 	assert.Len(t, modules, 3)
 }
 
+func TestResolveCommandRegistersStrictOCIEnabledByDefault(t *testing.T) {
+	flag := resolveCmd.Flags().Lookup("strict-oci")
+	require.NotNil(t, flag)
+	assert.Equal(t, "true", flag.DefValue)
+}
+
 func TestOutputJSON_RemoteSourceType(t *testing.T) {
 	tree := resolveTreeWithRemoteModule(t)
 	var buf bytes.Buffer
@@ -235,7 +241,7 @@ func resolveTreeWithRemoteModule(t *testing.T) *tofupress.ResolvedTree {
 
 // TestResolveOutPlanFile (review item 8) verifies resolve --out=plan.json
 // writes a valid JSON resolution to the file (for CI inspection/archival).
-// The plan-file-alone landing; bundle --from-resolution lands with the cache.
+// The plan file is currently inspection-only; replay requires a future content cache.
 func TestResolveOutPlanFile(t *testing.T) {
 	tree := resolveTreeWithRemoteModule(t)
 	tmp := t.TempDir()

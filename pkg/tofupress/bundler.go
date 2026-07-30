@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 
@@ -28,9 +29,8 @@ const (
 
 // Directory names to skip during bundling.
 const (
-	dirNameTerraform  = ".terraform"
-	dirNameGit        = ".git"
-	dirNameSourceTree = "sourcetree" // legacy vendor dir name (pre-rename)
+	dirNameTerraform = ".terraform"
+	dirNameGit       = ".git"
 )
 
 // defaultVendorDir is the fallback vendor directory name. It is a private name that
@@ -50,6 +50,26 @@ func vendorDirName(tree *ResolvedTree) string {
 // VendorDirName returns the vendored modules directory name that will be used for a tree,
 // falling back to the safe default when the tree has no explicit vendor dir.
 func VendorDirName(tree *ResolvedTree) string { return vendorDirName(tree) }
+
+// ValidateVendorDir verifies that a vendor directory is one portable path
+// component. VendorDir is a name, not an arbitrary output path: allowing
+// separators or generated/reserved names could write outside the subject,
+// disappear from the archive, or overwrite tofupress metadata.
+func ValidateVendorDir(name string) error {
+	if name == "" {
+		return nil // empty means the private default
+	}
+	if strings.TrimSpace(name) != name || name == "." || name == ".." ||
+		filepath.IsAbs(name) || strings.ContainsAny(name, `/\\:`) {
+		return fmt.Errorf("invalid vendor directory %q: use one relative directory name without path separators", name)
+	}
+	switch name {
+	case dirNameGit, dirNameTerraform, MetadataDir:
+		return fmt.Errorf("invalid vendor directory %q: that name is reserved by tofupress", name)
+	default:
+		return nil
+	}
+}
 
 // ParseBundleFormat parses a format string into a BundleFormat.
 func ParseBundleFormat(s string) (BundleFormat, error) {
@@ -129,56 +149,229 @@ func NewBundler(format BundleFormat, opts ...BundlerOption) *Bundler {
 // OCI-compliant and non-OCI bundles now share ONE staging pipeline (review F4/F5/F12).
 // They differ only in archive format: OCI requires zip. Every format is produced from
 // the same staged directory, so the same tree always yields a consistent layout.
-func (b *Bundler) Bundle(ctx context.Context, tree *ResolvedTree, outputPath string) error {
+func (b *Bundler) Bundle(ctx context.Context, tree *ResolvedTree, outputPath string) (err error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
 	if tree == nil {
 		return fmt.Errorf("tree is nil")
 	}
+	if tree.Root == nil || tree.Root.InstallDir == "" {
+		return fmt.Errorf("tree root is missing its install directory")
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
 
-	// Resolve the format eagerly so BundleFormatAuto never reaches the writers (F11).
-	format := b.Format
-	if format == BundleFormatAuto {
-		detected, ok := DetectFormatFromPath(outputPath)
-		if !ok {
-			return fmt.Errorf("could not infer bundle format from output path %q; "+
-				"pass --format=zip, --format=tar.gz, or --format=tar.xz", outputPath)
-		}
-		format = detected
+	format, formatErr := b.resolvedFormat(outputPath)
+	if formatErr != nil {
+		return formatErr
 	}
 	if b.OCICompliant && format != BundleFormatZIP {
 		return fmt.Errorf("--oci-compliant requires zip format (got %s)", format)
 	}
 
-	// Use the tree's vendor dir, falling back to the private default.
-	b.VendorDir = vendorDirName(tree)
-
-	// Guard against a vendor directory that already contains user content; bundling
-	// would otherwise silently drop that content (or mix it with vendored packages).
-	if err := b.validateVendorDir(tree); err != nil {
-		return err
+	vendorDir := b.vendorDir(tree)
+	if validationErr := b.validateBundleTree(tree, vendorDir); validationErr != nil {
+		return validationErr
 	}
 
-	// Repivot happens inside stageBundle so library callers that invoke it
-	// directly also benefit (it is a no-op outside //subdir pivot mode).
+	// All formats share one staging and commit transaction. Repivot happens
+	// inside stageBundle (a no-op outside //subdir pivot mode).
+	stagingDir, stageErr := stageBundle(tree, vendorDir, b.StripPlan, b.Metadata)
+	if stageErr != nil {
+		return stageErr
+	}
+	defer func() {
+		if rmErr := os.RemoveAll(stagingDir); rmErr != nil {
+			err = errors.Join(err, rmErr)
+		}
+	}()
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if aggregateErr := b.aggregatePressedModulesInStaging(tree, stagingDir); aggregateErr != nil {
+		return fmt.Errorf("failed to aggregate pressed modules: %w", aggregateErr)
+	}
 
+	return writeArchiveAtomically(ctx, outputPath, func(tempPath string) error {
+		return b.writeStagedArchive(ctx, format, stagingDir, tempPath)
+	})
+}
+
+func (b *Bundler) vendorDir(tree *ResolvedTree) string {
+	if tree != nil && tree.VendorDir != "" {
+		return tree.VendorDir
+	}
+	if b.VendorDir != "" {
+		return b.VendorDir
+	}
+	return defaultVendorDir
+}
+
+func (b *Bundler) validateBundleTree(tree *ResolvedTree, vendorDir string) error {
+	if err := ValidateVendorDir(vendorDir); err != nil {
+		return err
+	}
+	if err := b.validateVendorDir(tree, vendorDir); err != nil {
+		return err
+	}
+	if err := validatePivotLocalModuleGeometry(tree); err != nil {
+		return err
+	}
+	return b.validatePivotFilesystemRefs(tree)
+}
+
+func (b *Bundler) resolvedFormat(outputPath string) (BundleFormat, error) {
+	if b.Format != BundleFormatAuto {
+		return b.Format, nil
+	}
+	detected, ok := DetectFormatFromPath(outputPath)
+	if !ok {
+		return "", fmt.Errorf("could not infer bundle format from output path %q; "+
+			"pass --format=zip, --format=tar.gz, or --format=tar.xz", outputPath)
+	}
+	return detected, nil
+}
+
+func (b *Bundler) writeStagedArchive(ctx context.Context, format BundleFormat, stagingDir, outputPath string) error {
 	switch format {
 	case BundleFormatZIP:
-		return b.bundleZIP(ctx, tree, outputPath)
+		return b.bundleZipFromDir(ctx, stagingDir, outputPath)
 	case BundleFormatTarGZ:
-		return b.bundleTarGZ(ctx, tree, outputPath)
+		return b.bundleTarGzFromDir(ctx, stagingDir, outputPath)
 	case BundleFormatTarXZ:
-		return b.bundleTarXZ(ctx, tree, outputPath)
+		return b.bundleTarXzFromDir(ctx, stagingDir, outputPath)
 	default:
 		return fmt.Errorf("unsupported format: %s", format)
 	}
 }
 
+// validatePivotFilesystemRefs rejects entry-module filesystem reads whose
+// runtime meaning would change when a //subdir module is moved to archive root.
+// A tree press preserves package geometry and is the explicit remedy.
+func (b *Bundler) validatePivotFilesystemRefs(tree *ResolvedTree) error {
+	if !isPivotedModuleTree(tree) {
+		return nil
+	}
+	refs, err := b.pivotFilesystemRefs(tree)
+	if err != nil {
+		return err
+	}
+	for i := range refs {
+		ref := &refs[i]
+		if ref.ModuleKey != tree.Root.Key {
+			continue
+		}
+		if validationErr := validatePivotFilesystemRef(tree, ref); validationErr != nil {
+			return validationErr
+		}
+	}
+	return nil
+}
+
+func validatePivotLocalModuleGeometry(tree *ResolvedTree) error {
+	if !isPivotedModuleTree(tree) {
+		return nil
+	}
+	packageRoot, err := canonicalStagingPath(tree.Root.PackageRoot)
+	if err != nil {
+		return fmt.Errorf("resolve pivot package root: %w", err)
+	}
+	for _, module := range tree.AllModules {
+		if module == nil || module == tree.Root || !module.IsLocal || module.InstallDir == "" {
+			continue
+		}
+		installDir, installErr := canonicalStagingPath(module.InstallDir)
+		if installErr != nil {
+			return fmt.Errorf("resolve local module %q during pivot validation: %w", module.Name, installErr)
+		}
+		if installDir == packageRoot {
+			return fmt.Errorf(
+				"module press cannot preserve local module %q because it resolves to the package root while the selected entry is pivoted to archive root; press the package layout with `tofupress tree` instead",
+				module.Name,
+			)
+		}
+	}
+	return nil
+}
+
+func isPivotedModuleTree(tree *ResolvedTree) bool {
+	return tree != nil && tree.Root != nil && tree.Root.PackageRoot != "" &&
+		filepath.Clean(tree.Root.PackageRoot) != filepath.Clean(tree.Root.InstallDir)
+}
+
+func (b *Bundler) pivotFilesystemRefs(tree *ResolvedTree) ([]FilesystemFunctionRef, error) {
+	if b.StripPlan != nil {
+		return b.StripPlan.FilesystemFunctions, nil
+	}
+	refs, err := DetectTreeFilesystemFunctions(tree)
+	if err != nil {
+		return nil, fmt.Errorf("inspect pivoted module filesystem references: %w", err)
+	}
+	return refs, nil
+}
+
+func validatePivotFilesystemRef(tree *ResolvedTree, ref *FilesystemFunctionRef) error {
+	if !ref.Static && ref.Kind == refKindFilesystemFunction {
+		return pivotFilesystemRefError(tree, ref, "has a dynamic path whose location cannot be proven")
+	}
+	if ref.Static {
+		if err := validateStaticPivotPaths(tree, ref); err != nil {
+			return err
+		}
+	}
+	if ref.Kind == refKindPathTemplateRisk && ref.Function == pathModuleFunction && pathModuleTemplateEscapes(ref.RawPath) {
+		return pivotFilesystemRefError(tree, ref, "contains parent traversal outside the entry module")
+	}
+	return nil
+}
+
+func validateStaticPivotPaths(tree *ResolvedTree, ref *FilesystemFunctionRef) error {
+	paths := append([]string(nil), ref.IncludedPaths...)
+	if ref.ResolvedBase != "" {
+		paths = append(paths, ref.ResolvedBase)
+	}
+	for _, referencedPath := range paths {
+		if referencedPath == "" {
+			continue
+		}
+		if err := ensureWithinPackage(tree.Root.InstallDir, referencedPath); err != nil {
+			reason := fmt.Sprintf("resolves outside the entry module to %s", relPathNoLeak(referencedPath, tree.Root.PackageRoot))
+			return pivotFilesystemRefError(tree, ref, reason)
+		}
+	}
+	return nil
+}
+
+func pathModuleTemplateEscapes(raw string) bool {
+	const marker = "${path.module}/"
+	_, suffix, found := strings.Cut(raw, marker)
+	if !found {
+		return false
+	}
+	if dynamicAt := strings.Index(suffix, "${"); dynamicAt >= 0 {
+		suffix = suffix[:dynamicAt]
+	}
+	suffix = strings.Trim(suffix, `"' `)
+	cleaned := pathpkg.Clean(filepath.ToSlash(suffix))
+	return cleaned == ".." || strings.HasPrefix(cleaned, "../")
+}
+
+func pivotFilesystemRefError(tree *ResolvedTree, ref *FilesystemFunctionRef, reason string) error {
+	return fmt.Errorf(
+		"module press cannot preserve %s reference %q in %s when pivoting %s to archive root: %s; press the package layout with `tofupress tree` instead",
+		ref.Function,
+		ref.RawPath,
+		relPathNoLeak(ref.SourceFile, tree.Root.PackageRoot),
+		relPathNoLeak(tree.Root.InstallDir, tree.Root.PackageRoot),
+		reason,
+	)
+}
+
 // rootArchiveDir returns the directory that should serve as the archive root.
 //
-// For //subdir package-boundary inputs (and the implicit repo-root expansion
-// case, where PackageRoot is set but != InstallDir), the entry module lives at
+// For //subdir package-boundary inputs, the entry module lives at
 // InstallDir while the rest of the package is staged around it. The OCI
 // module-package contract requires the zip root to BE the default module, so
 // the archive root pivots to the entry subdir (review item 2). For non-pivot
@@ -190,68 +383,67 @@ func rootArchiveDir(tree *ResolvedTree) string {
 	}
 	return tree.Root.InstallDir
 }
-func (b *Bundler) bundleTarGZ(ctx context.Context, tree *ResolvedTree, outputPath string) (err error) {
-	stagingDir, err := stageBundle(tree, b.VendorDir, b.StripPlan, b.Metadata)
-	if err != nil {
-		return err
+
+// writeArchiveAtomically writes an archive to a sibling temporary file and
+// renames it into place only after the writer has closed, fsynced, and passed a
+// final cancellation check. Existing good artifacts therefore survive failed
+// or canceled writes.
+func writeArchiveAtomically(ctx context.Context, outputPath string, write func(string) error) (err error) {
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
 	}
+
+	outputDir := filepath.Dir(outputPath)
+	tempFile, err := os.CreateTemp(outputDir, "."+filepath.Base(outputPath)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create archive transaction: %w", err)
+	}
+	tempPath := tempFile.Name()
 	defer func() {
-		if rmErr := os.RemoveAll(stagingDir); rmErr != nil {
-			err = errors.Join(err, rmErr)
+		if removeErr := os.Remove(tempPath); removeErr != nil && !os.IsNotExist(removeErr) {
+			err = errors.Join(err, removeErr)
 		}
 	}()
-
-	if err := b.aggregatePressedModulesInStaging(tree, stagingDir); err != nil {
-		return fmt.Errorf("failed to aggregate pressed modules: %w", err)
+	if closeErr := tempFile.Close(); closeErr != nil {
+		return fmt.Errorf("close archive transaction file: %w", closeErr)
 	}
 
-	return b.bundleTarGzFromDir(ctx, stagingDir, outputPath)
+	if writeErr := write(tempPath); writeErr != nil {
+		return writeErr
+	}
+	if chmodErr := os.Chmod(tempPath, 0o644); chmodErr != nil { //nolint:gosec // artifact is intentionally readable
+		return fmt.Errorf("set archive permissions: %w", chmodErr)
+	}
+	if syncErr := syncArchiveFile(tempPath); syncErr != nil {
+		return syncErr
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return ctxErr
+	}
+	if renameErr := os.Rename(tempPath, outputPath); renameErr != nil {
+		return fmt.Errorf("commit archive transaction: %w", renameErr)
+	}
+	return nil
 }
 
-// bundleTarXZ creates a tar.xz archive via staged bundling.
-func (b *Bundler) bundleTarXZ(ctx context.Context, tree *ResolvedTree, outputPath string) (err error) {
-	stagingDir, err := stageBundle(tree, b.VendorDir, b.StripPlan, b.Metadata)
+func syncArchiveFile(path string) error {
+	file, err := os.OpenFile(path, os.O_RDWR, 0) //nolint:gosec // path is our transaction file
 	if err != nil {
-		return err
+		return fmt.Errorf("open archive transaction for sync: %w", err)
 	}
-	defer func() {
-		if rmErr := os.RemoveAll(stagingDir); rmErr != nil {
-			err = errors.Join(err, rmErr)
-		}
-	}()
-
-	if err := b.aggregatePressedModulesInStaging(tree, stagingDir); err != nil {
-		return fmt.Errorf("failed to aggregate pressed modules: %w", err)
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if joinedErr := errors.Join(syncErr, closeErr); joinedErr != nil {
+		return fmt.Errorf("sync archive transaction: %w", joinedErr)
 	}
-
-	return b.bundleTarXzFromDir(ctx, stagingDir, outputPath)
-}
-
-// bundleZIP creates a ZIP archive via staged bundling.
-func (b *Bundler) bundleZIP(ctx context.Context, tree *ResolvedTree, outputPath string) (err error) {
-	stagingDir, err := stageBundle(tree, b.VendorDir, b.StripPlan, b.Metadata)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if rmErr := os.RemoveAll(stagingDir); rmErr != nil {
-			err = errors.Join(err, rmErr)
-		}
-	}()
-
-	if err := b.aggregatePressedModulesInStaging(tree, stagingDir); err != nil {
-		return fmt.Errorf("failed to aggregate pressed modules: %w", err)
-	}
-
-	return b.bundleZipFromDir(ctx, stagingDir, outputPath)
+	return nil
 }
 
 // bundleZipFromDir creates a ZIP archive from a directory.
 //
 //nolint:gocognit,gocyclo // directory walking and zip creation is inherently complex
 func (b *Bundler) bundleZipFromDir(ctx context.Context, srcDir, outputPath string) (err error) {
-	_ = ctx                               // currently unused; reserved for cancellation-aware file copy
-	outFile, err := os.Create(outputPath) //nolint:gosec // G304: path is provided by user
+	outFile, err := os.Create(outputPath) //nolint:gosec // G304: path is our transaction file
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
@@ -272,6 +464,9 @@ func (b *Bundler) bundleZipFromDir(ctx context.Context, srcDir, outputPath strin
 	err = filepath.Walk(srcDir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		}
 
 		// Skip .terraform and .git directories. Content is pre-staged, so no
@@ -296,9 +491,10 @@ func (b *Bundler) bundleZipFromDir(ctx context.Context, srcDir, outputPath strin
 			return nil
 		}
 
-		// ZIP uses forward slashes
-		archivePath := filepath.ToSlash(relPath)
-
+		archivePath, pathErr := portableArchivePath(relPath)
+		if pathErr != nil {
+			return pathErr
+		}
 		if info.IsDir() {
 			archivePath += "/"
 		}
@@ -316,14 +512,21 @@ func (b *Bundler) bundleZipFromDir(ctx context.Context, srcDir, outputPath strin
 		}
 
 		if !info.IsDir() {
-			file, openErr := os.Open(path) //nolint:gosec // G304: path comes from our own tree
-			if openErr != nil {
-				return openErr
-			}
-			defer file.Close() //nolint:errcheck // read-only file close
-
-			if _, copyErr := io.Copy(writer, file); copyErr != nil {
-				return copyErr
+			switch {
+			case info.Mode().IsRegular():
+				if copyErr := copyFileWithContext(ctx, writer, path); copyErr != nil {
+					return copyErr
+				}
+			case info.Mode()&os.ModeSymlink != 0:
+				target, readErr := os.Readlink(path)
+				if readErr != nil {
+					return readErr
+				}
+				if _, writeErr := io.WriteString(writer, target); writeErr != nil {
+					return writeErr
+				}
+			default:
+				return fmt.Errorf("unsupported archive entry type %s at %s", info.Mode().Type(), path)
 			}
 		}
 
@@ -332,15 +535,49 @@ func (b *Bundler) bundleZipFromDir(ctx context.Context, srcDir, outputPath strin
 	return //nolint:nakedret // named return needed to propagate deferred close errors
 }
 
-// bundleTarGzFromDir creates a tar.gz archive from a directory.
-// Unlike the legacy bundleTarGZ, this walks the directory once
-// with no vendor-dir skip logic — the directory content is assumed
-// to be pre-staged.
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
+}
+
+// copyFileWithContext opens and closes one input within the current walk
+// iteration. This intentionally avoids deferring file closes in archive loops,
+// which otherwise keeps every input descriptor open until the whole walk ends.
+func copyFileWithContext(ctx context.Context, dst io.Writer, path string) error {
+	file, err := os.Open(path) //nolint:gosec // path comes from our staged tree
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(dst, contextReader{ctx: ctx, reader: file})
+	if copyErr == nil {
+		copyErr = ctx.Err()
+	}
+	return errors.Join(copyErr, file.Close())
+}
+
+// bundleTarGzFromDir creates a tar.gz archive from a pre-staged directory.
+func (b *Bundler) bundleTarGzFromDir(ctx context.Context, srcDir, outputPath string) error {
+	return b.bundleTarFromDir(ctx, srcDir, outputPath, func(writer io.Writer) (io.WriteCloser, error) {
+		return gzip.NewWriter(writer), nil
+	})
+}
+
+// bundleTarFromDir contains the one tar walk shared by all compressors.
 //
 //nolint:gocognit,gocyclo // directory walking and tar creation is inherently complex
-func (b *Bundler) bundleTarGzFromDir(ctx context.Context, srcDir, outputPath string) (err error) {
-	_ = ctx                               // currently unused; reserved for cancellation-aware file copy
-	outFile, err := os.Create(outputPath) //nolint:gosec // G304: path is provided by user
+func (b *Bundler) bundleTarFromDir(
+	ctx context.Context,
+	srcDir, outputPath string,
+	newCompressor func(io.Writer) (io.WriteCloser, error),
+) (err error) {
+	outFile, err := os.Create(outputPath) //nolint:gosec // G304: path is our transaction file
 	if err != nil {
 		return fmt.Errorf("failed to create output file: %w", err)
 	}
@@ -350,14 +587,17 @@ func (b *Bundler) bundleTarGzFromDir(ctx context.Context, srcDir, outputPath str
 		}
 	}()
 
-	gzWriter := gzip.NewWriter(outFile)
+	compressor, err := newCompressor(outFile)
+	if err != nil {
+		return fmt.Errorf("create archive compressor: %w", err)
+	}
 	defer func() {
-		if closeErr := gzWriter.Close(); closeErr != nil {
+		if closeErr := compressor.Close(); closeErr != nil {
 			err = errors.Join(err, closeErr)
 		}
 	}()
 
-	tarWriter := tar.NewWriter(gzWriter)
+	tarWriter := tar.NewWriter(compressor)
 	defer func() {
 		if closeErr := tarWriter.Close(); closeErr != nil {
 			err = errors.Join(err, closeErr)
@@ -368,6 +608,9 @@ func (b *Bundler) bundleTarGzFromDir(ctx context.Context, srcDir, outputPath str
 	err = filepath.Walk(srcDir, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		}
 
 		if info.IsDir() {
@@ -393,24 +636,31 @@ func (b *Bundler) bundleTarGzFromDir(ctx context.Context, srcDir, outputPath str
 			return nil
 		}
 
-		header, headerErr := tar.FileInfoHeader(info, "")
+		linkTarget := ""
+		if info.Mode()&os.ModeSymlink != 0 {
+			linkTarget, relErr = os.Readlink(path)
+			if relErr != nil {
+				return relErr
+			}
+		} else if !info.IsDir() && !info.Mode().IsRegular() {
+			return fmt.Errorf("unsupported archive entry type %s at %s", info.Mode().Type(), path)
+		}
+		archivePath, pathErr := portableArchivePath(relPath)
+		if pathErr != nil {
+			return pathErr
+		}
+		header, headerErr := tar.FileInfoHeader(info, linkTarget)
 		if headerErr != nil {
 			return headerErr
 		}
-		header.Name = relPath
+		header.Name = archivePath
 
 		if writeErr := tarWriter.WriteHeader(header); writeErr != nil {
 			return writeErr
 		}
 
-		if !info.IsDir() {
-			file, openErr := os.Open(path) //nolint:gosec // G304: path comes from own tree
-			if openErr != nil {
-				return openErr
-			}
-			defer file.Close() //nolint:errcheck // read-only close
-
-			if _, copyErr := io.Copy(tarWriter, file); copyErr != nil {
+		if info.Mode().IsRegular() {
+			if copyErr := copyFileWithContext(ctx, tarWriter, path); copyErr != nil {
 				return copyErr
 			}
 		}
@@ -420,132 +670,145 @@ func (b *Bundler) bundleTarGzFromDir(ctx context.Context, srcDir, outputPath str
 	return //nolint:nakedret // named return needed to propagate deferred close errors
 }
 
-// bundleTarXzFromDir creates a tar.xz archive from a directory.
-// Mirror of bundleTarGzFromDir using xz compression.
-//
-//nolint:gocognit,gocyclo // directory walking and tar/xz creation is inherently complex
-func (b *Bundler) bundleTarXzFromDir(ctx context.Context, srcDir, outputPath string) (err error) {
-	_ = ctx                               // currently unused; reserved for cancellation-aware file copy
-	outFile, err := os.Create(outputPath) //nolint:gosec // G304: path is provided by user
-	if err != nil {
-		return fmt.Errorf("failed to create output file: %w", err)
-	}
-	defer func() {
-		if closeErr := outFile.Close(); closeErr != nil {
-			err = errors.Join(err, closeErr)
-		}
-	}()
-
-	xzWriter, err := xz.NewWriter(outFile)
-	if err != nil {
-		return fmt.Errorf("failed to create xz writer: %w", err)
-	}
-	defer func() {
-		if closeErr := xzWriter.Close(); closeErr != nil {
-			err = errors.Join(err, closeErr)
-		}
-	}()
-
-	tarWriter := tar.NewWriter(xzWriter)
-	defer func() {
-		if closeErr := tarWriter.Close(); closeErr != nil {
-			err = errors.Join(err, closeErr)
-		}
-	}()
-
-	//nolint:nakedret // named return needed to propagate deferred close errors
-	err = filepath.Walk(srcDir, func(path string, info os.FileInfo, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-
-		if info.IsDir() {
-			switch info.Name() {
-			case dirNameTerraform, dirNameGit:
-				return filepath.SkipDir
-			}
-		}
-
-		if b.StripPlan != nil && !b.StripPlan.IncludePath(path, info.IsDir()) {
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-
-		relPath, relErr := filepath.Rel(srcDir, path)
-		if relErr != nil {
-			return relErr
-		}
-		if relPath == "." {
-			return nil
-		}
-
-		header, headerErr := tar.FileInfoHeader(info, "")
-		if headerErr != nil {
-			return headerErr
-		}
-		header.Name = relPath
-
-		if writeErr := tarWriter.WriteHeader(header); writeErr != nil {
-			return writeErr
-		}
-
-		if !info.IsDir() {
-			file, openErr := os.Open(path) //nolint:gosec // G304: path comes from own tree
-			if openErr != nil {
-				return openErr
-			}
-			defer file.Close() //nolint:errcheck // read-only close
-
-			if _, copyErr := io.Copy(tarWriter, file); copyErr != nil {
-				return copyErr
-			}
-		}
-
-		return nil
+// bundleTarXzFromDir creates a tar.xz archive from a pre-staged directory.
+func (b *Bundler) bundleTarXzFromDir(ctx context.Context, srcDir, outputPath string) error {
+	return b.bundleTarFromDir(ctx, srcDir, outputPath, func(writer io.Writer) (io.WriteCloser, error) {
+		return xz.NewWriter(writer)
 	})
-	return //nolint:nakedret // named return needed to propagate deferred close errors
 }
 
-// copyDirOCI copies a directory recursively for OCI bundling, skipping
-// .terraform, .git, and sourcetree directories.
+// copyDirOCI copies a directory recursively while dereferencing symlinks only
+// when their canonical targets remain inside src. Generated .terraform and VCS
+// .git directories are skipped; ordinary user directory names are preserved.
 func copyDirOCI(src, dst string, stripPlan *StripPlan) error {
-	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+	return copyDirOCIWithin(src, dst, src, stripPlan)
+}
+
+// copyDirOCIWithin is used when src is an entry subdirectory but the explicit
+// package boundary is broader. A link may target that package, but never the
+// caller's surrounding filesystem.
+func copyDirOCIWithin(src, dst, allowedRoot string, stripPlan *StripPlan) error {
+	root, err := canonicalStagingPath(allowedRoot)
+	if err != nil {
+		return fmt.Errorf("resolve staging copy root %s: %w", allowedRoot, err)
+	}
+	copier := stagingCopier{allowedRoot: root, stripPlan: stripPlan}
+	return copier.copyDir(src, dst, make(map[string]bool))
+}
+
+type stagingCopier struct {
+	allowedRoot string
+	stripPlan   *StripPlan
+}
+
+func (c stagingCopier) copyDir(src, dst string, active map[string]bool) error {
+	canonical, err := canonicalStagingPath(src)
+	if err != nil {
+		return fmt.Errorf("resolve staging directory %s: %w", src, err)
+	}
+	if boundaryErr := c.ensureWithinRoot(src, canonical); boundaryErr != nil {
+		return boundaryErr
+	}
+	if active[canonical] {
+		return fmt.Errorf("symlink cycle while staging %s: directory %s is already active", src, canonical)
+	}
+	active[canonical] = true
+	defer delete(active, canonical)
+
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return err
+	}
+	if mkdirErr := os.MkdirAll(dst, info.Mode().Perm()); mkdirErr != nil { //nolint:gosec // preserve source permissions
+		return mkdirErr
+	}
+	entries, err := os.ReadDir(canonical)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		sourcePath := filepath.Join(canonical, entry.Name())
+		targetPath := filepath.Join(dst, entry.Name())
+		entryInfo, err := os.Lstat(sourcePath)
 		if err != nil {
 			return err
 		}
-
-		// Skip .terraform, .git, and sourcetree directories
-		if info.IsDir() {
-			switch info.Name() {
-			case dirNameTerraform, dirNameGit, dirNameSourceTree:
-				return filepath.SkipDir
-			}
+		if shouldSkipStagingEntry(entryInfo, sourcePath, c.stripPlan) {
+			continue
 		}
-
-		if stripPlan != nil && !stripPlan.IncludePath(path, info.IsDir()) {
-			if info.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
+		if err := c.copyEntry(sourcePath, targetPath, entryInfo, active); err != nil {
+			return err
 		}
+	}
+	return nil
+}
 
-		// Calculate relative path
-		relPath, relErr := filepath.Rel(src, path)
-		if relErr != nil {
-			return relErr
-		}
+func shouldSkipStagingEntry(info os.FileInfo, sourcePath string, stripPlan *StripPlan) bool {
+	if info.IsDir() && (info.Name() == dirNameTerraform || info.Name() == dirNameGit) {
+		return true
+	}
+	return stripPlan != nil && !stripPlan.IncludePath(sourcePath, info.IsDir())
+}
 
-		targetPath := filepath.Join(dst, relPath)
+func (c stagingCopier) copyEntry(sourcePath, targetPath string, info os.FileInfo, active map[string]bool) error {
+	switch {
+	case info.Mode()&os.ModeSymlink != 0:
+		return c.copySymlink(sourcePath, targetPath, active)
+	case info.IsDir():
+		return c.copyDir(sourcePath, targetPath, active)
+	case info.Mode().IsRegular():
+		return copyFileOCI(sourcePath, targetPath, info.Mode())
+	default:
+		return fmt.Errorf("unsupported staging entry type %s at %s", info.Mode().Type(), sourcePath)
+	}
+}
 
-		if info.IsDir() {
-			return os.MkdirAll(targetPath, info.Mode()) //nolint:gosec // G301: preserve original permissions
-		}
+func (c stagingCopier) copySymlink(sourcePath, targetPath string, active map[string]bool) error {
+	resolved, err := canonicalStagingPath(sourcePath)
+	if err != nil {
+		return fmt.Errorf("resolve staging symlink %s (dangling link or symlink cycle): %w", sourcePath, err)
+	}
+	if boundaryErr := c.ensureWithinRoot(sourcePath, resolved); boundaryErr != nil {
+		return boundaryErr
+	}
+	if isGeneratedOrVCSPath(resolved) {
+		return nil
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return err
+	}
+	switch {
+	case info.IsDir():
+		return c.copyDir(resolved, targetPath, active)
+	case info.Mode().IsRegular():
+		return copyFileOCI(resolved, targetPath, info.Mode())
+	default:
+		return fmt.Errorf("unsupported staging symlink target type %s at %s", info.Mode().Type(), sourcePath)
+	}
+}
 
-		// Copy file
-		return copyFileOCI(path, targetPath, info.Mode())
-	})
+func (c stagingCopier) ensureWithinRoot(sourcePath, resolved string) error {
+	rel, err := filepath.Rel(c.allowedRoot, resolved)
+	if err != nil {
+		return fmt.Errorf("compare staging symlink target %s with package root: %w", resolved, err)
+	}
+	if relativePathEscapesRoot(rel) {
+		return fmt.Errorf("staging symlink %s resolves outside package root", sourcePath)
+	}
+	return nil
+}
+
+func canonicalStagingPath(sourcePath string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(sourcePath)
+	if err != nil {
+		return "", err
+	}
+	absolute, err := filepath.Abs(resolved)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(absolute), nil
 }
 
 // copyFileOCI copies a single file for OCI bundling.
@@ -588,16 +851,13 @@ func stageBundle(tree *ResolvedTree, vendorDir string, stripPlan *StripPlan, met
 	}
 	cleanup := func() { _ = os.RemoveAll(stagingDir) }
 
-	// Repivot local sources in //subdir pivot mode BEFORE staging so the staged
-	// entry's .tf files carry the rewritten `./<package-rel-path>` sources (item 2).
-	// Idempotent no-op outside pivot mode.
-	if err := repivotMonorepoSources(tree); err != nil {
-		cleanup()
-		return "", fmt.Errorf("failed to repivot monorepo sources: %w", err)
-	}
 	// 1. Copy root module from archive root to staging root
 	archiveRoot := rootArchiveDir(tree)
-	if err := copyDirOCI(archiveRoot, stagingDir, stripPlan); err != nil {
+	rootBoundary := tree.Root.PackageRoot
+	if rootBoundary == "" {
+		rootBoundary = archiveRoot
+	}
+	if err := copyDirOCIWithin(archiveRoot, stagingDir, rootBoundary, stripPlan); err != nil {
 		cleanup()
 		return "", fmt.Errorf("failed to copy root module to staging: %w", err)
 	}
@@ -609,6 +869,12 @@ func stageBundle(tree *ResolvedTree, vendorDir string, stripPlan *StripPlan, met
 	if err := stageMonorepoSiblings(tree, stagingDir, stripPlan); err != nil {
 		cleanup()
 		return "", err
+	}
+	// Rewrite only the staged entry. The caller's resolved workspace is
+	// read-only to Bundler, including in //subdir pivot mode.
+	if err := repivotMonorepoSources(tree, stagingDir); err != nil {
+		cleanup()
+		return "", fmt.Errorf("failed to repivot monorepo sources: %w", err)
 	}
 
 	// 3. Copy local modules that live outside the package root (and outside the
@@ -624,14 +890,24 @@ func stageBundle(tree *ResolvedTree, vendorDir string, stripPlan *StripPlan, met
 		return "", err
 	}
 
-	// 5. Write metadata file if provided
+	// 5. Write metadata file if provided. Never overwrite subject content at
+	// the reserved metadata path: fail explicitly so full-mode pressing cannot
+	// silently replace a user's .tofupress/meta.json.
 	if metadata != nil {
-		metaDir := filepath.Join(stagingDir, MetadataDir)
+		metaPath := filepath.Join(stagingDir, MetadataRelPath)
+		if _, err := os.Lstat(metaPath); err == nil {
+			cleanup()
+			return "", fmt.Errorf("archive path %q is reserved for embedded tofupress metadata and conflicts with subject content", MetadataRelPath)
+		} else if !os.IsNotExist(err) {
+			cleanup()
+			return "", fmt.Errorf("failed to inspect reserved metadata path %q: %w", MetadataRelPath, err)
+		}
+		metaDir := filepath.Dir(metaPath)
 		if err := os.MkdirAll(metaDir, 0o755); err != nil { //nolint:gosec // G301: standard dir perms
 			cleanup()
 			return "", fmt.Errorf("failed to create metadata directory: %w", err)
 		}
-		if err := WriteMetadataFile(filepath.Join(metaDir, MetadataFileName), metadata); err != nil {
+		if err := WriteMetadataFile(metaPath, metadata); err != nil {
 			cleanup()
 			return "", fmt.Errorf("failed to write metadata: %w", err)
 		}
@@ -650,37 +926,64 @@ func stageLocalModules(tree *ResolvedTree, archiveRoot, stagingDir string, strip
 		if module == tree.Root {
 			continue
 		}
-		// Skip remote packages (added separately from tree.Packages)
-		if _, isPackage := tree.Packages[module.Source.PackageAddr]; isPackage {
-			continue
-		}
-		if !module.IsLocal || module.InstallDir == "" {
+		// Modules whose install dir belongs to a downloaded package are already
+		// copied with that whole package. Package maps are keyed by identity, not
+		// source address, so address lookup here would miss them and duplicate
+		// package internals at attacker-controlled module-key paths.
+		if !module.IsLocal || module.InstallDir == "" || moduleInsideDownloadedPackage(tree, module) {
 			continue
 		}
 		// Skip modules inside the archive root — already copied by step 1.
 		relPath, err := filepath.Rel(archiveRoot, module.InstallDir)
-		if err != nil || !strings.HasPrefix(relPath, "..") {
+		if err != nil || !relativePathEscapesRoot(relPath) {
 			continue
 		}
 		// Skip modules inside the package root in pivot mode — staged by
 		// stageMonorepoSiblings at their package-relative path.
 		if tree.Root != nil && tree.Root.PackageRoot != "" && tree.Root.PackageRoot != archiveRoot {
-			if relPkg, relErr := filepath.Rel(tree.Root.PackageRoot, module.InstallDir); relErr == nil && !strings.HasPrefix(relPkg, "..") {
+			if relPkg, relErr := filepath.Rel(tree.Root.PackageRoot, module.InstallDir); relErr == nil && !relativePathEscapesRoot(relPkg) {
 				continue
 			}
 		}
-		// Use module's key as the archive path to maintain structure
-		archivePath := strings.ReplaceAll(module.Key, ".", "/")
-		targetPath := filepath.Join(stagingDir, archivePath)
-		if err := copyDirOCI(module.InstallDir, targetPath, stripPlan); err != nil {
-			return fmt.Errorf("failed to copy local module %s: %w", module.Key, err)
+		if err := stageLocalModule(module, stagingDir, stripPlan); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// stagePackages copies each downloaded package into the staging vendor directory,
-// keyed by its package ID. The vendor directory is created only when packages exist.
+func stageLocalModule(module *ModuleNode, stagingDir string, stripPlan *StripPlan) error {
+	archivePath := strings.ReplaceAll(module.Key, ".", "/")
+	targetPath, err := joinPathWithin(stagingDir, archivePath)
+	if err != nil {
+		return fmt.Errorf("invalid archive path for local module %q: %w", module.Key, err)
+	}
+	if err := copyDirOCIWithin(module.InstallDir, targetPath, moduleCopyBoundary(module), stripPlan); err != nil {
+		return fmt.Errorf("failed to copy local module %s: %w", module.Key, err)
+	}
+	return nil
+}
+
+func moduleInsideDownloadedPackage(tree *ResolvedTree, module *ModuleNode) bool {
+	for _, pkg := range tree.Packages {
+		if pkg == nil || pkg.LocalDir == "" {
+			continue
+		}
+		rel, err := filepath.Rel(pkg.LocalDir, module.InstallDir)
+		if err == nil && !relativePathEscapesRoot(rel) {
+			return true
+		}
+	}
+	return false
+}
+
+func moduleCopyBoundary(module *ModuleNode) string {
+	if module.PackageRoot != "" {
+		return module.PackageRoot
+	}
+	return module.InstallDir
+}
+
 func stagePackages(tree *ResolvedTree, packagesDir string, stripPlan *StripPlan) error {
 	if len(tree.Packages) == 0 {
 		return nil
@@ -689,9 +992,15 @@ func stagePackages(tree *ResolvedTree, packagesDir string, stripPlan *StripPlan)
 		return fmt.Errorf("failed to create vendor directory: %w", err)
 	}
 	for pkgID, pkg := range tree.Packages {
-		targetPath := filepath.Join(packagesDir, pkgID)
+		if pkg == nil || pkg.LocalDir == "" {
+			return fmt.Errorf("package %q has no local directory", pkgID)
+		}
+		targetPath, pathErr := joinPathWithin(packagesDir, pkgID)
+		if pathErr != nil {
+			return fmt.Errorf("invalid package identity %q: %w", pkgID, pathErr)
+		}
 		if err := copyDirOCI(pkg.LocalDir, targetPath, stripPlan); err != nil {
-			return fmt.Errorf("failed to copy package %s: %w", pkg.PackageAddr, err)
+			return fmt.Errorf("failed to copy package %s: %w", RedactSourceAddress(pkg.PackageAddr), err)
 		}
 	}
 	return nil
@@ -718,15 +1027,15 @@ func entrySubdir(tree *ResolvedTree) string {
 	return filepath.ToSlash(rel)
 }
 
-// repivotMonorepoSources rewrites local module sources that cross the new
-// archive-root boundary in //subdir pivot mode. After this pass, every
+// repivotMonorepoSources rewrites local module sources in the staged entry
+// that cross the new archive-root boundary in //subdir pivot mode. After this pass, every
 // `../../modules/x` reference declared by the entry module that escapes the
 // entry subdir is rewritten to `./<package-rel-path>` so it resolves at the
 // unpacked archive root, where stageMonorepoSiblings stages the referenced
 // bytes. No-op outside pivot mode. Deeper descendants' `../sibling` sources
 // are NOT rewritten: stageMonorepoSiblings stages siblings at package-relative
 // paths, preserving the layout and thus the relative references between them.
-func repivotMonorepoSources(tree *ResolvedTree) error {
+func repivotMonorepoSources(tree *ResolvedTree, stagedEntryDir string) error {
 	if !inPivotMode(tree) {
 		return nil
 	}
@@ -749,30 +1058,30 @@ func repivotMonorepoSources(tree *ResolvedTree) error {
 		}
 		// Skip children whose target stays inside the entry subdir — staged by
 		// step 1's entry copy and reachable via the original `./child` source.
-		if rel, err := filepath.Rel(entryDir, m.InstallDir); err == nil && !strings.HasPrefix(rel, "..") {
+		if rel, err := filepath.Rel(entryDir, m.InstallDir); err == nil && !relativePathEscapesRoot(rel) {
 			continue
 		}
-		if err := rewriteEntryChildToPackageRel(m, pkgRoot); err != nil {
+		if err := rewriteEntryChildToPackageRel(m, pkgRoot, stagedEntryDir); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// rewriteEntryChildToPackageRel rewrites m's parent .tf source for m to
-// `./<package-rel-path>`. Caller has already filtered m to be a crossing
-// direct child of the entry in pivot mode.
-func rewriteEntryChildToPackageRel(m *ModuleNode, pkgRoot string) error {
+// rewriteEntryChildToPackageRel rewrites m's source block in the staged
+// entry to `./<package-rel-path>`. Caller has already filtered m to be a
+// crossing direct child of the entry in pivot mode.
+func rewriteEntryChildToPackageRel(m *ModuleNode, pkgRoot, stagedEntryDir string) error {
 	pkgRel, err := filepath.Rel(pkgRoot, m.InstallDir)
 	if err != nil {
 		return nil //nolint:nilerr // unreachable: pkgRoot is an ancestor of m.InstallDir; Rel only fails across volumes
 	}
-	if strings.HasPrefix(pkgRel, "..") {
+	if relativePathEscapesRoot(pkgRel) {
 		return nil // target outside package root — staged by stageLocalModules
 	}
 	newSource := "./" + filepath.ToSlash(pkgRel)
 
-	parentTfFiles, err := FindTerraformFiles(m.Parent.InstallDir)
+	parentTfFiles, err := FindTerraformFiles(stagedEntryDir)
 	if err != nil {
 		return fmt.Errorf("failed to find parent terraform files for module %s: %w", m.Key, err)
 	}
@@ -812,16 +1121,22 @@ func stageMonorepoSiblings(tree *ResolvedTree, stagingDir string, stripPlan *Str
 			continue
 		}
 		// Skip modules inside the entry subdir — staged by step 1 (entry copy).
-		if rel, err := filepath.Rel(entryDir, m.InstallDir); err == nil && !strings.HasPrefix(rel, "..") {
+		if rel, err := filepath.Rel(entryDir, m.InstallDir); err == nil && !relativePathEscapesRoot(rel) {
 			continue
 		}
 		// Skip modules outside the package root — staged by stageLocalModules.
 		pkgRel, err := filepath.Rel(pkgRoot, m.InstallDir)
-		if err != nil || strings.HasPrefix(pkgRel, "..") {
+		if err != nil || relativePathEscapesRoot(pkgRel) {
 			continue
 		}
-		targetPath := filepath.Join(stagingDir, filepath.FromSlash(filepath.ToSlash(pkgRel)))
-		if err := copyDirOCI(m.InstallDir, targetPath, stripPlan); err != nil {
+		if filepath.Clean(pkgRel) == "." {
+			return fmt.Errorf("cannot stage package-root module %q during entry pivot; use `tofupress tree`", m.Key)
+		}
+		targetPath, pathErr := joinPathWithin(stagingDir, filepath.ToSlash(pkgRel))
+		if pathErr != nil {
+			return fmt.Errorf("invalid archive path for monorepo sibling %q: %w", m.Key, pathErr)
+		}
+		if err := copyDirOCIWithin(m.InstallDir, targetPath, pkgRoot, stripPlan); err != nil {
 			return fmt.Errorf("failed to stage monorepo sibling %s: %w", m.Key, err)
 		}
 	}
@@ -842,7 +1157,7 @@ func stageMonorepoSiblings(tree *ResolvedTree, stagingDir string, stripPlan *Str
 //
 //nolint:gocyclo,gocognit // complex but straightforward staging-only aggregation
 func (b *Bundler) aggregatePressedModulesInStaging(tree *ResolvedTree, stagingDir string) error {
-	vDir := vendorDirName(tree)
+	vDir := b.vendorDir(tree)
 	stagingVendorRoot := filepath.Join(stagingDir, vDir)
 
 	// Aggregated packages land under the staging root vendor dir. Register a
@@ -877,11 +1192,18 @@ func (b *Bundler) aggregatePressedModulesInStaging(tree *ResolvedTree, stagingDi
 		// keep their package-relative path; outside-root modules use dotted Key slashes.
 		moduleBundlePath := strings.ReplaceAll(module.Key, ".", "/")
 		if rootRel, relErr := filepath.Rel(tree.Root.InstallDir, module.InstallDir); relErr == nil {
-			if cleaned := filepath.Clean(rootRel); !strings.HasPrefix(cleaned, "..") {
+			if cleaned := filepath.Clean(rootRel); !relativePathEscapesRoot(cleaned) {
 				moduleBundlePath = cleaned
 			}
 		}
-		stagedModulePath := filepath.Join(stagingDir, moduleBundlePath)
+		stagedModulePath := stagingDir
+		if filepath.Clean(moduleBundlePath) != "." {
+			var pathErr error
+			stagedModulePath, pathErr = joinPathWithin(stagingDir, filepath.ToSlash(moduleBundlePath))
+			if pathErr != nil {
+				return fmt.Errorf("invalid staged path for pressed module %q: %w", module.Key, pathErr)
+			}
+		}
 		stagedVendorDir := filepath.Join(stagedModulePath, vDir)
 
 		entries, err := os.ReadDir(origVendorDir)
@@ -894,8 +1216,14 @@ func (b *Bundler) aggregatePressedModulesInStaging(tree *ResolvedTree, stagingDi
 				continue
 			}
 			packageID := entry.Name()
-			stagedSourcePkgPath := filepath.Join(stagedVendorDir, packageID)
-			stagedTargetPkgPath := filepath.Join(stagingVendorRoot, packageID)
+			stagedSourcePkgPath, sourcePathErr := joinPathWithin(stagedVendorDir, packageID)
+			if sourcePathErr != nil {
+				return fmt.Errorf("invalid pressed package identity %q: %w", packageID, sourcePathErr)
+			}
+			stagedTargetPkgPath, targetPathErr := joinPathWithin(stagingVendorRoot, packageID)
+			if targetPathErr != nil {
+				return fmt.Errorf("invalid pressed package identity %q: %w", packageID, targetPathErr)
+			}
 			origSourcePkgPath := filepath.Join(origVendorDir, packageID)
 
 			// Skip entries that did not make it through staging (e.g. strip plan
@@ -998,15 +1326,15 @@ func moveOrCopyDir(srcPath, dstPath string) error {
 // the entire vendor dir and only add back known packages, silently dropping user
 // content. This check ensures we fail with a clear error instead of producing an
 // inconsistent bundle.
-func (b *Bundler) validateVendorDir(tree *ResolvedTree) error {
-	vendorPath := filepath.Join(tree.Root.InstallDir, b.VendorDir)
+func (b *Bundler) validateVendorDir(tree *ResolvedTree, vendorDir string) error {
+	vendorPath := filepath.Join(tree.Root.InstallDir, vendorDir)
 
 	entries, err := os.ReadDir(vendorPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil // no vendor dir yet, no conflict
 		}
-		return fmt.Errorf("failed to read vendor directory %q: %w", b.VendorDir, err)
+		return fmt.Errorf("failed to read vendor directory %q: %w", vendorDir, err)
 	}
 
 	if len(tree.Packages) == 0 {
@@ -1018,15 +1346,21 @@ func (b *Bundler) validateVendorDir(tree *ResolvedTree) error {
 	// entry is the namespace dir, not the package dir — so compute the first
 	// path component of each package's vendor-relative path.
 	packageBases := make(map[string]bool, len(tree.Packages))
-	for _, pkg := range tree.Packages {
-		rel := strings.TrimPrefix(pkg.LocalDir, filepath.Join(tree.Root.InstallDir, b.VendorDir)+string(filepath.Separator))
-		rel = filepath.ToSlash(rel)
-		if first, _, found := strings.Cut(rel, "/"); found && first != "" {
-			packageBases[first] = true
-		} else {
-			// Fallback for flat vendor paths (pkg-<sha>).
-			packageBases[filepath.Base(pkg.LocalDir)] = true
+	for id, pkg := range tree.Packages {
+		if pkg == nil || pkg.LocalDir == "" {
+			return fmt.Errorf("package %q has no local directory", id)
 		}
+		if _, pathErr := joinPathWithin(vendorPath, id); pathErr != nil {
+			return fmt.Errorf("invalid package identity %q: %w", id, pathErr)
+		}
+		rel, relErr := filepath.Rel(vendorPath, pkg.LocalDir)
+		if relErr == nil && rel != "." && !relativePathEscapesRoot(rel) {
+			first, _, _ := strings.Cut(filepath.ToSlash(rel), "/")
+			packageBases[first] = true
+			continue
+		}
+		first, _, _ := strings.Cut(filepath.ToSlash(id), "/")
+		packageBases[first] = true
 	}
 
 	// Check for non-package content that would be lost
@@ -1042,7 +1376,7 @@ func (b *Bundler) validateVendorDir(tree *ResolvedTree) error {
 			"vendor directory %q conflicts with existing content: %v; "+
 				"the vendor directory must only contain downloaded packages; "+
 				"use --vendor-dir to specify a different directory name that does not conflict",
-			b.VendorDir, conflicts,
+			vendorDir, conflicts,
 		)
 	}
 

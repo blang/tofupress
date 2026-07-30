@@ -85,7 +85,7 @@ func (c matrixCell) name() string {
 }
 
 type cellFixture struct {
-	source    string   // source arg passed to `tofupress bundle`
+	source    string   // source arg passed to `tofupress module`
 	bundleEnv []string // extra env for the bundle subprocess (e.g. registry stub URL)
 	topModule string   // the top-level module name declared in the consumer's main.tf at archive root
 }
@@ -249,7 +249,7 @@ func setupLocalFlat(t *testing.T) cellFixture {
 //	<repo>/environments/prod/main.tf -> module "network" { source = "../../modules/network" }
 //	<repo>/modules/network/main.tf -> output "marker" { value = "network" }
 //
-// Bundled via `tofupress bundle <repo>//environments/prod out.<fmt>`.
+// Pressed via `tofupress module <repo>//environments/prod out.<fmt>`.
 func setupLocalMonorepo(t *testing.T) cellFixture {
 	t.Helper()
 	repo := t.TempDir()

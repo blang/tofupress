@@ -164,7 +164,7 @@ locals { python = "python3" }
 	}
 
 	// Plain attribute referencing a module-relative file/dir.
-	pathModuleRefs := byFunction["path.module"]
+	pathModuleRefs := byFunction[pathModuleFunction]
 	require.NotEmpty(t, pathModuleRefs, "expected path.module risk-signal refs")
 	var foundBuildDir, foundInterpreter, foundCommand, foundBareAggressive bool
 	for _, ref := range pathModuleRefs {

@@ -8,7 +8,8 @@ type SourceType int
 
 // Source type constants identify the protocol or mechanism used to fetch a module.
 const (
-	SourceLocal    SourceType = iota // ./modules/foo, ../shared
+	SourceUnknown  SourceType = iota // Unrecognized or malformed source
+	SourceLocal                      // ./modules/foo, ../shared
 	SourceAbsolute                   // /absolute/path/to/module, rejected by default
 	SourceGit                        // git::https://...
 	SourceHTTP                       // https://...archive.tar.gz
@@ -99,6 +100,8 @@ func (n *ModuleNode) FindByKey(key string) *ModuleNode {
 // String returns a human-readable representation of the source type.
 func (s SourceType) String() string {
 	switch s {
+	case SourceUnknown:
+		return "unknown"
 	case SourceLocal:
 		return SourceDisplayLocal
 	case SourceAbsolute:
@@ -122,15 +125,20 @@ func (s SourceType) String() string {
 
 // IsRemote returns true if the source type requires downloading.
 func (s SourceType) IsRemote() bool {
-	return s != SourceLocal && s != SourceAbsolute && s != SourceRegistry // Registry might be local or remote
+	switch s {
+	case SourceGit, SourceHTTP, SourceRegistry, SourceS3, SourceGCS, SourceOCI:
+		return true
+	default:
+		return false
+	}
 }
 
 // String returns a human-readable representation of the module source.
 func (m ModuleSource) String() string {
 	if m.PackageAddr != "" {
-		return m.PackageAddr
+		return RedactSourceAddress(m.PackageAddr)
 	}
-	return m.Raw
+	return RedactSourceAddress(m.Raw)
 }
 
 // Depth returns the depth of this node in the tree (root = 0).

@@ -20,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 FIXTURES_DIR="$PROJECT_DIR/scripts/qa-fixtures"
 OUTPUT_DIR="$(mktemp -d)"
-BINARY="$PROJECT_DIR/tofupress"
+BINARY="$OUTPUT_DIR/tofupress"
 
 # Colors
 RED='\033[0;31m'
@@ -33,13 +33,11 @@ FAIL=0
 # --- Helpers ---
 
 build() {
-    if [ ! -x "$BINARY" ]; then
-        echo "Building tofupress..." >&2
-        (cd "$PROJECT_DIR" && go build ./cmd/tofupress/) || {
-            echo "FATAL: Build failed" >&2
-            exit 1
-        }
-    fi
+    echo "Building tofupress..." >&2
+    (cd "$PROJECT_DIR" && go build -o "$BINARY" ./cmd/tofupress/) || {
+        echo "FATAL: Build failed" >&2
+        exit 1
+    }
 }
 
 assert_success() {
@@ -250,12 +248,12 @@ test_resolve_cross_boundary_error() {
         "escapes package boundary"
 }
 
-# --- Known Issues (expected failures, documented in QA report) ---
+# --- Adversarial source-shape tests ---
 
-test_resolve_symlink_module() {
-    assert_output_contains "Resolve: symlinked module resolved" \
+test_resolve_symlink_cycle_error() {
+    assert_failure "Resolve: symlink directory cycle rejected" \
         "$BINARY resolve $FIXTURES_DIR/symlink-test" \
-        "Total modules: 2"
+        "symlink cycle"
 }
 
 test_resolve_heredoc_source() {
@@ -270,123 +268,132 @@ test_resolve_duplicate_names_error() {
         "duplicate module"
 }
 
-# --- Bundle Tests ---
+# --- Module/Tree Press Tests ---
 
-test_bundle_zip_format() {
+test_module_zip_format() {
     local out="$OUTPUT_DIR/test.zip"
-    assert_success "Bundle: ZIP format" \
-        "$BINARY bundle $FIXTURES_DIR/simple-module $out"
+    assert_success "Module: ZIP format" \
+        "$BINARY module $FIXTURES_DIR/simple-module $out"
     if python3 -c "import zipfile; zipfile.ZipFile('$out'); print('ok')" 2>/dev/null | grep -q ok; then
-        echo -e "${GREEN}PASS${NC}: Bundle: ZIP file is valid" >&2
+        echo -e "${GREEN}PASS${NC}: Module: ZIP file is valid" >&2
         ((PASS++)) || true
     else
-        echo -e "${RED}FAIL${NC}: Bundle: ZIP file is not valid" >&2
+        echo -e "${RED}FAIL${NC}: Module: ZIP file is not valid" >&2
         ((FAIL++)) || true
     fi
 }
 
-test_bundle_targz_format() {
+test_module_targz_format() {
     local out="$OUTPUT_DIR/test.tar.gz"
-    assert_success "Bundle: tar.gz format" \
-        "$BINARY bundle $FIXTURES_DIR/multi-child $out"
-    assert_output_contains "Bundle: tar.gz has metadata" \
+    assert_success "Module: tar.gz format" \
+        "$BINARY module $FIXTURES_DIR/multi-child $out"
+    assert_output_contains "Module: tar.gz has metadata" \
         "$BINARY metadata $out" \
         '"schema_version"'
 }
 
-test_bundle_tarxz_format() {
+test_module_tarxz_format() {
     local out="$OUTPUT_DIR/test.tar.xz"
-    assert_success "Bundle: tar.xz format" \
-        "$BINARY bundle $FIXTURES_DIR/simple-module $out"
-    assert_success "Bundle: tar.xz metadata readable" \
+    assert_success "Module: tar.xz format" \
+        "$BINARY module $FIXTURES_DIR/simple-module $out"
+    assert_success "Module: tar.xz metadata readable" \
         "$BINARY metadata $out"
 }
 
-test_bundle_oci_compliant() {
+test_module_oci_compliant() {
     local out="$OUTPUT_DIR/oci.zip"
-    assert_success "Bundle: OCI-compliant mode" \
-        "$BINARY bundle $FIXTURES_DIR/simple-module $out --oci-compliant"
-    assert_metadata_field "Bundle: OCI metadata oci_compliant=true" \
+    assert_success "Module: OCI-compliant mode" \
+        "$BINARY module $FIXTURES_DIR/simple-module $out --oci-compliant"
+    assert_metadata_field "Module: OCI metadata oci_compliant=true" \
         "$out" "['command']['options']['oci_compliant']" "True"
 }
 
-test_bundle_oci_requires_zip() {
-    assert_failure "Bundle: OCI-compliant rejects non-zip" \
-        "$BINARY bundle $FIXTURES_DIR/simple-module $OUTPUT_DIR/oci.tar.gz --oci-compliant" \
+test_module_oci_requires_zip() {
+    assert_failure "Module: OCI-compliant rejects non-zip" \
+        "$BINARY module $FIXTURES_DIR/simple-module $OUTPUT_DIR/oci.tar.gz --oci-compliant" \
         "oci-compliant requires zip"
 }
 
-test_bundle_strip_config_only() {
+test_module_strip_config_only() {
     local out="$OUTPUT_DIR/strip-config.tar.gz"
-    assert_success "Bundle: --strip=config-only" \
-        "$BINARY bundle $FIXTURES_DIR/strip-test $out --strip=config-only"
-    assert_metadata_field "Bundle: strip mode is config-only" \
-        "$out" "['command']['options']['strip_mode']" "config-only"
+    assert_success "Module: --strip=config-only" \
+        "$BINARY module $FIXTURES_DIR/strip-test $out --strip=config-only"
+    assert_metadata_field "Module: canonical strip mode is aggressive" \
+        "$out" "['command']['options']['strip_mode']" "aggressive"
+    assert_metadata_field "Module: strip alias input is preserved" \
+        "$out" "['command']['options']['strip_mode_input']" "config-only"
 }
 
-test_bundle_strip_none() {
+test_module_strip_none() {
     local out="$OUTPUT_DIR/strip-none.tar.gz"
-    assert_success "Bundle: --strip=none" \
-        "$BINARY bundle $FIXTURES_DIR/strip-test $out --strip=none"
+    assert_success "Module: --strip=none" \
+        "$BINARY module $FIXTURES_DIR/strip-test $out --strip=none"
 }
 
-test_bundle_strip_bad_value() {
-    assert_failure "Bundle: invalid strip mode rejected" \
-        "$BINARY bundle $FIXTURES_DIR/simple-module $OUTPUT_DIR/bad.tar.gz --strip=invalid" \
-        "unsupported strip mode"
+test_module_strip_bad_value() {
+    assert_failure "Module: invalid strip level rejected" \
+        "$BINARY module /does/not/exist $OUTPUT_DIR/bad.tar.gz --strip=invalid" \
+        "unsupported strip level"
 }
 
-test_bundle_format_bad_value() {
-    assert_failure "Bundle: invalid format rejected" \
-        "$BINARY bundle $FIXTURES_DIR/simple-module $OUTPUT_DIR/bad.bin --format=bad" \
+test_module_format_bad_value() {
+    assert_failure "Module: invalid format rejected" \
+        "$BINARY module /does/not/exist $OUTPUT_DIR/bad.bin --format=bad" \
         "unsupported bundle format"
 }
 
-test_bundle_metadata_out() {
+test_module_metadata_out() {
     local out="$OUTPUT_DIR/meta-test.tar.gz"
     local meta="$OUTPUT_DIR/meta.json"
-    assert_success "Bundle: --metadata-out writes separate file" \
-        "$BINARY bundle $FIXTURES_DIR/simple-module $out --metadata-out $meta"
+    assert_success "Module: --metadata-out writes separate file" \
+        "$BINARY module $FIXTURES_DIR/simple-module $out --metadata-out $meta"
     if python3 -c "import json; json.load(open('$meta')); print('ok')" 2>/dev/null | grep -q ok; then
-        echo -e "${GREEN}PASS${NC}: Bundle: metadata file is valid JSON" >&2
+        echo -e "${GREEN}PASS${NC}: Module: metadata file is valid JSON" >&2
         ((PASS++)) || true
     else
-        echo -e "${RED}FAIL${NC}: Bundle: metadata file is not valid JSON" >&2
+        echo -e "${RED}FAIL${NC}: Module: metadata file is not valid JSON" >&2
         ((FAIL++)) || true
     fi
 }
 
-test_bundle_empty_dir() {
+test_module_empty_dir_refused() {
     local out="$OUTPUT_DIR/empty.zip"
-    assert_output_contains "Bundle: empty directory with warning" \
-        "$BINARY bundle $FIXTURES_DIR/empty-module $out" \
-        "Warning"
+    assert_failure "Module: empty directory refused" \
+        "$BINARY module $FIXTURES_DIR/empty-module $out" \
+        "contains no .tf or .tofu files"
 }
 
-test_bundle_idempotent() {
+test_module_idempotent_structure() {
     local out1="$OUTPUT_DIR/idem1.zip"
     local out2="$OUTPUT_DIR/idem2.zip"
-    "$BINARY" bundle "$FIXTURES_DIR/idempotent" "$out1" > /dev/null 2>&1
-    sleep 1.1  # Ensure timestamps differ
-    "$BINARY" bundle "$FIXTURES_DIR/idempotent" "$out2" > /dev/null 2>&1
-    # Compare ZIP entry structure (names only, excluding metadata)
+    "$BINARY" module "$FIXTURES_DIR/idempotent" "$out1" > /dev/null 2>&1
+    "$BINARY" module "$FIXTURES_DIR/idempotent" "$out2" > /dev/null 2>&1
+    # Compare ZIP entry structure (names only, excluding embedded metadata).
     local names1 names2
-    names1=$(python3 -c "import zipfile; z=zipfile.ZipFile('$out1'); print(' '.join(sorted(n for n in z.namelist() if n!='meta.json')))" 2>/dev/null)
-    names2=$(python3 -c "import zipfile; z=zipfile.ZipFile('$out2'); print(' '.join(sorted(n for n in z.namelist() if n!='meta.json')))" 2>/dev/null)
+    names1=$(python3 -c "import zipfile; z=zipfile.ZipFile('$out1'); print(' '.join(sorted(n for n in z.namelist() if n!='.tofupress/meta.json')))" 2>/dev/null)
+    names2=$(python3 -c "import zipfile; z=zipfile.ZipFile('$out2'); print(' '.join(sorted(n for n in z.namelist() if n!='.tofupress/meta.json')))" 2>/dev/null)
     if [ "$names1" = "$names2" ] && [ -n "$names1" ]; then
-        echo -e "${GREEN}PASS${NC}: Bundle: idempotent (same entry names)" >&2
+        echo -e "${GREEN}PASS${NC}: Module: idempotent entry structure" >&2
         ((PASS++)) || true
     else
-        echo -e "${RED}FAIL${NC}: Bundle: not idempotent ($names1 vs $names2)" >&2
+        echo -e "${RED}FAIL${NC}: Module: entry structure differs ($names1 vs $names2)" >&2
         ((FAIL++)) || true
     fi
+}
+
+test_tree_preserves_subject_shape() {
+    local out="$OUTPUT_DIR/tree.zip"
+    assert_success "Tree: press succeeds" \
+        "$BINARY tree $FIXTURES_DIR/multi-child $out"
+    assert_metadata_field "Tree: metadata records tree command" \
+        "$out" "['command']['name']" "tree"
 }
 
 # --- Metadata Tests ---
 
 test_metadata_read_zip() {
     local out="$OUTPUT_DIR/meta-read.zip"
-    "$BINARY" bundle "$FIXTURES_DIR/simple-module" "$out" > /dev/null 2>&1
+    "$BINARY" module "$FIXTURES_DIR/simple-module" "$out" > /dev/null 2>&1
     assert_output_contains "Metadata: read from ZIP" \
         "$BINARY metadata $out" \
         '"schema_version"'
@@ -426,9 +433,9 @@ test_cli_version() {
         "tofupress"
 }
 
-test_cli_bundle_help() {
-    assert_output_contains "CLI: bundle --help shows options" \
-        "$BINARY bundle --help" \
+test_cli_module_help() {
+    assert_output_contains "CLI: module --help shows options" \
+        "$BINARY module --help" \
         "format string"
 }
 
@@ -439,9 +446,9 @@ test_cli_resolve_help() {
 }
 
 test_cli_missing_args() {
-    assert_failure "CLI: bundle with no args errors" \
-        "$BINARY bundle" \
-        "accepts 2 arg"
+    assert_failure "CLI: module with no args errors" \
+        "$BINARY module" \
+        "received 0"
 }
 
 test_cli_bad_source() {

@@ -3,14 +3,19 @@ package tofupress
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
+	"github.com/hashicorp/go-getter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -273,6 +278,82 @@ func TestNewFetcher(t *testing.T) {
 	fetcher := NewFetcher()
 	assert.NotNil(t, fetcher)
 }
+
+func TestFetcher_DefaultGettersAreIsolatedPerFetch(t *testing.T) {
+	fetcher := NewFetcher()
+	first := fetcher.gettersForFetch()
+	second := fetcher.gettersForFetch()
+
+	for _, scheme := range []string{"file", "git", "gcs", "hg", "s3", "http", "oci"} {
+		assert.NotSame(t, first[scheme], second[scheme], "%s getter must not share go-getter's mutable client", scheme)
+	}
+	assert.Same(t, first["http"], first["https"], "one client may share its HTTP getter across aliases")
+}
+
+func TestFetcher_WarningWriterPropagatesToFreshOCIGetter(t *testing.T) {
+	var warnings bytes.Buffer
+	fetcher := NewFetcher(WithWarningWriter(&warnings))
+
+	fresh, ok := fetcher.gettersForFetch()["oci"].(*OCIGetter)
+	require.True(t, ok)
+	require.Same(t, fetcher.warningWriter, fresh.warningWriter)
+
+	require.NoError(t, enforceArtifactType(false, fresh.warningWriter, "registry.example.com/repo:tag", ""))
+	assert.Contains(t, warnings.String(), "registry.example.com/repo:tag")
+}
+
+func TestFetcher_ConcurrentFetchesUseIsolatedGoGetterClients(t *testing.T) {
+	sourceDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(sourceDir, "main.tf"), []byte("# local"), 0o644))
+
+	const fetchCount = 8
+	fetcher := NewFetcher()
+	start := make(chan struct{})
+	errs := make(chan error, fetchCount)
+	var wg sync.WaitGroup
+	for i := range fetchCount {
+		wg.Go(func() {
+			<-start
+			destination := filepath.Join(t.TempDir(), fmt.Sprintf("dst-%d", i))
+			errs <- fetcher.Fetch(context.Background(), destination, sourceDir)
+		})
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.NoError(t, err)
+	}
+}
+
+func TestFetcher_FetchErrorRedactsSourceSecrets(t *testing.T) {
+	source := "leak::https://alice:" + "password123@example.com/repo.git?ref=v1&token=secret-token"
+	fetcher := NewFetcher(WithGetters(map[string]getter.Getter{"leak": leakingGetter{}}))
+
+	err := fetcher.Fetch(context.Background(), filepath.Join(t.TempDir(), "dst"), source)
+
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "alice")
+	assert.NotContains(t, err.Error(), "password123")
+	assert.NotContains(t, err.Error(), "secret-token")
+	assert.Contains(t, err.Error(), "example.com/repo.git?ref=v1&token=REDACTED")
+}
+
+type leakingGetter struct{}
+
+func (leakingGetter) Get(_ string, source *url.URL) error {
+	return fmt.Errorf("download %q failed", source.String())
+}
+
+func (leakingGetter) GetFile(_ string, source *url.URL) error {
+	return fmt.Errorf("download %q failed", source.String())
+}
+
+func (leakingGetter) ClientMode(*url.URL) (getter.ClientMode, error) {
+	return getter.ClientModeDir, nil
+}
+
+func (leakingGetter) SetClient(*getter.Client) {}
 
 func TestFetcher_FetchWithQueryParams(t *testing.T) {
 	var receivedQuery string

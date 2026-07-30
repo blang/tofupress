@@ -5,12 +5,12 @@ import (
 	"archive/zip"
 	"compress/gzip"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
-	"maps"
 	"os"
-	"path"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 
@@ -25,16 +25,44 @@ import (
 // The // separator defines the package boundary: everything before is the package,
 // everything after is the subdirectory within the package.
 //
-// For local filesystem sources without an explicit // separator, resolveSource
-// automatically expands the package boundary to the nearest git repository root
-// (detected via a .git directory walk-up). This ensures that ../ references from
-// the root module stay within the package — matching OpenTofu/Terraform's
-// behaviour where the entire filesystem is available to local modules.
+// Local sources are never expanded by sniffing for a surrounding git
+// repository. A caller that needs parent/sibling content must opt in explicitly
+// with package//entry, which gives the copy and resolver a visible boundary.
 //
 // Returns the work directory, package root (for boundary enforcement), and cleanup function.
-//
-//nolint:gocognit,gocyclo // local source boundary expansion adds minor complexity
 func resolveSource(ctx context.Context, source string) (workDir, packageRoot string, cleanup func(), err error) {
+	return resolveSourceWithFetcher(ctx, source, tofupress.NewFetcher())
+}
+
+func resolveSourceWithFetcher(
+	ctx context.Context,
+	source string,
+	fetcher *tofupress.Fetcher,
+) (workDir, packageRoot string, cleanup func(), err error) {
+	return resolveSourcePackage(ctx, source, fetcher)
+}
+
+// resolveTreeSource is the tree adapter's acquisition seam. An explicit //
+// source may name a larger fetch package, but ResolveTree still treats the
+// selected subject as its semantic boundary (ADR-0002).
+func resolveTreeSource(ctx context.Context, source string) (workDir, packageRoot string, cleanup func(), err error) {
+	return resolveTreeSourceWithFetcher(ctx, source, tofupress.NewFetcher())
+}
+
+func resolveTreeSourceWithFetcher(
+	ctx context.Context,
+	source string,
+	fetcher *tofupress.Fetcher,
+) (workDir, packageRoot string, cleanup func(), err error) {
+	return resolveSourcePackage(ctx, source, fetcher)
+}
+
+//nolint:gocognit,gocyclo // source acquisition has scheme and archive branches
+func resolveSourcePackage(
+	ctx context.Context,
+	source string,
+	fetcher *tofupress.Fetcher,
+) (workDir, packageRoot string, cleanup func(), err error) {
 	// Get current working directory for relative path resolution
 	pwd, err := os.Getwd()
 	if err != nil {
@@ -44,17 +72,6 @@ func resolveSource(ctx context.Context, source string) (workDir, packageRoot str
 	// Split package address from subdirectory using // separator FIRST
 	// This must happen before detection, as go-getter doesn't understand //
 	packageAddr, subDir := splitPackageSubdir(source)
-
-	// For local filesystem sources without explicit //, expand the package
-	// boundary to the nearest git repository root so that ../ references
-	// from the root module are included. This matches OpenTofu/Terraform's
-	// behaviour where local modules have access to the entire filesystem.
-	if subDir == "" {
-		if repoRoot, expandedSubdir, ok := detectRepoRoot(packageAddr, pwd); ok {
-			packageAddr = repoRoot
-			subDir = expandedSubdir
-		}
-	}
 
 	// Detect and normalize the package source using go-getter
 	// pwd is required for resolving relative paths
@@ -77,28 +94,15 @@ func resolveSource(ctx context.Context, source string) (workDir, packageRoot str
 	// go-getter expects the destination to not exist
 	packageDir := filepath.Join(tempDir, "package")
 
-	// Configure getters to copy files instead of creating symlinks for local directories
-	getters := make(map[string]getter.Getter)
-	maps.Copy(getters, getter.Getters)
-	// Override FileGetter to copy instead of symlink
-	getters["file"] = &getter.FileGetter{
-		Copy: true,
-	}
-	// Add OCI getter for oci:// scheme support
-	getters["oci"] = &tofupress.OCIGetter{}
-
-	// Download/copy the package using go-getter
-	client := &getter.Client{
-		Ctx:       ctx,
-		Src:       detected,
-		Dst:       packageDir,
-		Pwd:       pwd,
-		Mode:      getter.ClientModeDir,
-		Detectors: getter.Detectors,
-		Getters:   getters,
+	if fetcher == nil {
+		cleanup()
+		return "", "", nil, fmt.Errorf("source fetcher is nil")
 	}
 
-	if err := client.Get(); err != nil {
+	// Use the same owned Fetcher graph as dependency resolution. This keeps
+	// strict-OCI policy, warning routing, getter isolation, and error redaction
+	// consistent for the root subject and every nested module.
+	if err := fetcher.Fetch(ctx, packageDir, detected); err != nil {
 		cleanup()
 		return "", "", nil, fmt.Errorf("failed to fetch source: %w", err)
 	}
@@ -149,17 +153,42 @@ func resolveSource(ctx context.Context, source string) (workDir, packageRoot str
 	// Package root is the package directory (everything downloaded is within this boundary)
 	packageRoot = packageDir
 
-	// Navigate to subdirectory if specified
+	// Navigate to a subdirectory only after proving its canonical path remains
+	// inside the fetched package. A source suffix such as //../../../etc must
+	// never turn the root subject into an arbitrary host directory.
 	workDir = packageDir
 	if subDir != "" {
 		workDir = filepath.Join(packageDir, subDir)
-		if _, err := os.Stat(workDir); err != nil {
+		if boundaryErr := ensureSourceSubdir(packageDir, workDir); boundaryErr != nil {
 			cleanup()
-			return "", "", nil, fmt.Errorf("subdirectory %s does not exist in package: %w", subDir, err)
+			return "", "", nil, fmt.Errorf("invalid package subdirectory %q: %w", subDir, boundaryErr)
 		}
 	}
 
 	return workDir, packageRoot, cleanup, nil
+}
+
+func ensureSourceSubdir(packageRoot, target string) error {
+	root, err := canonicalCopyPath(packageRoot)
+	if err != nil {
+		return fmt.Errorf("resolve package root: %w", err)
+	}
+	resolved, err := canonicalCopyPath(target)
+	if err != nil {
+		return fmt.Errorf("subdirectory does not exist: %w", err)
+	}
+	copier := dereferenceCopier{root: root}
+	if boundaryErr := copier.ensureWithinRoot(target, resolved); boundaryErr != nil {
+		return fmt.Errorf("subdirectory escapes package boundary: %w", boundaryErr)
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("subdirectory is not a directory")
+	}
+	return nil
 }
 
 // splitPackageSubdir detects whether the given address string has a subdirectory
@@ -167,137 +196,133 @@ func resolveSource(ctx context.Context, source string) (workDir, packageRoot str
 // the trimmed package address.
 // This is adapted from OpenTofu's implementation.
 func splitPackageSubdir(src string) (packageAddr, subDir string) {
-	// URL might contain another URL in query parameters
-	stop := len(src)
-	if idx := strings.Index(src, "?"); idx > -1 {
-		stop = idx
-	}
-
-	// Calculate an offset to avoid accidentally marking the scheme as the dir
-	var offset int
-	if idx := strings.Index(src[:stop], "://"); idx > -1 {
-		offset = idx + 3
-	}
-
-	// Check for explicit subdir marker
-	idx := strings.Index(src[offset:stop], "//")
-	if idx == -1 {
-		return src, ""
-	}
-
-	idx += offset
-	subdir := src[idx+2:]
-	src = src[:idx]
-
-	// Reattach query parameters to package address
-	if qIdx := strings.Index(subdir, "?"); qIdx > -1 {
-		query := subdir[qIdx:]
-		subdir = subdir[:qIdx]
-		src += query
-	}
-
-	return src, path.Clean(subdir)
+	return tofupress.SplitPackageSubdir(src)
 }
 
-// detectRepoRoot walks up from a directory path to find a git repository root
-// (detected by the presence of a .git directory). Returns the repo root path,
-// the subdirectory relative to the repo root, and whether a git repo was found.
-//
-// When path is relative, it is resolved against pwd first. The returned repoRoot
-// is an absolute path so that go-getter can locate it correctly.
-func detectRepoRoot(packagePath, pwd string) (repoRoot, subDir string, ok bool) {
-	absPath := packagePath
-	if !filepath.IsAbs(absPath) {
-		absPath = filepath.Join(pwd, absPath)
-	}
-	absPath = filepath.Clean(absPath)
-
-	// Verify the source path exists on the filesystem.
-	// If it doesn't, it's not a local directory — don't expand.
-	if info, err := os.Stat(absPath); err != nil || !info.IsDir() {
-		return "", "", false
-	}
-
-	// Walk up the directory tree looking for a .git directory.
-	dir := absPath
-	for {
-		gitPath := filepath.Join(dir, ".git")
-		if info, err := os.Stat(gitPath); err == nil && info.IsDir() {
-			rel, err := filepath.Rel(dir, absPath)
-			if err != nil {
-				return "", "", false
-			}
-			return dir, rel, true
-		}
-
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			// Reached filesystem root (/) — no .git found
-			return "", "", false
-		}
-		dir = parent
-	}
-}
-
-// copyDir recursively copies a directory from src to dst.
-// It preserves file permissions and resolves symlinks to avoid infinite loops.
-//
-//nolint:gocognit // symlink resolution adds necessary complexity
+// copyDir recursively copies a directory from src to dst. Symlinks are
+// dereferenced for archive portability, but every resolved target must remain
+// within src so a module cannot import arbitrary host files into an artifact.
 func copyDir(src, dst string) error {
-	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
+	root, err := filepath.EvalSymlinks(src)
+	if err != nil {
+		return fmt.Errorf("resolve source root %s: %w", src, err)
+	}
+	root, err = filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("make source root absolute: %w", err)
+	}
+	root = filepath.Clean(root)
+	info, err := os.Stat(root)
+	if err != nil {
+		return fmt.Errorf("inspect source root %s: %w", src, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("source root %s is not a directory", src)
+	}
+
+	copier := dereferenceCopier{root: root}
+	return copier.copyDir(root, dst, make(map[string]bool))
+}
+
+type dereferenceCopier struct {
+	root string
+}
+
+func (c dereferenceCopier) copyDir(src, dst string, active map[string]bool) error {
+	canonical, err := canonicalCopyPath(src)
+	if err != nil {
+		return fmt.Errorf("resolve directory %s: %w", src, err)
+	}
+	if boundaryErr := c.ensureWithinRoot(src, canonical); boundaryErr != nil {
+		return boundaryErr
+	}
+	if active[canonical] {
+		return fmt.Errorf("symlink cycle while copying %s: directory %s is already active", src, canonical)
+	}
+	active[canonical] = true
+	defer delete(active, canonical)
+
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return err
+	}
+	if mkdirErr := os.MkdirAll(dst, info.Mode().Perm()); mkdirErr != nil {
+		return mkdirErr
+	}
+	entries, err := os.ReadDir(canonical)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		sourcePath := filepath.Join(canonical, entry.Name())
+		destPath := filepath.Join(dst, entry.Name())
+		entryInfo, statErr := os.Lstat(sourcePath)
+		if statErr != nil {
+			return statErr
 		}
-
-		// Get relative path
-		relPath, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
+		if copyErr := c.copyEntry(sourcePath, destPath, entryInfo, active); copyErr != nil {
+			return copyErr
 		}
+	}
+	return nil
+}
 
-		dstPath := filepath.Join(dst, relPath)
+func canonicalCopyPath(sourcePath string) (string, error) {
+	resolved, err := filepath.EvalSymlinks(sourcePath)
+	if err != nil {
+		return "", err
+	}
+	absolute, err := filepath.Abs(resolved)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(absolute), nil
+}
 
-		// Handle symlinks: resolve the target and copy the real content.
-		// Symlinks in Terraform module directories are commonly used to share
-		// modules across projects (monorepos, multi-environment setups).
-		if d.Type()&fs.ModeSymlink != 0 {
-			target, readErr := os.Readlink(path)
-			if readErr != nil {
-				return fmt.Errorf("failed to read symlink %s: %w", relPath, readErr)
-			}
-			// Resolve the target relative to the symlink's directory
-			resolvedPath := filepath.Join(filepath.Dir(path), target)
-			info, statErr := os.Stat(resolvedPath)
-			if statErr != nil {
-				// Self-referencing or dangling symlinks cannot be resolved.
-				// Skip them instead of failing — the symlink target may not
-				// be relevant to Terraform module resolution.
-				return nil //nolint:nilerr // intentionally skipping unresolvable symlinks
-			}
-			if info.IsDir() {
-				// Symlink to a directory: create the directory and copy contents
-				if mkdirErr := os.MkdirAll(dstPath, info.Mode()); mkdirErr != nil {
-					return mkdirErr
-				}
-				return copyDir(resolvedPath, dstPath)
-			}
-			// Symlink to a regular file: copy the target file
-			return copyFile(resolvedPath, dstPath, info.Mode())
-		}
+func (c dereferenceCopier) copyEntry(sourcePath, destPath string, info os.FileInfo, active map[string]bool) error {
+	switch {
+	case info.Mode()&os.ModeSymlink != 0:
+		return c.copySymlink(sourcePath, destPath, active)
+	case info.IsDir():
+		return c.copyDir(sourcePath, destPath, active)
+	case info.Mode().IsRegular():
+		return copyFile(sourcePath, destPath, info.Mode())
+	default:
+		return fmt.Errorf("unsupported source entry type %s at %s", info.Mode().Type(), sourcePath)
+	}
+}
 
-		// Get full file info for directories and regular files
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
+func (c dereferenceCopier) copySymlink(sourcePath, destPath string, active map[string]bool) error {
+	resolved, err := canonicalCopyPath(sourcePath)
+	if err != nil {
+		return fmt.Errorf("failed to resolve symlink %s (dangling link or symlink cycle): %w", sourcePath, err)
+	}
+	if boundaryErr := c.ensureWithinRoot(sourcePath, resolved); boundaryErr != nil {
+		return boundaryErr
+	}
+	info, err := os.Stat(resolved)
+	if err != nil {
+		return err
+	}
+	switch {
+	case info.IsDir():
+		return c.copyDir(resolved, destPath, active)
+	case info.Mode().IsRegular():
+		return copyFile(resolved, destPath, info.Mode())
+	default:
+		return fmt.Errorf("unsupported symlink target type %s at %s", info.Mode().Type(), sourcePath)
+	}
+}
 
-		if info.IsDir() {
-			return os.MkdirAll(dstPath, info.Mode())
-		}
-
-		// Copy file with permissions
-		return copyFile(path, dstPath, info.Mode())
-	})
+func (c dereferenceCopier) ensureWithinRoot(sourcePath, resolved string) error {
+	rel, err := filepath.Rel(c.root, resolved)
+	if err != nil {
+		return fmt.Errorf("compare symlink target %s with source root: %w", resolved, err)
+	}
+	if rel == ".." || filepath.IsAbs(rel) || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("symlink %s resolves to %s, which escapes source root %s", sourcePath, resolved, c.root)
+	}
+	return nil
 }
 
 // copyFile copies a single file from src to dst, preserving permissions.
@@ -353,26 +378,32 @@ func extractArchiveIfNeeded(packageDir string) error {
 		if !strings.HasSuffix(lower, ".zip") && !strings.HasSuffix(lower, ".tar.gz") && !strings.HasSuffix(lower, ".tgz") && !strings.HasSuffix(lower, ".tar.xz") && !strings.HasSuffix(lower, ".txz") {
 			return nil
 		}
-		return extractArchiveToDir(archiveFile, packageDir)
+		return extractArchiveReplacingPath(archiveFile, packageDir)
 	}
 
-	// It's a regular file — extract it
-	archiveFile := packageDir
-	parentDir := filepath.Dir(packageDir)
-	extractedDir := filepath.Join(parentDir, "extracted")
+	// It's a regular file — extract it and replace that path with a directory.
+	return extractArchiveReplacingPath(packageDir, packageDir)
+}
 
-	if err := extractArchiveToDir(archiveFile, extractedDir); err != nil {
+func extractArchiveReplacingPath(archiveFile, packagePath string) (err error) {
+	stagingDir, err := os.MkdirTemp(filepath.Dir(packagePath), ".tofupress-extract-*")
+	if err != nil {
+		return fmt.Errorf("failed to create archive extraction directory: %w", err)
+	}
+	defer func() {
+		if removeErr := os.RemoveAll(stagingDir); removeErr != nil {
+			err = errors.Join(err, removeErr)
+		}
+	}()
+	if err := extractArchiveToDir(archiveFile, stagingDir); err != nil {
 		return err
 	}
-
-	// Remove the original file
-	os.Remove(archiveFile) //nolint:errcheck,gosec // best-effort cleanup
-
-	// Rename extracted directory to packageDir
-	if err := os.Rename(extractedDir, packageDir); err != nil {
-		return fmt.Errorf("failed to rename extracted directory: %w", err)
+	if err := os.RemoveAll(packagePath); err != nil {
+		return fmt.Errorf("failed to replace downloaded archive: %w", err)
 	}
-
+	if err := os.Rename(stagingDir, packagePath); err != nil {
+		return fmt.Errorf("failed to publish extracted archive: %w", err)
+	}
 	return nil
 }
 
@@ -400,49 +431,55 @@ func extractZip(src, dst string) error {
 	}
 	defer r.Close() //nolint:errcheck // best effort
 
-	for _, f := range r.File {
-		//nolint:gosec // G305: zipslip prevention checked below
-		targetPath := filepath.Join(dst, f.Name)
-
-		// Prevent zip slip
-		if !strings.HasPrefix(filepath.Clean(targetPath), filepath.Clean(dst)+string(os.PathSeparator)) {
-			return fmt.Errorf("illegal file path in zip: %s", f.Name)
-		}
-
-		if f.FileInfo().IsDir() {
-			if err := os.MkdirAll(targetPath, 0o755); err != nil { //nolint:gosec // G301: standard permissions
-				return err
-			}
-			continue
-		}
-
-		if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil { //nolint:gosec // G301: standard permissions
+	for _, file := range r.File {
+		if err := extractZipEntry(file, dst); err != nil {
 			return err
-		}
-
-		out, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, f.Mode()) //nolint:gosec // G304: sanitized above
-		if err != nil {
-			return err
-		}
-		rc, openErr := f.Open()
-		if openErr != nil {
-			//nolint:errcheck,gosec // best effort on error path
-			out.Close()
-			return openErr
-		}
-		//nolint:gosec // decompression bomb: archive sources are trusted (user-supplied modules)
-		_, copyErr := io.Copy(out, rc)
-		//nolint:errcheck,gosec // read-only close
-		rc.Close()
-		closeErr := out.Close()
-		if copyErr != nil {
-			return copyErr
-		}
-		if closeErr != nil {
-			return closeErr
 		}
 	}
 	return nil
+}
+
+func extractZipEntry(file *zip.File, dst string) error {
+	targetPath, isRoot, err := archiveExtractionPath(dst, file.Name)
+	if err != nil {
+		return fmt.Errorf("illegal file path in zip: %s", file.Name)
+	}
+	if isRoot && file.FileInfo().IsDir() {
+		return nil
+	}
+	if isRoot {
+		return fmt.Errorf("illegal root file entry in zip: %s", file.Name)
+	}
+	if file.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("unsupported symlink entry in zip: %s", file.Name)
+	}
+	if file.FileInfo().IsDir() {
+		return os.MkdirAll(targetPath, 0o755) //nolint:gosec // G301: standard permissions
+	}
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil { //nolint:gosec // G301: standard permissions
+		return err
+	}
+	return extractZipFile(file, targetPath)
+}
+
+func extractZipFile(file *zip.File, targetPath string) error {
+	out, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, file.Mode()) //nolint:gosec // G304: validated extraction path
+	if err != nil {
+		return err
+	}
+	rc, err := file.Open()
+	if err != nil {
+		_ = out.Close()
+		return err
+	}
+	//nolint:gosec // decompression limits remain a follow-up for source acquisition
+	_, copyErr := io.Copy(out, rc)
+	_ = rc.Close()
+	closeErr := out.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
 }
 
 func extractTarGz(src, dst string) error {
@@ -476,7 +513,26 @@ func extractTarXz(src, dst string) error {
 	return extractTar(xzReader, dst)
 }
 
-//nolint:gocognit,gosec // tar extraction with safety checks is inherently complex; zip slip checked above
+func archiveExtractionPath(dst, name string) (target string, isRoot bool, err error) {
+	if name == "" || strings.ContainsAny(name, "\\:\x00") {
+		return "", false, fmt.Errorf("unsafe archive path")
+	}
+	for _, r := range name {
+		if r < ' ' || r == 0x7f {
+			return "", false, fmt.Errorf("unsafe archive path")
+		}
+	}
+	cleaned := pathpkg.Clean(name)
+	if pathpkg.IsAbs(cleaned) || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return "", false, fmt.Errorf("archive path escapes destination")
+	}
+	if cleaned == "." {
+		return filepath.Clean(dst), true, nil
+	}
+	return filepath.Join(dst, filepath.FromSlash(cleaned)), false, nil
+}
+
+//nolint:gocognit,gosec // tar extraction with safety checks is inherently complex
 func extractTar(r io.Reader, dst string) error {
 	tr := tar.NewReader(r)
 	for {
@@ -488,12 +544,15 @@ func extractTar(r io.Reader, dst string) error {
 			return fmt.Errorf("failed to read tar entry: %w", err)
 		}
 
-		//nolint:gosec // G305: path traversal prevention checked below
-		targetPath := filepath.Join(dst, header.Name)
-
-		// Prevent path traversal
-		if !strings.HasPrefix(filepath.Clean(targetPath), filepath.Clean(dst)+string(os.PathSeparator)) {
+		targetPath, isRoot, pathErr := archiveExtractionPath(dst, header.Name)
+		if pathErr != nil {
 			return fmt.Errorf("illegal file path in tar: %s", header.Name)
+		}
+		if isRoot && header.Typeflag == tar.TypeDir {
+			continue
+		}
+		if isRoot {
+			return fmt.Errorf("illegal root file entry in tar: %s", header.Name)
 		}
 
 		switch header.Typeflag {
@@ -509,7 +568,7 @@ func extractTar(r io.Reader, dst string) error {
 			if createErr != nil {
 				return createErr
 			}
-			//nolint:gosec // decompression bomb: archive sources are trusted
+			//nolint:gosec // decompression limits remain a follow-up for source acquisition
 			if _, cpErr := io.Copy(out, tr); cpErr != nil {
 				//nolint:errcheck,gosec // best effort on error path
 				out.Close()
@@ -518,6 +577,8 @@ func extractTar(r io.Reader, dst string) error {
 			if err := out.Close(); err != nil {
 				return err
 			}
+		default:
+			return fmt.Errorf("unsupported tar entry type %d at %s", header.Typeflag, header.Name)
 		}
 	}
 	return nil

@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 )
 
 // downloadRequest represents a pending package download.
@@ -49,6 +51,7 @@ type ProgressEvent struct {
 
 // Resolver orchestrates the BFS module resolution algorithm.
 type Resolver struct {
+	progressMu  sync.Mutex       // serializes callbacks from parallel package downloads
 	Progress    ProgressCallback // 16 bytes (data ptr + type ptr)
 	fetcher     *Fetcher         // 8 bytes (ptr)
 	httpClient  *http.Client     // injected HTTP client for registry API calls (review item 5)
@@ -128,6 +131,8 @@ func (r *Resolver) registryClient() *http.Client {
 
 // report safely calls the progress callback if configured.
 func (r *Resolver) report(event *ProgressEvent) {
+	r.progressMu.Lock()
+	defer r.progressMu.Unlock()
 	if r.Progress != nil {
 		r.Progress(event)
 	}
@@ -172,26 +177,26 @@ func (r *Resolver) downloadPackagesParallel(ctx context.Context, requests []down
 			r.report(&ProgressEvent{
 				Type:       "downloading",
 				ModuleKey:  request.uniqueID,
-				ModuleName: request.packageAddr,
-				Source:     request.packageAddr,
+				ModuleName: RedactSourceAddress(request.packageAddr),
+				Source:     RedactSourceAddress(request.packageAddr),
 			})
 
 			if err := r.fetcher.Fetch(ctx, request.localPath, request.packageAddr); err != nil {
-				fetchErrors[idx] = fmt.Errorf("failed to fetch %s: %w", request.packageAddr, err)
+				fetchErrors[idx] = fmt.Errorf("failed to fetch %s: %w", RedactSourceAddress(request.packageAddr), err)
 				return
 			}
 
 			r.report(&ProgressEvent{
 				Type:       "downloaded",
 				ModuleKey:  request.uniqueID,
-				ModuleName: request.packageAddr,
-				Source:     request.packageAddr,
+				ModuleName: RedactSourceAddress(request.packageAddr),
+				Source:     RedactSourceAddress(request.packageAddr),
 			})
 
 			// Compute content hash for content-based deduplication
 			contentHash, err := HashModule(request.localPath)
 			if err != nil {
-				fetchErrors[idx] = fmt.Errorf("failed to hash %s: %w", request.packageAddr, err)
+				fetchErrors[idx] = fmt.Errorf("failed to hash %s: %w", RedactSourceAddress(request.packageAddr), err)
 				return
 			}
 
@@ -243,6 +248,23 @@ func (r *Resolver) ResolveTree(ctx context.Context, subjectDir string) (*Resolve
 	return r.resolve(ctx, subjectDir, true)
 }
 
+// validateNewModule enforces graph limits before a node is admitted. The
+// currentCount is the number of real module nodes already in AllModules (the
+// synthetic tree container is intentionally excluded).
+func (r *Resolver) validateNewModule(node *ModuleNode, currentCount int) error {
+	key := node.Key
+	if key == "" {
+		key = "root"
+	}
+	if r.MaxDepth > 0 && node.Depth() > r.MaxDepth {
+		return fmt.Errorf("maximum depth %d exceeded at module %s", r.MaxDepth, key)
+	}
+	if r.MaxModules > 0 && currentCount >= r.MaxModules {
+		return fmt.Errorf("module limit %d exceeded at module %s", r.MaxModules, key)
+	}
+	return nil
+}
+
 // resolve is the shared BFS body behind Resolve (single-entry, `module`) and
 // ResolveTree (multi-entry, `tree`). multiEntry selects the seed strategy:
 // false seeds the single root node (the entry module, scanned for .tf); true
@@ -268,6 +290,9 @@ func (r *Resolver) resolve(ctx context.Context, rootDir string, multiEntry bool)
 	vendorDirName := r.VendorDir
 	if vendorDirName == "" {
 		vendorDirName = defaultVendorDir
+	}
+	if err := ValidateVendorDir(vendorDirName); err != nil {
+		return nil, err
 	}
 	sourcetreeDir := filepath.Join(rootDir, vendorDirName)
 	tree.VendorDir = vendorDirName
@@ -310,11 +335,18 @@ func (r *Resolver) resolve(ctx context.Context, rootDir string, multiEntry bool)
 	// shared package boundary (ADR-0002). Local ../ refs between entries resolve
 	// verbatim because the layout is staged as-is; the BFS dedups a module
 	// referenced by several entries via visitedPaths (shared module scanned once).
+	rootVisitPath, err := canonicalBoundaryPath(rootDir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve root module path: %w", err)
+	}
 	var queue []queueItem
 	if !multiEntry {
+		if err := r.validateNewModule(tree.Root, len(tree.AllModules)); err != nil {
+			return nil, err
+		}
 		queue = []queueItem{{node: tree.Root, dir: rootDir}}
 		tree.AllModules = append(tree.AllModules, tree.Root)
-		visitedPaths[rootDir] = true
+		visitedPaths[rootVisitPath] = true
 	} else {
 		entries := discoverSubjectAnchors(rootDir, vendorDirName)
 		if len(entries) == 0 {
@@ -342,10 +374,17 @@ func (r *Resolver) resolve(ctx context.Context, rootDir string, multiEntry bool)
 				Parent:      tree.Root,
 				IsLocal:     true,
 			}
+			if err := r.validateNewModule(entry, len(tree.AllModules)); err != nil {
+				return nil, err
+			}
 			tree.Root.Children = append(tree.Root.Children, entry)
 			queue = append(queue, queueItem{node: entry, dir: entryDir})
 			tree.AllModules = append(tree.AllModules, entry)
-			visitedPaths[entryDir] = true
+			entryVisitPath, pathErr := canonicalBoundaryPath(entryDir)
+			if pathErr != nil {
+				return nil, fmt.Errorf("failed to resolve tree entry path: %w", pathErr)
+			}
+			visitedPaths[entryVisitPath] = true
 		}
 	}
 
@@ -384,27 +423,35 @@ func (r *Resolver) resolve(ctx context.Context, rootDir string, multiEntry bool)
 				return nil, fmt.Errorf("failed to find terraform files in %s: %w", r.displayPath(item.dir), err)
 			}
 
-			// Extract module blocks from all .tf files
+			// Module labels are scoped to the whole module, not an individual
+			// configuration file. Track declarations across all .tf/.tofu files.
+			seenModuleDeclarations := make(map[string]string)
+
+			// Extract module blocks from all .tf files. Library callers can pass a
+			// workspace that has not gone through CLI acquisition, so enforce the
+			// package boundary before following a configuration-file symlink.
 			for _, tfFile := range tfFiles {
+				if item.node.PackageRoot != "" {
+					if boundaryErr := ensureWithinPackage(item.node.PackageRoot, tfFile); boundaryErr != nil {
+						return nil, fmt.Errorf("terraform configuration %s escapes package boundary: %w", r.displayPath(tfFile), boundaryErr)
+					}
+				}
 				modules, err := ExtractModuleBlocks(tfFile)
 				if err != nil {
 					return nil, fmt.Errorf("failed to extract module blocks from %s: %w", r.displayPath(tfFile), err)
 				}
 
-				// Detect duplicate module names within the same file.
-				// Terraform/OpenTofu rejects these, so we should too.
-				seenNames := make(map[string]bool, len(modules))
-				for _, mod := range modules {
-					if seenNames[mod.Name] {
-						return nil, fmt.Errorf(
-							"duplicate module %q in %s: each module block must have a unique name within the same file",
-							mod.Name, r.displayPath(tfFile))
-					}
-					seenNames[mod.Name] = true
-				}
-
 				// Process each module
 				for _, mod := range modules {
+					if !hclsyntax.ValidIdentifier(mod.Name) {
+						return nil, fmt.Errorf("module label %q in %s is not a valid Terraform identifier", mod.Name, r.displayPath(tfFile))
+					}
+					if previousFile, exists := seenModuleDeclarations[mod.Name]; exists {
+						return nil, fmt.Errorf(
+							"duplicate module %q in module directory %s: declared in both %s and %s",
+							mod.Name, r.displayPath(item.dir), previousFile, r.displayPath(tfFile))
+					}
+					seenModuleDeclarations[mod.Name] = r.displayPath(tfFile)
 					// Check for dynamic (variable) source — warn and skip
 					if mod.DynamicSource {
 						r.report(&ProgressEvent{
@@ -422,8 +469,13 @@ func (r *Resolver) resolve(ctx context.Context, rootDir string, multiEntry bool)
 							mod.Name, r.displayPath(tfFile))
 					}
 
-					// Classify the source
+					// Classify the source. Unknown must be a distinct state from local:
+					// treating an unrecognized address as a filesystem path produces a
+					// misleading missing-directory error and can bypass source validation.
 					source := ClassifySource(mod.Source, item.dir)
+					if source.Type == SourceUnknown {
+						return nil, fmt.Errorf("module %q in %s has unsupported module source %q", mod.Name, r.displayPath(tfFile), RedactSourceAddress(mod.Source))
+					}
 
 					// Create child node
 					childKey := MakeKey(item.node.Key, mod.Name)
@@ -435,11 +487,17 @@ func (r *Resolver) resolve(ctx context.Context, rootDir string, multiEntry bool)
 						Children: []*ModuleNode{},
 					}
 
-					// Handle based on source type
-					//nolint:gocritic // if-else chain has substantial logic per branch
+					// Handle based on source type. Validate graph limits before any
+					// registry lookup or remote download is scheduled.
 					if source.Type == SourceAbsolute {
-						return nil, fmt.Errorf("module %s uses absolute module source %q; absolute module source paths are not portable in self-contained artifacts", mod.Name, source.Raw)
-					} else if source.Type == SourceLocal {
+						return nil, fmt.Errorf("module %s uses absolute module source %q; absolute module source paths are not portable in self-contained artifacts", mod.Name, RedactSourceAddress(source.Raw))
+					}
+					if err := r.validateNewModule(child, len(tree.AllModules)); err != nil {
+						return nil, err
+					}
+
+					//nolint:gocritic // if-else chain has substantial logic per branch
+					if source.Type == SourceLocal {
 						// Local module: resolve package root and active module directory
 						packageAddr := source.PackageAddr
 						if packageAddr == "" {
@@ -457,42 +515,30 @@ func (r *Resolver) resolve(ctx context.Context, rootDir string, multiEntry bool)
 						child.IsLocal = true
 						child.IsRemote = false
 
-						// Cycle detection: check if child's install dir matches any ancestor.
-						// MUST run BEFORE boundary check for accurate error messages.
+						installVisitPath, pathErr := canonicalBoundaryPath(installDir)
+						if pathErr != nil {
+							return nil, fmt.Errorf("failed to resolve local module %s: %w", mod.Name, pathErr)
+						}
+
+						// Cycle detection uses canonical paths so a symlink alias cannot
+						// disguise a reference back to an ancestor.
 						for ancestor := item.node; ancestor != nil; ancestor = ancestor.Parent {
-							if ancestor.InstallDir == installDir {
-								return nil, fmt.Errorf("circular dependency detected: module %q references ancestor module %q", child.Key, ancestor.Key)
+							ancestorPath, ancestorErr := canonicalBoundaryPath(ancestor.InstallDir)
+							if ancestorErr != nil {
+								return nil, fmt.Errorf("failed to resolve ancestor module path: %w", ancestorErr)
+							}
+							if ancestorPath == installVisitPath {
+								ancestorKey := ancestor.Key
+								if ancestorKey == "" {
+									ancestorKey = "root"
+								}
+								return nil, fmt.Errorf("circular dependency detected: module %q references ancestor module %q", child.Key, ancestorKey)
 							}
 						}
 
-						// Deduplication: skip if already visited (shared module, not a cycle).
-						// MUST run BEFORE boundary check to avoid false boundary errors on shared modules.
-						if visitedPaths[installDir] {
-							// Add child to parent and tree but don't process again
-							item.node.Children = append(item.node.Children, child)
-							tree.AllModules = append(tree.AllModules, child)
-							continue
-						}
-						visitedPaths[installDir] = true
-
-						// Check depth limit
-						if r.MaxDepth > 0 && child.Depth() > r.MaxDepth {
-							return nil, fmt.Errorf("maximum depth %d exceeded at module %s", r.MaxDepth, child.Key)
-						}
-
-						// Check module count limit
-						if r.MaxModules > 0 && len(tree.AllModules) >= r.MaxModules {
-							return nil, fmt.Errorf("module limit %d exceeded at module %s", r.MaxModules, child.Key)
-						}
-
-						// Cycle detection by module key
-						if visitedModules[child.Key] {
-							return nil, fmt.Errorf("circular dependency detected: module %q appears multiple times in the dependency tree", child.Key)
-						}
-						visitedModules[child.Key] = true
-
-						// Boundary check: ensure module stays within the package root.
-						// MUST run AFTER cycle detection to avoid false boundary errors.
+						// Enforce the canonical boundary before cross-branch deduplication;
+						// otherwise an escaping symlink that aliases an already-seen path
+						// could bypass the check.
 						if item.node.PackageRoot != "" {
 							boundaryTarget := packageRoot
 							if source.SubDir == "" {
@@ -500,13 +546,11 @@ func (r *Resolver) resolve(ctx context.Context, rootDir string, multiEntry bool)
 							}
 							if err := ensureWithinPackage(item.node.PackageRoot, boundaryTarget); err != nil {
 								errMsg := fmt.Sprintf(
-									"module %s at %s escapes package boundary: source %s resolves to %s, which is outside package root %s",
-									mod.Name, r.displayPath(item.dir), source.Raw, r.displayPath(boundaryTarget), r.displayPath(item.node.PackageRoot))
-								if source.Type == SourceLocal {
-									errMsg += "\n\nHint: Use // to set the package boundary. " +
-										"For example, run from the repository root and use \".//live/myapp\" " +
-										"instead of \"./live/myapp\" to include parent directories."
-								}
+									"module %s at %s escapes package boundary: source %s resolves to %s, which is outside package root %s after symlink evaluation",
+									mod.Name, r.displayPath(item.dir), RedactSourceAddress(source.Raw), r.displayPath(boundaryTarget), r.displayPath(item.node.PackageRoot))
+								errMsg += "\n\nHint: Use // to set the package boundary. " +
+									"For example, run from the repository root and use \".//live/myapp\" " +
+									"instead of \"./live/myapp\" to include parent directories."
 								return nil, fmt.Errorf("%s", errMsg)
 							}
 							if source.SubDir == "" {
@@ -514,7 +558,19 @@ func (r *Resolver) resolve(ctx context.Context, rootDir string, multiEntry bool)
 							}
 						}
 
-						// Add to queue for processing
+						// A shared module reached through two in-bound aliases is scanned once.
+						if visitedPaths[installVisitPath] {
+							item.node.Children = append(item.node.Children, child)
+							tree.AllModules = append(tree.AllModules, child)
+							continue
+						}
+						visitedPaths[installVisitPath] = true
+
+						if visitedModules[child.Key] {
+							return nil, fmt.Errorf("circular dependency detected: module %q appears multiple times in the dependency tree", child.Key)
+						}
+						visitedModules[child.Key] = true
+
 						queue = append(queue, queueItem{node: child, dir: installDir})
 					} else if source.Type == SourceRegistry {
 						// Registry module: query Terraform Registry API to get download URL
@@ -616,8 +672,7 @@ func (r *Resolver) resolve(ctx context.Context, rootDir string, multiEntry bool)
 				return nil, err
 			}
 
-			// Process download results, collecting limit violations
-			var errs []error
+			// Process download results.
 			for _, result := range results {
 				infos := downloadInfoMap[result.request.packageAddr]
 				if len(infos) == 0 {
@@ -637,10 +692,10 @@ func (r *Resolver) resolve(ctx context.Context, rootDir string, multiEntry bool)
 						r.report(&ProgressEvent{
 							Type:       "warning",
 							ModuleKey:  result.request.uniqueID,
-							ModuleName: result.request.packageAddr,
+							ModuleName: RedactSourceAddress(result.request.packageAddr),
 							Source: fmt.Sprintf(
-								"failed to remove duplicate download %s: %v",
-								localPath, removeErr,
+								"failed to remove duplicate download %s; temporary cleanup failed",
+								r.displayPath(localPath),
 							),
 						})
 					}
@@ -684,18 +739,6 @@ func (r *Resolver) resolve(ctx context.Context, rootDir string, multiEntry bool)
 						return nil, fmt.Errorf("failed to rewrite source for module %s: %w", info.modName, rewriteErr)
 					}
 
-					// Check depth limit
-					if r.MaxDepth > 0 && info.child.Depth() > r.MaxDepth {
-						errs = append(errs, fmt.Errorf("maximum depth %d exceeded at module %s", r.MaxDepth, info.child.Key))
-						continue
-					}
-
-					// Check module count limit
-					if r.MaxModules > 0 && len(tree.AllModules) >= r.MaxModules {
-						errs = append(errs, fmt.Errorf("module limit %d exceeded at module %s", r.MaxModules, info.child.Key))
-						continue
-					}
-
 					// Cycle detection by module key
 					if visitedModules[info.child.Key] {
 						return nil, fmt.Errorf("cycle detected: module %q appears multiple times in the dependency tree", info.child.Key)
@@ -705,11 +748,6 @@ func (r *Resolver) resolve(ctx context.Context, rootDir string, multiEntry bool)
 					// Add to queue for processing
 					queue = append(queue, queueItem{node: info.child, dir: installDir})
 				}
-			}
-
-			// Report all limit violations from this batch
-			if len(errs) > 0 {
-				return nil, fmt.Errorf("resolution limits exceeded: %w", errors.Join(errs...))
 			}
 		}
 	}
@@ -799,20 +837,61 @@ func resolveModuleInstallDir(packageRoot, subDir string) (string, error) {
 	return installDir, nil
 }
 
-// ensureWithinPackage verifies that target is within the package root boundary.
+// ensureWithinPackage verifies the canonical target against the canonical
+// package root. Lexical checks alone let an in-bound symlink redirect resolver
+// scanning and source rewriting into the caller's surrounding filesystem.
 func ensureWithinPackage(packageRoot, target string) error {
 	if packageRoot == "" {
 		return nil
 	}
 
-	relPath, err := filepath.Rel(packageRoot, target)
+	canonicalRoot, err := canonicalBoundaryPath(packageRoot)
+	if err != nil {
+		return fmt.Errorf("failed to resolve package root: %w", err)
+	}
+	canonicalTarget, err := canonicalBoundaryPath(target)
+	if err != nil {
+		return fmt.Errorf("failed to resolve package target: %w", err)
+	}
+	relPath, err := filepath.Rel(canonicalRoot, canonicalTarget)
 	if err != nil {
 		return fmt.Errorf("failed to check package boundary: %w", err)
 	}
-	if relPath == ".." || strings.HasPrefix(relPath, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("path %s escapes package root %s", target, packageRoot)
+	if relativePathEscapesRoot(relPath) {
+		return fmt.Errorf("path escapes package root")
 	}
 	return nil
+}
+
+// canonicalBoundaryPath resolves every existing path component. If the leaf
+// does not exist yet, it resolves the nearest existing ancestor and appends the
+// missing suffix, which still catches a symlinked parent without turning a
+// normal missing-module error into a boundary-check failure.
+func canonicalBoundaryPath(input string) (string, error) {
+	absolute, err := filepath.Abs(input)
+	if err != nil {
+		return "", err
+	}
+	current := filepath.Clean(absolute)
+	var suffix []string
+	for {
+		resolved, evalErr := filepath.EvalSymlinks(current)
+		if evalErr == nil {
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return filepath.Clean(resolved), nil
+		}
+		if !os.IsNotExist(evalErr) {
+			return "", evalErr
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return "", evalErr
+		}
+		suffix = append(suffix, filepath.Base(current))
+		current = parent
+	}
 }
 
 // moduleSourcePath builds a local source string from a package-relative path and an
@@ -954,7 +1033,7 @@ type registryAPIError struct {
 }
 
 func (e *registryAPIError) Error() string {
-	return fmt.Sprintf("registry API returned status %d for %s: %s", e.StatusCode, e.URL, e.Body)
+	return fmt.Sprintf("registry API returned status %d for %s: %q", e.StatusCode, RedactSourceAddress(e.URL), e.Body)
 }
 
 // isTransientError returns true for errors that should be retried.

@@ -53,6 +53,76 @@ func TestClassifySource_Local(t *testing.T) {
 	}
 }
 
+func TestRedactSourceAddress(t *testing.T) {
+	raw := "git::https://alice:" + "password123@example.com/repo.git//modules/vpc?ref=v1.2.0&token=secret-token"
+	redacted := RedactSourceAddress(raw)
+
+	assert.NotContains(t, redacted, "alice")
+	assert.NotContains(t, redacted, "password123")
+	assert.NotContains(t, redacted, "secret-token")
+	assert.Contains(t, redacted, "example.com/repo.git//modules/vpc")
+	assert.Contains(t, redacted, "ref=v1.2.0")
+	assert.Contains(t, redacted, "token=REDACTED")
+}
+
+func TestRedactSourceAddressSignedURL(t *testing.T) {
+	raw := "https://storage.example.com/module.zip?X-Amz-Credential=credential&X-Amz-Signature=signature&version=1"
+	redacted := RedactSourceAddress(raw)
+
+	assert.NotContains(t, redacted, "credential")
+	assert.NotContains(t, redacted, "signature")
+	assert.Contains(t, redacted, "version=1")
+}
+
+func TestRedactSourceAddressFailsClosedForMalformedURL(t *testing.T) {
+	raw := "git::https://alice:bad%zz-password@example.com/repo.git?token=secret-token"
+	redacted := RedactSourceAddress(raw)
+
+	assert.NotContains(t, redacted, "alice")
+	assert.NotContains(t, redacted, "bad%zz-password")
+	assert.NotContains(t, redacted, "secret-token")
+	assert.Contains(t, redacted, "example.com/repo.git?REDACTED")
+}
+
+func TestRedactSourceAddressEscapesTerminalControls(t *testing.T) {
+	raw := "registry/" + string(rune(0x1b)) + "[31m/name\n"
+
+	redacted := RedactSourceAddress(raw)
+
+	assert.NotContains(t, redacted, string(rune(0x1b)))
+	assert.NotContains(t, redacted, "\n")
+	assert.Contains(t, redacted, `\x1b`)
+	assert.Contains(t, redacted, `\n`)
+}
+
+func TestRedactSourceSecretsInTextEscapesNestedTerminalControls(t *testing.T) {
+	text := "downloader failed\n" + string(rune(0x1b)) + "[31mfatal"
+
+	redacted := redactSourceSecretsInText(text, "https://example.com/module.zip")
+
+	assert.NotContains(t, redacted, "\n")
+	assert.NotContains(t, redacted, string(rune(0x1b)))
+	assert.Contains(t, redacted, `\n`)
+	assert.Contains(t, redacted, `\x1b`)
+}
+
+func TestRedactSourceSecretsInTextRemovesStandalonePassword(t *testing.T) {
+	raw := "https://alice:" + "hunter2@example.com/repo.git?ref=v1"
+	text := "authentication failed: supplied password hunter2 was rejected"
+
+	redacted := redactSourceSecretsInText(text, raw)
+
+	assert.NotContains(t, redacted, "hunter2")
+	assert.Contains(t, redacted, "password REDACTED")
+}
+
+func TestClassifySource_UnknownIsNotLocal(t *testing.T) {
+	source := ClassifySource("not-a-valid-module-source", "")
+
+	assert.Equal(t, SourceUnknown, source.Type)
+	assert.False(t, source.Type.IsRemote())
+}
+
 func TestClassifySource_LocalWithSubdir(t *testing.T) {
 	got := ClassifySource("./package//modules/moduleA", "/root")
 
@@ -315,6 +385,18 @@ func TestClassifySource_OCI(t *testing.T) {
 				Ref:         "v1.0",
 			},
 		},
+		{
+			name: "oci with subdir and tag",
+			raw:  "oci://registry.example.com/modules/my-module//examples/basic?tag=v1.0",
+			pwd:  "",
+			want: ModuleSource{
+				Raw:         "oci://registry.example.com/modules/my-module//examples/basic?tag=v1.0",
+				Type:        SourceOCI,
+				PackageAddr: "oci://registry.example.com/modules/my-module?tag=v1.0",
+				SubDir:      "examples/basic",
+				Ref:         "v1.0",
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -381,6 +463,12 @@ func TestSplitPackageSubdir(t *testing.T) {
 			input:   "git::https://github.com/user/repo.git//modules/vpc/submodules/public?ref=v1.0",
 			wantPkg: "git::https://github.com/user/repo.git?ref=v1.0",
 			wantSub: "modules/vpc/submodules/public",
+		},
+		{
+			name:    "query before subdir",
+			input:   "git::https://github.com/user/repo.git?ref=v1.0//modules/vpc",
+			wantPkg: "git::https://github.com/user/repo.git?ref=v1.0",
+			wantSub: "modules/vpc",
 		},
 	}
 
@@ -467,6 +555,7 @@ func TestSourceType_String(t *testing.T) {
 		sourceType SourceType
 		want       string
 	}{
+		{SourceUnknown, "unknown"},
 		{SourceLocal, "local"},
 		{SourceAbsolute, "absolute"},
 		{SourceGit, "git"},
@@ -533,6 +622,18 @@ func TestClassifySource_HostShorthand(t *testing.T) {
 				Type:        SourceGit,
 				PackageAddr: "git::https://github.com/user/repo.git",
 				SubDir:      "modules/vpc",
+			},
+		},
+		{
+			name: "github shorthand with subdir and ref",
+			raw:  "github.com/user/repo//modules/vpc?ref=v1.0",
+			pwd:  "",
+			want: ModuleSource{
+				Raw:         "github.com/user/repo//modules/vpc?ref=v1.0",
+				Type:        SourceGit,
+				PackageAddr: "git::https://github.com/user/repo.git?ref=v1.0",
+				SubDir:      "modules/vpc",
+				Ref:         "v1.0",
 			},
 		},
 	}

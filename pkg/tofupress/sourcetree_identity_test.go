@@ -300,4 +300,12 @@ func TestNamespacedPackageID(t *testing.T) {
 		namespacedPackageID("oci://registry.example.com/repo?tag=v1", hash))
 	assert.Equal(t, "pkg-"+hash,
 		namespacedPackageID("s3::https://bucket/module.zip", hash))
+
+	// Untrusted provenance must never become a traversing vendor path.
+	assert.Equal(t, "pkg-"+hash,
+		namespacedPackageID("git::https://example.com/../escape.git?ref=v1", hash))
+	assert.Equal(t, "pkg-"+hash,
+		namespacedPackageID("git::https://example.com/%2e%2e/escape.git?ref=v1", hash))
+	assert.Equal(t, "pkg-"+hash,
+		namespacedPackageID("../escape/aws", hash))
 }

@@ -17,6 +17,39 @@ import (
 	"github.com/blang/tofupress/pkg/tofupress"
 )
 
+func TestRunModuleRejectsUnsafeVendorDirBeforeFetchingSource(t *testing.T) {
+	cmd := newTestModuleCommand(t, "")
+	require.NoError(t, cmd.Flags().Set("vendor-dir", "../escape"))
+
+	err := runPressModule(cmd, []string{"/does/not/exist", filepath.Join(t.TempDir(), "out.zip")})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "vendor directory")
+	assert.NotContains(t, err.Error(), "fetch source")
+}
+
+func TestRunModuleValidatesFormatBeforeSourceAcquisition(t *testing.T) {
+	cmd := newTestModuleCommand(t, "")
+	require.NoError(t, cmd.Flags().Set("format", "auto"))
+
+	err := runPressModule(cmd, []string{"/does/not/exist", filepath.Join(t.TempDir(), "out.unknown")})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "could not infer bundle format")
+	assert.NotContains(t, err.Error(), "fetch source")
+}
+
+func TestNewPressResolverUsesCommandErrorWriter(t *testing.T) {
+	cmd := newTestModuleCommand(t, "")
+	var stderr bytes.Buffer
+	cmd.SetErr(&stderr)
+	resolver := newPressResolver(cmd, t.TempDir(), t.TempDir())
+
+	resolver.Progress(&tofupress.ProgressEvent{Type: "downloading", ModuleName: "dependency", Source: "https://example.com/mod"})
+
+	assert.Contains(t, stderr.String(), "Downloading: dependency")
+}
+
 func TestRunModuleErrorsOnUnknownExtensionWhenFormatAuto(t *testing.T) {
 	tmpDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "main.tf"), []byte(`output "name" { value = "root" }`), 0o644)) // a .tf so the no-.tf refusal (ADR-0002) is bypassed and we reach the format check
@@ -159,6 +192,7 @@ func newTestModuleCommand(t *testing.T, metadataPath string) *cobra.Command {
 	cmd := &cobra.Command{}
 	cmd.Flags().String("format", "zip", "")
 	cmd.Flags().Bool("oci-compliant", false, "")
+	cmd.Flags().Bool("strict-oci", true, "")
 	cmd.Flags().Bool("json", false, "")
 	cmd.Flags().String("metadata-out", metadataPath, "")
 	cmd.Flags().String("strip", string(tofupress.StripModeOptimistic), "")
@@ -260,6 +294,23 @@ func TestInstallSignalCleanupRunsOnStop(t *testing.T) {
 // TestRunModuleRefusesNoTfSubject pins ADR-0002: `tofupress module` refuses a
 // subject with no .tf/.tofu files instead of warn-and-degenerate into an empty
 // archive (the former `bundle` behaviour). A modules-only repo is `tofupress tree`.
+func TestRunModuleRefusesFilesystemReadThatEscapesPivotedEntry(t *testing.T) {
+	packageDir := t.TempDir()
+	appDir := filepath.Join(packageDir, "modules", "app")
+	require.NoError(t, os.MkdirAll(appDir, 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(packageDir, "shared"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(packageDir, "shared", "template.tftpl"), []byte("hello"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(appDir, "main.tf"), []byte(`locals { rendered = templatefile("../../shared/template.tftpl", {}) }`), 0o644))
+
+	artifact := filepath.Join(t.TempDir(), "module.zip")
+	err := runPressModule(newTestModuleCommand(t, ""), []string{packageDir + "//modules/app", artifact})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot preserve")
+	assert.Contains(t, err.Error(), "tofupress tree")
+	assert.NoFileExists(t, artifact)
+}
+
 func TestRunModuleRefusesNoTfSubject(t *testing.T) {
 	tmpDir := t.TempDir() // intentionally no .tf/.tofu files
 	cmd := newTestModuleCommand(t, "")

@@ -40,8 +40,10 @@ func runMetadata(cmd *cobra.Command, args []string) error {
 
 // runMetadataOCI pulls an OCI artifact and reads its embedded metadata.
 func runMetadataOCI(cmd *cobra.Command, sourceURL string) error {
-	// Use resolveSource to pull the artifact from the OCI registry
-	workDir, _, cleanup, err := resolveSource(cmd.Context(), sourceURL)
+	// Pull through an owned fetcher so warnings follow Cobra's configured
+	// error writer rather than bypassing the command on global stderr.
+	fetcher := tofupress.NewFetcher(tofupress.WithWarningWriter(cmd.ErrOrStderr()))
+	workDir, _, cleanup, err := resolveSourceWithFetcher(cmd.Context(), sourceURL, fetcher)
 	if err != nil {
 		return fmt.Errorf("failed to pull OCI artifact: %w", err)
 	}

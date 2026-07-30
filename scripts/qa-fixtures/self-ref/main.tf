@@ -1,3 +1,3 @@
 module "self" {
-  source = "."
+  source = "./."
 }

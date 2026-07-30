@@ -3,6 +3,7 @@ package tofupress
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -79,6 +80,63 @@ func TestBuildArtifactMetadataFromResolvedTree(t *testing.T) {
 	assert.Equal(t, int64(0), metadata.Stats.StrippedBytes)
 }
 
+func TestBuildArtifactMetadataRedactsCredentialsAndEphemeralPaths(t *testing.T) {
+	rootDir := t.TempDir()
+	packageDir := t.TempDir()
+	writeTerraformFile(t, rootDir, "main.tf", `output "x" { value = true }`)
+	writeTerraformFile(t, packageDir, "main.tf", `output "remote" { value = true }`)
+	secretSource := "git::https://alice:" + "password123@example.com/repo.git?ref=v1&token=secret-token"
+
+	root := &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}
+	remote := &ModuleNode{
+		Key:         "remote",
+		Name:        "remote",
+		Parent:      root,
+		InstallDir:  packageDir,
+		PackageRoot: packageDir,
+		IsRemote:    true,
+		Source:      ModuleSource{Raw: secretSource, PackageAddr: secretSource, Type: SourceGit},
+	}
+	root.Children = []*ModuleNode{remote}
+	tree := &ResolvedTree{
+		Root:       root,
+		AllModules: []*ModuleNode{root, remote},
+		Packages: map[string]*DownloadedPackage{
+			"pkg": {PackageAddr: secretSource, LocalDir: packageDir, PackageAddrs: []string{secretSource}},
+		},
+	}
+	sourceFile := filepath.Join(rootDir, "main.tf")
+	stripPlan := &StripPlan{
+		FilesystemFunctions: []FilesystemFunctionRef{{
+			Function:      "file",
+			SourceFile:    sourceFile,
+			SourceRange:   sourceFile + ":1,1-10",
+			ResolvedBase:  rootDir,
+			IncludedPaths: []string{sourceFile},
+		}},
+		Warnings: []StripWarning{{Message: "package " + secretSource + " may omit files"}},
+	}
+
+	metadata, err := BuildArtifactMetadata(tree, &MetadataRequest{
+		Build:      BuildInfo{Version: "test"},
+		Command:    "module",
+		Args:       []string{secretSource, "bundle.zip"},
+		Options:    BundleOptions{Format: "zip", StripMode: string(StripModeOptimistic)},
+		OutputPath: "bundle.zip",
+		StripPlan:  stripPlan,
+	})
+	require.NoError(t, err)
+
+	encoded, err := json.Marshal(metadata)
+	require.NoError(t, err)
+	assert.NotContains(t, string(encoded), "password123")
+	assert.NotContains(t, string(encoded), "secret-token")
+	assert.NotContains(t, string(encoded), rootDir)
+	assert.NotContains(t, string(encoded), packageDir)
+	assert.Contains(t, string(encoded), "example.com")
+	assert.Equal(t, sourceFile, stripPlan.FilesystemFunctions[0].SourceFile, "metadata sanitization must not mutate the strip plan")
+}
+
 func TestBuildArtifactMetadataIncludesStripPlanStatsAndFilesystemFunctions(t *testing.T) {
 	rootDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(rootDir, "main.tf"), []byte(`locals { rendered = file("templates/userdata.tftpl") }`), 0o644))
@@ -134,6 +192,7 @@ func TestRelPathNoLeak(t *testing.T) {
 		// Path under rootDir — should return relative path
 		{"under root", "/tmp/abc/package/main.tf", "/tmp/abc/package", "main.tf"},
 		{"nested under root", "/tmp/abc/package/sub/file.tf", "/tmp/abc/package", "sub/file.tf"},
+		{"two-dot name under root", "/tmp/abc/package/..cache/file.tf", "/tmp/abc/package", "..cache/file.tf"},
 		// Path outside rootDir — must NOT leak the absolute temp path
 		// Remote packages are in different temp dirs, so rel starts with ".."
 		{"outside root (different temp dir)", "/tmp/xyz/download/module", "/tmp/abc/package", "module"},

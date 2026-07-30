@@ -52,6 +52,29 @@ func TestParseStripModeRejectsUnknown(t *testing.T) {
 	assert.Contains(t, err.Error(), "config-only")
 }
 
+func TestStripPlanStatsCountOverlappingPackageFilesOnce(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, root, "root.txt", "root")
+	writeFile(t, root, "nested/keep.tf", "keep")
+	writeFile(t, root, "nested/drop.bin", "drop")
+
+	outer := newPackageStripPlan(root)
+	outer.IncludeAll = true
+	innerRoot := filepath.Join(root, "nested")
+	inner := newPackageStripPlan(innerRoot)
+	inner.includeFile(filepath.Join(innerRoot, "keep.tf"))
+	plan := &StripPlan{Packages: map[string]*PackageStripPlan{root: outer, innerRoot: inner}}
+
+	require.NoError(t, plan.computeStats())
+
+	assert.Equal(t, int64(len("root")+len("keep")+len("drop")), plan.OriginalBytes)
+	assert.Equal(t, int64(len("root")+len("keep")), plan.FinalBytes)
+	assert.Equal(t, int64(len("drop")), plan.StrippedBytes)
+	assert.Equal(t, 1, plan.StrippedFiles)
+	assert.Equal(t, int64(len("root")), outer.OriginalBytes)
+	assert.Equal(t, int64(len("keep")+len("drop")), inner.OriginalBytes)
+}
+
 func TestPlanStrippingNoneIncludesPackageContent(t *testing.T) {
 	rootDir := t.TempDir()
 	writeFile(t, rootDir, "main.tf", `output "name" { value = "root" }`)
@@ -69,6 +92,26 @@ func TestPlanStrippingNoneIncludesPackageContent(t *testing.T) {
 	assert.False(t, plan.IncludePath(filepath.Join(rootDir, ".terraform", "modules", "ignored", "main.tf"), false))
 	assert.Equal(t, StripModeFull, plan.Mode)
 	assert.Zero(t, plan.StrippedBytes)
+}
+
+func TestPlanStrippingKeepsResolvedModuleWhoseNameStartsWithTwoDots(t *testing.T) {
+	rootDir := t.TempDir()
+	moduleDir := filepath.Join(rootDir, "..generated")
+	configPath := filepath.Join(moduleDir, "main.tf")
+	writeFile(t, rootDir, "main.tf", `module "generated" { source = "./..generated" }`)
+	writeFile(t, rootDir, "..generated/main.tf", `output "kept" { value = true }`)
+	root := &ModuleNode{Name: "root", InstallDir: rootDir, PackageRoot: rootDir, IsLocal: true}
+	child := &ModuleNode{Key: "generated", Name: "generated", InstallDir: moduleDir, PackageRoot: rootDir, IsLocal: true, Parent: root}
+	root.Children = []*ModuleNode{child}
+	tree := &ResolvedTree{Root: root, AllModules: []*ModuleNode{root, child}, Packages: map[string]*DownloadedPackage{}}
+
+	for _, mode := range []StripMode{StripModeOptimistic, StripModeAggressive} {
+		t.Run(string(mode), func(t *testing.T) {
+			plan, err := PlanStripping(context.Background(), tree, mode)
+			require.NoError(t, err)
+			assert.True(t, plan.IncludePath(configPath, false), "an in-package '..name' is not parent traversal")
+		})
+	}
 }
 
 func TestPlanStrippingModuleDirIncludesOnlyResolvedModuleDirsAndStaticReads(t *testing.T) {
@@ -269,7 +312,7 @@ module "hello-world-lambda" {
 		// The risk signal surfaces in metadata filesystem functions.
 		var foundPathModule bool
 		for _, ref := range plan.FilesystemFunctions {
-			if ref.Function == "path.module" && ref.Handling == handlingDynamicFallback {
+			if ref.Function == pathModuleFunction && ref.Handling == handlingDynamicFallback {
 				foundPathModule = true
 				break
 			}

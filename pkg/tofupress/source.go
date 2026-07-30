@@ -4,7 +4,9 @@ import (
 	"net/url"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"unicode"
 )
 
 // ClassifySource classifies a module source string into a typed ModuleSource.
@@ -120,12 +122,14 @@ func parseGCSSource(raw string) ModuleSource {
 
 // parseOCISource parses an oci:// source.
 func parseOCISource(raw string) ModuleSource {
-	ref := extractRef(raw)
+	pkgAddr, subDir := SplitPackageSubdir(raw)
+	ref := extractRef(pkgAddr)
 
 	return ModuleSource{
 		Raw:         raw,
 		Type:        SourceOCI,
-		PackageAddr: raw,
+		PackageAddr: pkgAddr,
+		SubDir:      subDir,
 		Ref:         ref,
 	}
 }
@@ -172,36 +176,61 @@ func parseRegistrySource(raw string) ModuleSource {
 //	-> package: git::https://github.com/user/repo.git?ref=v1
 //	-> subdir: modules/vpc
 func SplitPackageSubdir(src string) (packageAddr, subDir string) {
-	// Find ? to know where query params start
-	stop := len(src)
-	if idx := strings.Index(src, "?"); idx > -1 {
-		stop = idx
-	}
-
-	// Find // but not in ://
-	offset := 0
-	if idx := strings.Index(src[:stop], "://"); idx > -1 {
-		offset = idx + 3
-	}
-
-	// Split at //
-	idx := strings.Index(src[offset:stop], "//")
+	idx := packageSubdirMarker(src)
 	if idx == -1 {
 		return src, ""
 	}
 
-	idx += offset
-	subdir := src[idx+2:]
-	src = src[:idx]
+	subDir = src[idx+2:]
+	packageAddr = src[:idx]
 
-	// Reattach query params to package address
-	if idx = strings.Index(subdir, "?"); idx > -1 {
-		query := subdir[idx:]
-		subdir = subdir[:idx]
-		src += query
+	// Canonical Terraform addresses put //subdir before the query. Reattach
+	// that query to the package address. We also accept query-before-subdir
+	// input for compatibility; in that form packageAddr already has the query.
+	if queryAt := strings.Index(subDir, "?"); queryAt > -1 {
+		packageAddr += subDir[queryAt:]
+		subDir = subDir[:queryAt]
 	}
 
-	return src, path.Clean(subdir)
+	return packageAddr, path.Clean(subDir)
+}
+
+// packageSubdirMarker returns the // that separates a package address from its
+// subdirectory. It ignores the // in URL schemes. Canonical Terraform syntax
+// places the marker before the query string; query-before-subdir is accepted as
+// a compatibility form because older host-shorthand normalization emitted it.
+func packageSubdirMarker(src string) int {
+	queryAt := strings.Index(src, "?")
+	canonicalEnd := len(src)
+	if queryAt >= 0 {
+		canonicalEnd = queryAt
+	}
+
+	offset := 0
+	if schemeAt := strings.Index(src[:canonicalEnd], "://"); schemeAt >= 0 {
+		offset = schemeAt + 3
+	}
+	if markerAt := strings.Index(src[offset:canonicalEnd], "//"); markerAt >= 0 {
+		return offset + markerAt
+	}
+
+	// Compatibility form: <package>?ref=...//<subdir>. Use the final
+	// non-scheme marker so a nested URL query value's :// is not mistaken for
+	// the separator. Canonical syntax remains unambiguous and preferred.
+	if queryAt >= 0 {
+		for searchEnd := len(src); searchEnd > queryAt+1; {
+			rel := strings.LastIndex(src[queryAt+1:searchEnd], "//")
+			if rel < 0 {
+				break
+			}
+			markerAt := queryAt + 1 + rel
+			if markerAt == 0 || src[markerAt-1] != ':' {
+				return markerAt
+			}
+			searchEnd = markerAt
+		}
+	}
+	return -1
 }
 
 // IsAbsoluteSource returns true if the source is an absolute filesystem path.
@@ -247,13 +276,11 @@ func hostShorthandToGit(raw string) string {
 		query = pkgAddr[idx:]
 	}
 
-	gitURL := "git::https://" + base + ".git" + query
-
+	gitURL := "git::https://" + base + ".git"
 	if subDir != "" {
 		gitURL += "//" + subDir
 	}
-
-	return gitURL
+	return gitURL + query
 }
 
 // isRegistrySource returns true if the source looks like a registry module.
@@ -277,6 +304,171 @@ func isRegistrySource(raw string) bool {
 	// Split by / and check for exactly 3 parts
 	parts := strings.Split(raw, "/")
 	return len(parts) == 3
+}
+
+// RedactSourceAddress removes URL user information and sensitive query values
+// while preserving enough provenance (getter, host, repository, ref, and
+// subdirectory) to identify the dependency. It is intended for logs and
+// artifact metadata, never for fetching.
+func RedactSourceAddress(raw string) string {
+	return escapeSourceDisplayControls(redactSourceAddress(raw))
+}
+
+func redactSourceAddress(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	packageAddr, subDir := SplitPackageSubdir(raw)
+
+	getterPrefix := ""
+	address := packageAddr
+	if marker := strings.Index(address, "::"); marker > 0 && !strings.ContainsAny(address[:marker], `/\\`) {
+		getterPrefix = address[:marker+2]
+		address = address[marker+2:]
+	}
+
+	parsed, err := url.Parse(address)
+	if err != nil {
+		redacted := getterPrefix + redactUnparseableURL(address)
+		if subDir == "" {
+			return redacted
+		}
+		if queryAt := strings.Index(redacted, "?"); queryAt >= 0 {
+			return redacted[:queryAt] + "//" + subDir + redacted[queryAt:]
+		}
+		return redacted + "//" + subDir
+	}
+	parsed.User = nil
+	query := parsed.Query()
+	for key := range query {
+		if isSensitiveQueryKey(key) {
+			query.Set(key, "REDACTED")
+		}
+	}
+	parsed.RawQuery = query.Encode()
+	redacted := getterPrefix + parsed.String()
+
+	if subDir == "" {
+		return redacted
+	}
+	// Emit the canonical Terraform ordering even if the input used the older
+	// query-before-subdir compatibility form.
+	if queryAt := strings.Index(redacted, "?"); queryAt >= 0 {
+		return redacted[:queryAt] + "//" + subDir + redacted[queryAt:]
+	}
+	return redacted + "//" + subDir
+}
+
+func redactUnparseableURL(address string) string {
+	if schemeAt := strings.Index(address, "://"); schemeAt >= 0 {
+		authorityStart := schemeAt + 3
+		authorityEnd := len(address)
+		if separatorAt := strings.IndexAny(address[authorityStart:], "/?#"); separatorAt >= 0 {
+			authorityEnd = authorityStart + separatorAt
+		}
+		authority := address[authorityStart:authorityEnd]
+		if userAt := strings.LastIndex(authority, "@"); userAt >= 0 {
+			address = address[:authorityStart] + authority[userAt+1:] + address[authorityEnd:]
+		}
+	}
+	if queryAt := strings.Index(address, "?"); queryAt >= 0 {
+		fragment := ""
+		if fragmentAt := strings.Index(address[queryAt:], "#"); fragmentAt >= 0 {
+			fragment = address[queryAt+fragmentAt:]
+		}
+		address = address[:queryAt] + "?REDACTED" + fragment
+	}
+	return address
+}
+
+func escapeSourceDisplayControls(value string) string {
+	if !strings.ContainsFunc(value, unicode.IsControl) {
+		return value
+	}
+	var escaped strings.Builder
+	for _, r := range value {
+		if unicode.IsControl(r) {
+			quoted := strconv.QuoteRune(r)
+			escaped.WriteString(strings.Trim(quoted, "'"))
+			continue
+		}
+		escaped.WriteRune(r)
+	}
+	return escaped.String()
+}
+
+func redactSourceSecretsInText(text, raw string) string {
+	packageAddr, _ := SplitPackageSubdir(raw)
+	for _, address := range sourceAddressVariants(raw, packageAddr) {
+		if address != "" {
+			text = strings.ReplaceAll(text, address, RedactSourceAddress(address))
+		}
+	}
+
+	parsed, err := url.Parse(withoutGetterPrefix(packageAddr))
+	if err != nil {
+		return escapeSourceDisplayControls(text)
+	}
+	text = redactSourceUserInfo(text, parsed.User)
+	return escapeSourceDisplayControls(redactSourceQueryValues(text, parsed.Query()))
+}
+
+func sourceAddressVariants(raw, packageAddr string) []string {
+	return []string{raw, packageAddr, withoutGetterPrefix(raw), withoutGetterPrefix(packageAddr)}
+}
+
+func withoutGetterPrefix(address string) string {
+	if marker := strings.Index(address, "::"); marker > 0 && !strings.ContainsAny(address[:marker], `/\\`) {
+		return address[marker+2:]
+	}
+	return address
+}
+
+func redactSourceUserInfo(text string, user *url.Userinfo) string {
+	if user == nil {
+		return text
+	}
+	if password, ok := user.Password(); ok && password != "" {
+		text = strings.ReplaceAll(text, password, "REDACTED")
+	}
+	username := user.Username()
+	for _, userInfo := range []string{user.String(), username, username + ":redacted", username + ":REDACTED"} {
+		if userInfo != "" {
+			text = strings.ReplaceAll(text, userInfo+"@", "")
+		}
+	}
+	return text
+}
+
+func redactSourceQueryValues(text string, query url.Values) string {
+	for key, values := range query {
+		if !isSensitiveQueryKey(key) {
+			continue
+		}
+		for _, value := range values {
+			if value == "" {
+				continue
+			}
+			text = strings.ReplaceAll(text, key+"="+value, key+"=REDACTED")
+			text = strings.ReplaceAll(text, url.QueryEscape(key)+"="+url.QueryEscape(value), url.QueryEscape(key)+"=REDACTED")
+		}
+	}
+	return text
+}
+
+func isSensitiveQueryKey(key string) bool {
+	normalized := strings.ToLower(key)
+	normalized = strings.NewReplacer("-", "", "_", "", ".", "").Replace(normalized)
+	switch normalized {
+	case "sig", "key", "code":
+		return true
+	}
+	for _, marker := range []string{"token", "password", "passwd", "secret", "credential", "signature", "apikey", "privatekey", "authorization"} {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // extractRef extracts the ref/version/tag from a source string's query parameters.

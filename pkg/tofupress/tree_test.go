@@ -35,6 +35,16 @@ func TestModuleSource_Git(t *testing.T) {
 	assert.Equal(t, "v1.0", src.Ref)
 }
 
+func TestModuleSource_StringRedactsCredentials(t *testing.T) {
+	source := ModuleSource{PackageAddr: "git::https://user:" + "secret@example.com/repo.git?token=signed"} //nolint:gosec // synthetic credential verifies redaction
+
+	text := source.String()
+
+	assert.Contains(t, text, "example.com/repo.git")
+	assert.NotContains(t, text, "secret")
+	assert.NotContains(t, text, "signed")
+}
+
 func TestModuleSource_Registry(t *testing.T) {
 	src := ModuleSource{
 		Raw:  "hashicorp/consul/aws",

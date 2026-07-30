@@ -37,7 +37,7 @@ type ModuleBlock struct {
 
 // String returns a string representation of the module block.
 func (m ModuleBlock) String() string {
-	return fmt.Sprintf("ModuleBlock{Name: %q, Source: %q}", m.Name, m.Source)
+	return fmt.Sprintf("ModuleBlock{Name: %q, Source: %q}", m.Name, RedactSourceAddress(m.Source))
 }
 
 // FindTerraformFiles finds Terraform/OpenTofu configuration files in the given directory.

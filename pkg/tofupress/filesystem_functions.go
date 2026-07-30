@@ -24,6 +24,8 @@ const handlingStaticInclude = "static-include"
 const (
 	refKindFilesystemFunction = "filesystem-function"
 	refKindPathTemplateRisk   = "path-template-risk"
+	pathModuleFunction        = "path.module"
+	pathRootFunction          = "path.root"
 )
 
 var terraformFilesystemFunctions = map[string]struct{}{
@@ -208,9 +210,9 @@ func buildPathModuleRef(tmpl *hclsyntax.TemplateExpr, module *ModuleNode, filePa
 		var function string
 		switch {
 		case isPathScopeTraversal(ste.Traversal, "module"):
-			function = "path.module"
+			function = pathModuleFunction
 		case isPathScopeTraversal(ste.Traversal, "root"):
-			function = "path.root"
+			function = pathRootFunction
 		default:
 			continue
 		}
@@ -316,12 +318,12 @@ func buildFilesystemRef(call *hclsyntax.FunctionCallExpr, module *ModuleNode, fi
 	}
 
 	rawSource := expressionSourceText(call.Args[0], fileData)
+	ref.RawPath = rawSource
 	evaluated, ok := staticString(call.Args[0], ctx)
 	if !ok {
 		return ref
 	}
 	ref.Static = true
-	ref.RawPath = rawSource
 	ref.ResolvedBase = resolveTerraformPath(evaluated, ctx.ModuleDir)
 	ref.Handling = handlingStaticInclude
 

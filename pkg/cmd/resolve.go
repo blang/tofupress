@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -22,17 +23,27 @@ var resolveCmd = &cobra.Command{
 
 func init() {
 	resolveCmd.Flags().Bool("json", false, "Output in JSON format")
+	resolveCmd.Flags().Bool("strict-oci", true, "Require OCI sources to satisfy the Terraform module package contract")
 	resolveCmd.Flags().String("vendor-dir", "_vendor", "Vendored modules directory name (remote dependencies are rooted here during resolution)")
-	resolveCmd.Flags().String("out", "", "Write the resolution as JSON to this path (for CI inspection/archival; review item 8). Note: bundle --from-resolution is not yet supported -- it requires the content cache, which lands in a follow-up.")
+	resolveCmd.Flags().String("out", "", "Write the resolution as JSON to this path for CI inspection (pressing from a saved resolution is not yet supported)")
 }
 
 //nolint:gocognit,gocyclo // JSON + plan-file branching is straightforward CLI wiring (item 8 pushed gocyclo to 16)
 func runResolve(cmd *cobra.Command, args []string) error {
 	dir := args[0]
 	stdout := cmd.OutOrStdout()
+	if err := validateVendorDirFlag(cmd); err != nil {
+		return err
+	}
 
-	// Resolve source (local or remote) to a working directory
-	workDir, packageRoot, cleanup, err := resolveSource(cmd.Context(), dir)
+	strictOCI, _ := cmd.Flags().GetBool("strict-oci")
+	fetcher := tofupress.NewFetcher(
+		tofupress.WithStrictOCI(strictOCI),
+		tofupress.WithWarningWriter(cmd.ErrOrStderr()),
+	)
+
+	// Resolve the root through the same fetcher policy used for dependencies.
+	workDir, packageRoot, cleanup, err := resolveSourceWithFetcher(cmd.Context(), dir, fetcher)
 	if err != nil {
 		return err
 	}
@@ -40,8 +51,6 @@ func runResolve(cmd *cobra.Command, args []string) error {
 	stopSig := installSignalCleanup(cleanup)
 	defer stopSig()
 
-	strictOCI, _ := cmd.Flags().GetBool("strict-oci")
-	fetcher := tofupress.NewFetcher(tofupress.WithStrictOCI(strictOCI))
 	resolver := tofupress.NewResolver(tofupress.WithFetcher(fetcher))
 	resolver.PackageRoot = packageRoot // Set package boundary for local path enforcement
 	resolver.RootDir = workDir         // Set root dir for user-friendly error message paths
@@ -77,7 +86,7 @@ func runResolve(cmd *cobra.Command, args []string) error {
 
 	// --out: write the resolution JSON to a file for CI inspection/archival
 	// (review item 8 minimal landing). The plan file is informational; a future
-	// content-addressed cache will enable bundle --from-resolution to consume it.
+	// content-addressed cache could let a future press consume it.
 	outPath, _ := cmd.Flags().GetString("out")
 	if outPath != "" {
 		f, ferr := os.Create(outPath) //nolint:gosec // path is provided by user
@@ -134,7 +143,7 @@ func outputJSON(stdout io.Writer, tree *tofupress.ResolvedTree) error {
 		modules = append(modules, jsonModule{
 			Key:        mod.Key,
 			Name:       mod.Name,
-			Source:     mod.Source.PackageAddr,
+			Source:     tofupress.RedactSourceAddress(mod.Source.PackageAddr),
 			SourceType: mod.Source.Type.String(),
 			IsLocal:    mod.IsLocal,
 			IsRemote:   mod.IsRemote,
@@ -143,10 +152,16 @@ func outputJSON(stdout io.Writer, tree *tofupress.ResolvedTree) error {
 		})
 	}
 
-	packages := make([]jsonPackage, 0, len(tree.Packages))
-	for _, pkg := range tree.Packages {
+	packageIDs := make([]string, 0, len(tree.Packages))
+	for id := range tree.Packages {
+		packageIDs = append(packageIDs, id)
+	}
+	sort.Strings(packageIDs)
+	packages := make([]jsonPackage, 0, len(packageIDs))
+	for _, id := range packageIDs {
+		pkg := tree.Packages[id]
 		packages = append(packages, jsonPackage{
-			PackageAddr: pkg.PackageAddr,
+			PackageAddr: tofupress.RedactSourceAddress(pkg.PackageAddr),
 			LocalDir:    tofupress.FormatInstallDir(pkg.LocalDir, rootDir),
 		})
 	}
@@ -193,7 +208,7 @@ func printModuleTree(w io.Writer, node *tofupress.ModuleNode, depth int) {
 
 	fmt.Fprintf(w, "%s- %s (%s)\n", indent.String(), node.Name, moduleType) //nolint:errcheck // writer writes are best-effort
 	if node.Source.PackageAddr != "" {
-		fmt.Fprintf(w, "%s  Source: %s\n", indent.String(), node.Source.PackageAddr) //nolint:errcheck // writer writes are best-effort
+		fmt.Fprintf(w, "%s  Source: %s\n", indent.String(), tofupress.RedactSourceAddress(node.Source.PackageAddr)) //nolint:errcheck // writer writes are best-effort
 	}
 
 	// Print children

@@ -22,12 +22,16 @@ func ReadMetadataFromDir(dir string) (*ArtifactMetadata, error) {
 		return nil, fmt.Errorf("directory path is empty")
 	}
 	relocated := filepath.Join(dir, MetadataDir, MetadataFileName)
-	if data, err := os.ReadFile(relocated); err == nil { //nolint:gosec // path is constructed from user input
+	data, relocatedErr := os.ReadFile(relocated) //nolint:gosec // path is constructed from user input
+	if relocatedErr == nil {
 		var metadata ArtifactMetadata
 		if err := json.Unmarshal(data, &metadata); err != nil {
 			return nil, fmt.Errorf("invalid metadata in %s: %w", relocated, err)
 		}
 		return &metadata, nil
+	}
+	if !os.IsNotExist(relocatedErr) {
+		return nil, fmt.Errorf("failed to read metadata in %s: %w", relocated, relocatedErr)
 	}
 	metaPath := filepath.Join(dir, MetadataFileName)
 	data, err := os.ReadFile(metaPath) //nolint:gosec // path is constructed from user input

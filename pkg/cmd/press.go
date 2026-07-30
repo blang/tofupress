@@ -20,9 +20,23 @@ import (
 // package root (so ../ from the entry resolves inside the package); `tree` uses
 // the subject itself (the layout preserved as-is, boundary = subject). This is
 // the ADR-0002 seam: two thin adapters over one shared pressing pipeline.
-func newPressResolver(cmd *cobra.Command, packageRoot, workDir string) *tofupress.Resolver {
+func newCommandFetcher(cmd *cobra.Command) *tofupress.Fetcher {
 	strictOCI, _ := cmd.Flags().GetBool("strict-oci")
-	fetcher := tofupress.NewFetcher(tofupress.WithStrictOCI(strictOCI))
+	return tofupress.NewFetcher(
+		tofupress.WithStrictOCI(strictOCI),
+		tofupress.WithWarningWriter(cmd.ErrOrStderr()),
+	)
+}
+
+func newPressResolver(cmd *cobra.Command, packageRoot, workDir string) *tofupress.Resolver {
+	return newPressResolverWithFetcher(cmd, newCommandFetcher(cmd), packageRoot, workDir)
+}
+
+func newPressResolverWithFetcher(
+	cmd *cobra.Command,
+	fetcher *tofupress.Fetcher,
+	packageRoot, workDir string,
+) *tofupress.Resolver {
 	resolver := tofupress.NewResolver(tofupress.WithFetcher(fetcher))
 	resolver.PackageRoot = packageRoot // package boundary for local-path enforcement
 	resolver.RootDir = workDir         // root dir for user-friendly error message paths
@@ -30,22 +44,70 @@ func newPressResolver(cmd *cobra.Command, packageRoot, workDir string) *tofupres
 	if vendorDir != "" {
 		resolver.VendorDir = vendorDir
 	}
+	stderr := cmd.ErrOrStderr()
 	resolver.Progress = func(event *tofupress.ProgressEvent) {
 		if event == nil {
 			return
 		}
 		switch event.Type {
 		case "resolving":
-			fmt.Fprintf(os.Stderr, "  Resolving module: %s\n", event.ModuleName) //nolint:errcheck // stderr writes are best-effort
+			fmt.Fprintf(stderr, "  Resolving module: %s\n", event.ModuleName) //nolint:errcheck // stderr writes are best-effort
 		case "downloading":
-			fmt.Fprintf(os.Stderr, "  ⬇ Downloading: %s from %s\n", event.ModuleName, event.Source) //nolint:errcheck // stderr writes are best-effort
+			fmt.Fprintf(stderr, "  ⬇ Downloading: %s from %s\n", event.ModuleName, event.Source) //nolint:errcheck // stderr writes are best-effort
 		case "downloaded":
-			fmt.Fprintf(os.Stderr, "  ✓ Downloaded: %s\n", event.ModuleName) //nolint:errcheck // stderr writes are best-effort
+			fmt.Fprintf(stderr, "  ✓ Downloaded: %s\n", event.ModuleName) //nolint:errcheck // stderr writes are best-effort
 		case "warning":
-			fmt.Fprintf(os.Stderr, "  ⚠ Warning: %s\n", event.Source) //nolint:errcheck // stderr writes are best-effort
+			fmt.Fprintf(stderr, "  ⚠ Warning: %s\n", event.Source) //nolint:errcheck // stderr writes are best-effort
 		}
 	}
 	return resolver
+}
+
+func validatePressFlags(cmd *cobra.Command, outputPath string) error {
+	format, err := resolvePressFormat(cmd, outputPath)
+	if err != nil {
+		return err
+	}
+	ociCompliant, _ := cmd.Flags().GetBool("oci-compliant")
+	if ociCompliant && format != tofupress.BundleFormatZIP {
+		return fmt.Errorf("--oci-compliant requires zip format (got %s)", format)
+	}
+	stripInput, _ := cmd.Flags().GetString("strip")
+	if _, err := tofupress.ParseStripMode(stripInput); err != nil {
+		return err
+	}
+	return validateVendorDirFlag(cmd)
+}
+
+func resolvePressFormat(cmd *cobra.Command, outputPath string) (tofupress.BundleFormat, error) {
+	formatInput, _ := cmd.Flags().GetString("format")
+	format, err := tofupress.ParseBundleFormat(formatInput)
+	if err != nil {
+		return "", err
+	}
+	if format != tofupress.BundleFormatAuto {
+		return format, nil
+	}
+	detected, ok := tofupress.DetectFormatFromPath(outputPath)
+	if ok {
+		return detected, nil
+	}
+	hint := ""
+	if strings.HasSuffix(outputPath, "/") || strings.HasSuffix(outputPath, string(filepath.Separator)) {
+		hint = " (the output path looks like a directory; tofupress writes an archive file, not a directory -- pass a file path ending in .zip/.tar.gz/.tar.xz)"
+	}
+	return "", fmt.Errorf("could not infer bundle format from output path %q; pass --format=zip, --format=tar.gz, or --format=tar.xz%s", outputPath, hint)
+}
+
+func validateVendorDirFlag(cmd *cobra.Command) error {
+	if cmd.Flags().Lookup("vendor-dir") == nil {
+		return nil
+	}
+	vendorDir, err := cmd.Flags().GetString("vendor-dir")
+	if err != nil {
+		return fmt.Errorf("read --vendor-dir: %w", err)
+	}
+	return tofupress.ValidateVendorDir(vendorDir)
 }
 
 // resolveFunc is the shared signature of Resolver.Resolve and Resolver.ResolveTree.
@@ -81,24 +143,11 @@ func runPress(cmd *cobra.Command, source, outputPath, workDir string, resolveFn 
 		fmt.Fprintf(stdout, "Creating bundle at %s...\n", outputPath)                                       //nolint:errcheck // stdout writes are best-effort
 	}
 
-	// Create bundle
-	formatStr, _ := cmd.Flags().GetString("format")
-	format, err := tofupress.ParseBundleFormat(formatStr)
+	// Create bundle. Adapters already run this validation before source
+	// acquisition; resolve it again here to keep runPress safe as a direct seam.
+	format, err := resolvePressFormat(cmd, outputPath)
 	if err != nil {
 		return err
-	}
-
-	// Auto-detect format from output file extension if not explicitly set
-	if format == tofupress.BundleFormatAuto {
-		detected, ok := tofupress.DetectFormatFromPath(outputPath)
-		if !ok {
-			hint := ""
-			if strings.HasSuffix(outputPath, "/") || strings.HasSuffix(outputPath, string(filepath.Separator)) {
-				hint = " (the output path looks like a directory; tofupress writes an archive file, not a directory -- pass a file path ending in .zip/.tar.gz/.tar.xz)"
-			}
-			return fmt.Errorf("could not infer bundle format from output path %q; pass --format=zip, --format=tar.gz, or --format=tar.xz%s", outputPath, hint)
-		}
-		format = detected
 	}
 
 	bundler := tofupress.NewBundler(format)

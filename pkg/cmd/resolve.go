@@ -1,0 +1,218 @@
+package cmd
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"sort"
+	"strings"
+
+	"github.com/spf13/cobra"
+
+	"github.com/blang/tofupress/pkg/tofupress"
+)
+
+var resolveCmd = &cobra.Command{
+	Use:   "resolve <directory>",
+	Short: "Resolve all modules in a Terraform/OpenTofu configuration",
+	Long:  `Scans the given directory for Terraform/OpenTofu files and resolves all module dependencies.`,
+	Args:  cobra.ExactArgs(1),
+	RunE:  runResolve,
+}
+
+func init() {
+	resolveCmd.Flags().Bool("json", false, "Output in JSON format")
+	resolveCmd.Flags().Bool("strict-oci", true, "Require OCI sources to satisfy the Terraform module package contract")
+	resolveCmd.Flags().String("vendor-dir", "_vendor", "Vendored modules directory name (remote dependencies are rooted here during resolution)")
+	resolveCmd.Flags().String("out", "", "Write the resolution as JSON to this path for CI inspection (pressing from a saved resolution is not yet supported)")
+}
+
+//nolint:gocognit,gocyclo // JSON + plan-file branching is straightforward CLI wiring (item 8 pushed gocyclo to 16)
+func runResolve(cmd *cobra.Command, args []string) error {
+	dir := args[0]
+	stdout := cmd.OutOrStdout()
+	if err := validateVendorDirFlag(cmd); err != nil {
+		return err
+	}
+
+	strictOCI, _ := cmd.Flags().GetBool("strict-oci")
+	fetcher := tofupress.NewFetcher(
+		tofupress.WithStrictOCI(strictOCI),
+		tofupress.WithWarningWriter(cmd.ErrOrStderr()),
+	)
+
+	// Resolve the root through the same fetcher policy used for dependencies.
+	workDir, packageRoot, cleanup, err := resolveSourceWithFetcher(cmd.Context(), dir, fetcher)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	stopSig := installSignalCleanup(cleanup)
+	defer stopSig()
+
+	resolver := tofupress.NewResolver(tofupress.WithFetcher(fetcher))
+	resolver.PackageRoot = packageRoot // Set package boundary for local path enforcement
+	resolver.RootDir = workDir         // Set root dir for user-friendly error message paths
+	vendorDir, _ := cmd.Flags().GetString("vendor-dir")
+	if vendorDir != "" {
+		resolver.VendorDir = vendorDir
+	}
+	resolver.Progress = func(event *tofupress.ProgressEvent) {
+		if event == nil {
+			return
+		}
+		switch event.Type {
+		case "resolving":
+			fmt.Fprintf(cmd.ErrOrStderr(), "  Resolving module: %s\n", event.ModuleName) //nolint:errcheck // stderr writes are best-effort
+		case "downloading":
+			fmt.Fprintf(cmd.ErrOrStderr(), "  ⬇ Downloading: %s from %s\n", event.ModuleName, event.Source) //nolint:errcheck // stderr writes are best-effort
+		case "downloaded":
+			fmt.Fprintf(cmd.ErrOrStderr(), "  ✓ Downloaded: %s\n", event.ModuleName) //nolint:errcheck // stderr writes are best-effort
+		case "warning":
+			fmt.Fprintf(cmd.ErrOrStderr(), "  ⚠ Warning: %s\n", event.Source) //nolint:errcheck // stderr writes are best-effort
+		}
+	}
+	tree, err := resolver.Resolve(cmd.Context(), workDir)
+	if err != nil {
+		return fmt.Errorf("failed to resolve modules: %w", err)
+	}
+
+	// Check for empty root module (no .tf/.tofu files)
+	tfFiles, err := tofupress.FindTerraformFiles(workDir)
+	if err == nil && len(tfFiles) == 0 {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: root module contains no .tf or .tofu files\n") //nolint:errcheck // stderr writes are best-effort
+	}
+
+	// --out: write the resolution JSON to a file for CI inspection/archival
+	// (review item 8 minimal landing). The plan file is informational; a future
+	// content-addressed cache could let a future press consume it.
+	outPath, _ := cmd.Flags().GetString("out")
+	if outPath != "" {
+		f, ferr := os.Create(outPath) //nolint:gosec // path is provided by user
+		if ferr != nil {
+			return fmt.Errorf("failed to create plan file %s: %w", outPath, ferr)
+		}
+		if err := outputJSON(f, tree); err != nil {
+			_ = f.Close()
+			return fmt.Errorf("failed to write plan file %s: %w", outPath, err)
+		}
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("failed to close plan file %s: %w", outPath, err)
+		}
+		fmt.Fprintf(cmd.ErrOrStderr(), "Resolution plan written to %s\n", outPath) //nolint:errcheck // stderr best-effort
+	}
+
+	// Check if JSON output requested
+	jsonOutput, _ := cmd.Flags().GetBool("json")
+
+	if jsonOutput {
+		return outputJSON(stdout, tree)
+	}
+
+	return outputText(stdout, tree)
+}
+
+//nolint:gocognit // JSON marshaling with cycle detection is complex but clear
+func outputJSON(stdout io.Writer, tree *tofupress.ResolvedTree) error {
+	// Output as JSON - use a cycle-safe representation with paths made relative
+	// to avoid leaking ephemeral temp directory paths.
+	type jsonModule struct {
+		Key        string   `json:"key"`
+		Name       string   `json:"name"`
+		Source     string   `json:"source"`
+		SourceType string   `json:"source_type"`
+		InstallDir string   `json:"install_dir,omitempty"`
+		Children   []string `json:"children"`
+		IsLocal    bool     `json:"is_local"`
+		IsRemote   bool     `json:"is_remote"`
+	}
+
+	type jsonPackage struct {
+		PackageAddr string `json:"package_addr"`
+		LocalDir    string `json:"local_dir,omitempty"`
+	}
+
+	rootDir := tree.Root.InstallDir
+	modules := make([]jsonModule, 0, len(tree.AllModules))
+	for _, mod := range tree.AllModules {
+		childNames := make([]string, 0, len(mod.Children))
+		for _, child := range mod.Children {
+			childNames = append(childNames, child.Key)
+		}
+		modules = append(modules, jsonModule{
+			Key:        mod.Key,
+			Name:       mod.Name,
+			Source:     tofupress.RedactSourceAddress(mod.Source.PackageAddr),
+			SourceType: mod.Source.Type.String(),
+			IsLocal:    mod.IsLocal,
+			IsRemote:   mod.IsRemote,
+			InstallDir: tofupress.FormatInstallDir(mod.InstallDir, rootDir),
+			Children:   childNames,
+		})
+	}
+
+	packageIDs := make([]string, 0, len(tree.Packages))
+	for id := range tree.Packages {
+		packageIDs = append(packageIDs, id)
+	}
+	sort.Strings(packageIDs)
+	packages := make([]jsonPackage, 0, len(packageIDs))
+	for _, id := range packageIDs {
+		pkg := tree.Packages[id]
+		packages = append(packages, jsonPackage{
+			PackageAddr: tofupress.RedactSourceAddress(pkg.PackageAddr),
+			LocalDir:    tofupress.FormatInstallDir(pkg.LocalDir, rootDir),
+		})
+	}
+
+	output := map[string]any{
+		tofupress.SourceDisplayRoot: tree.Root.Key,
+		"modules":                   modules,
+		"packages":                  packages,
+	}
+	encoder := json.NewEncoder(stdout)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(output)
+}
+
+//nolint:unparam // error return is part of the output function interface
+func outputText(stdout io.Writer, tree *tofupress.ResolvedTree) error {
+	// Output as human-readable text
+	fmt.Fprintln(stdout, "Module tree:") //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintln(stdout, "============") //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintln(stdout)                 //nolint:errcheck // stdout writes are best-effort
+
+	// Print tree structure
+	printModuleTree(stdout, tree.Root, 0)
+
+	fmt.Fprintln(stdout)                                                   //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Total modules: %d\n", len(tree.AllModules))       //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Total packages: %d\n", len(tree.Packages))        //nolint:errcheck // stdout writes are best-effort
+	fmt.Fprintf(stdout, "Vendor dir: %s\n", tofupress.VendorDirName(tree)) //nolint:errcheck // stdout writes are best-effort
+
+	return nil
+}
+
+func printModuleTree(w io.Writer, node *tofupress.ModuleNode, depth int) {
+	var indent strings.Builder
+	for range depth {
+		indent.WriteString("  ")
+	}
+
+	// Print module name and source
+	moduleType := tofupress.SourceDisplayLocal
+	if node.IsRemote {
+		moduleType = "remote"
+	}
+
+	fmt.Fprintf(w, "%s- %s (%s)\n", indent.String(), node.Name, moduleType) //nolint:errcheck // writer writes are best-effort
+	if node.Source.PackageAddr != "" {
+		fmt.Fprintf(w, "%s  Source: %s\n", indent.String(), tofupress.RedactSourceAddress(node.Source.PackageAddr)) //nolint:errcheck // writer writes are best-effort
+	}
+
+	// Print children
+	for _, child := range node.Children {
+		printModuleTree(w, child, depth+1)
+	}
+}

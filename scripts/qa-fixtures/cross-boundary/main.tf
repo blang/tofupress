@@ -1,0 +1,3 @@
+module "escape" {
+  source = "../outside"
+}

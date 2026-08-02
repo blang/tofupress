@@ -1,0 +1,311 @@
+//nolint:gosec // test files use standard permissions and safe paths
+package tofupress
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// writeTestFile creates a file at the given path, creating parent directories if needed.
+func writeTestFile(t *testing.T, path, content string) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+}
+
+func TestSourcetreeIDFromHash(t *testing.T) {
+	id, err := SourcetreeIDFromHash("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+	require.NoError(t, err)
+	assert.Equal(t, "pkg-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", id)
+}
+
+func TestSourcetreeIDFromHashRejectsInvalidHash(t *testing.T) {
+	_, err := SourcetreeIDFromHash("not-hex")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid package hash")
+}
+
+func TestBuildSourcetreeIdentityPlanDeduplicatesDifferentSourcesWithSameFinalContent(t *testing.T) {
+	root := t.TempDir()
+	pkgA := filepath.Join(root, "modules", "old-a")
+	pkgB := filepath.Join(root, "modules", "old-b")
+	require.NoError(t, os.MkdirAll(pkgA, 0o755))
+	require.NoError(t, os.MkdirAll(pkgB, 0o755))
+	writeTerraformFile(t, pkgA, "main.tf", `output "id" { value = "same" }`)
+	writeTerraformFile(t, pkgB, "main.tf", `output "id" { value = "same" }`)
+	writeTestFile(t, filepath.Join(pkgA, "README.md"), "different docs a")
+	writeTestFile(t, filepath.Join(pkgB, "README.md"), "different docs b")
+
+	tree := &ResolvedTree{
+		Root: &ModuleNode{Key: "root", Name: "root", InstallDir: root, PackageRoot: root},
+		Packages: map[string]*DownloadedPackage{
+			"old-a": {PackageAddr: "git::file:///repo-a", LocalDir: pkgA, ContentHash: "download-a"},
+			"old-b": {PackageAddr: "git::file:///repo-b", LocalDir: pkgB, ContentHash: "download-b"},
+		},
+		AllModules: []*ModuleNode{
+			{Key: "root.a", Name: "a", PackageRoot: pkgA, InstallDir: pkgA, Source: ModuleSource{PackageAddr: "git::file:///repo-a"}, IsRemote: true},
+			{Key: "root.b", Name: "b", PackageRoot: pkgB, InstallDir: pkgB, Source: ModuleSource{PackageAddr: "git::file:///repo-b"}, IsRemote: true},
+		},
+	}
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
+	require.NoError(t, err)
+
+	plan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
+	require.NoError(t, err)
+	require.Len(t, plan.ByFinalID, 1)
+	require.Len(t, plan.DedupGroups, 1)
+	assert.ElementsMatch(t, []string{"git::file:///repo-a", "git::file:///repo-b"}, plan.DedupGroups[0].PackageAddrs)
+	assert.ElementsMatch(t, []string{"root.a", "root.b"}, plan.DedupGroups[0].ModuleKeys)
+}
+
+func TestBuildSourcetreeIdentityPlanDoesNotDeduplicateDifferentFinalContent(t *testing.T) {
+	root := t.TempDir()
+	pkgA := filepath.Join(root, "modules", "old-a")
+	pkgB := filepath.Join(root, "modules", "old-b")
+	require.NoError(t, os.MkdirAll(pkgA, 0o755))
+	require.NoError(t, os.MkdirAll(pkgB, 0o755))
+	writeTerraformFile(t, pkgA, "main.tf", `output "id" { value = "a" }`)
+	writeTerraformFile(t, pkgB, "main.tf", `output "id" { value = "b" }`)
+
+	tree := &ResolvedTree{
+		Root: &ModuleNode{Key: "root", Name: "root", InstallDir: root, PackageRoot: root},
+		Packages: map[string]*DownloadedPackage{
+			"old-a": {PackageAddr: "git::file:///repo-a", LocalDir: pkgA, ContentHash: "download-a"},
+			"old-b": {PackageAddr: "git::file:///repo-b", LocalDir: pkgB, ContentHash: "download-b"},
+		},
+		AllModules: []*ModuleNode{
+			{Key: "root.a", Name: "a", PackageRoot: pkgA, InstallDir: pkgA, Source: ModuleSource{PackageAddr: "git::file:///repo-a"}, IsRemote: true},
+			{Key: "root.b", Name: "b", PackageRoot: pkgB, InstallDir: pkgB, Source: ModuleSource{PackageAddr: "git::file:///repo-b"}, IsRemote: true},
+		},
+	}
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
+	require.NoError(t, err)
+
+	plan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
+	require.NoError(t, err)
+	assert.Len(t, plan.ByFinalID, 2)
+	assert.Empty(t, plan.DedupGroups)
+}
+
+func TestSnapshotDirectoryWithStripUsesIncludedFinalContent(t *testing.T) {
+	root := t.TempDir()
+	writeTerraformFile(t, root, "main.tf", `output "x" { value = "kept" }`)
+	writeTestFile(t, filepath.Join(root, "README.md"), "stripped")
+
+	rootModule := &ModuleNode{Key: "root", Name: "root", InstallDir: root, PackageRoot: root}
+	tree := &ResolvedTree{
+		Root:       rootModule,
+		AllModules: []*ModuleNode{rootModule},
+		Packages:   map[string]*DownloadedPackage{},
+	}
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
+	require.NoError(t, err)
+
+	snapshot, err := SnapshotDirectoryWithStrip(root, stripPlan)
+	require.NoError(t, err)
+	assert.Equal(t, 1, snapshot.FileCount)
+	assert.Equal(t, int64(len(`output "x" { value = "kept" }`)), snapshot.TotalBytes)
+
+	unstripped, err := SnapshotDirectory(root)
+	require.NoError(t, err)
+	assert.NotEqual(t, unstripped.Hash, snapshot.Hash)
+}
+
+func TestApplySourcetreeIdentityPlanMaterializesCanonicalDirectoryAndRewritesSources(t *testing.T) {
+	root := t.TempDir()
+	writeTerraformFile(t, root, "main.tf", `
+module "a" { source = "./modules/old-a" }
+module "b" { source = "./modules/old-b" }
+`)
+	pkgA := filepath.Join(root, "modules", "old-a")
+	pkgB := filepath.Join(root, "modules", "old-b")
+	require.NoError(t, os.MkdirAll(pkgA, 0o755))
+	require.NoError(t, os.MkdirAll(pkgB, 0o755))
+	writeTerraformFile(t, pkgA, "main.tf", `output "id" { value = "same" }`)
+	writeTerraformFile(t, pkgB, "main.tf", `output "id" { value = "same" }`)
+
+	modA := &ModuleNode{Key: "root.a", Name: "a", PackageRoot: pkgA, InstallDir: pkgA, Source: ModuleSource{PackageAddr: "git::file:///repo-a", SubDir: ""}, IsRemote: true}
+	modB := &ModuleNode{Key: "root.b", Name: "b", PackageRoot: pkgB, InstallDir: pkgB, Source: ModuleSource{PackageAddr: "git::file:///repo-b", SubDir: ""}, IsRemote: true}
+	tree := &ResolvedTree{
+		Root:       &ModuleNode{Key: "root", Name: "root", InstallDir: root, PackageRoot: root, Children: []*ModuleNode{modA, modB}},
+		Packages:   map[string]*DownloadedPackage{"old-a": {PackageAddr: "git::file:///repo-a", LocalDir: pkgA}, "old-b": {PackageAddr: "git::file:///repo-b", LocalDir: pkgB}},
+		AllModules: []*ModuleNode{modA, modB},
+		VendorDir:  "modules", // this test deliberately vendors packages under modules/ (matching the .tf sources)
+	}
+	modA.Parent = tree.Root
+	modB.Parent = tree.Root
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
+	require.NoError(t, err)
+	plan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
+	require.NoError(t, err)
+	require.Len(t, plan.ByFinalID, 1)
+
+	err = ApplySourcetreeIdentityPlan(context.Background(), tree, plan)
+	require.NoError(t, err)
+
+	var finalID string
+	for id := range plan.ByFinalID {
+		finalID = id
+	}
+	assert.DirExists(t, filepath.Join(root, "modules", finalID))
+	assert.NoDirExists(t, filepath.Join(root, "modules", "old-b"))
+	assert.Len(t, tree.Packages, 1)
+	assert.Contains(t, tree.Packages, finalID)
+	assert.Equal(t, filepath.Join(root, "modules", finalID), modA.PackageRoot)
+	assert.Equal(t, filepath.Join(root, "modules", finalID), modB.PackageRoot)
+
+	mainContent, err := os.ReadFile(filepath.Join(root, "main.tf"))
+	require.NoError(t, err)
+	assert.Contains(t, string(mainContent), `source = "./modules/`+finalID+`"`)
+	assert.NotContains(t, string(mainContent), "old-a")
+	assert.NotContains(t, string(mainContent), "old-b")
+}
+
+// TestApplySourcetreeIdentityPlan_RewriterHardErrorNotSwallowed locks in the F8 fix:
+// rewriteModuleSourcesToFinalIDs previously discarded every RewriteModuleSource error
+// with `_ = ...`, so a read/parse/write failure would silently ship a bundle whose
+// source references still pointed at the pre-rename directories. The caller must now
+// surface genuine failures. Two identical packages force a dedup-into-one relocation
+// so the rewriter is guaranteed to touch the malformed root main.tf.
+func TestApplySourcetreeIdentityPlan_RewriterHardErrorNotSwallowed(t *testing.T) {
+	root := t.TempDir()
+	// Malformed HCL (missing closing brace): RewriteModuleSource cannot parse it.
+	writeTestFile(t, filepath.Join(root, "main.tf"), `module "a" { source = "./modules/old-a"`)
+	pkgA := filepath.Join(root, "modules", "old-a")
+	pkgB := filepath.Join(root, "modules", "old-b")
+	require.NoError(t, os.MkdirAll(pkgA, 0o755))
+	require.NoError(t, os.MkdirAll(pkgB, 0o755))
+	writeTerraformFile(t, pkgA, "main.tf", `output "id" { value = "same" }`)
+	writeTerraformFile(t, pkgB, "main.tf", `output "id" { value = "same" }`)
+
+	modA := &ModuleNode{Key: "root.a", Name: "a", PackageRoot: pkgA, InstallDir: pkgA, Source: ModuleSource{PackageAddr: "git::file:///repo-a"}, IsRemote: true}
+	modB := &ModuleNode{Key: "root.b", Name: "b", PackageRoot: pkgB, InstallDir: pkgB, Source: ModuleSource{PackageAddr: "git::file:///repo-b"}, IsRemote: true}
+	tree := &ResolvedTree{
+		Root:       &ModuleNode{Key: "root", Name: "root", InstallDir: root, PackageRoot: root, Children: []*ModuleNode{modA, modB}},
+		Packages:   map[string]*DownloadedPackage{"old-a": {PackageAddr: "git::file:///repo-a", LocalDir: pkgA}, "old-b": {PackageAddr: "git::file:///repo-b", LocalDir: pkgB}},
+		AllModules: []*ModuleNode{modA, modB},
+		VendorDir:  "modules",
+	}
+	modA.Parent = tree.Root
+	modB.Parent = tree.Root
+
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
+	require.NoError(t, err)
+	plan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
+	require.NoError(t, err)
+	require.Len(t, plan.ByFinalID, 1, "two identical packages must dedup into one final identity")
+
+	// The relocation forces a rewrite of the malformed root main.tf. Before the F8 fix
+	// this error was silently discarded; now it must propagate.
+	err = ApplySourcetreeIdentityPlan(context.Background(), tree, plan)
+	require.Error(t, err, "rewriter parse error must not be swallowed")
+	assert.Contains(t, err.Error(), "rewrite source for module a")
+}
+
+// TestApplySourcetreeIdentityPlan_RemapSubDirectoryModuleInstallDir reproduces the
+// registry-bundle crash (popular terraform-aws-consul module, P0 on the safe default
+// strip mode): a sub-module referenced inside a downloaded package via
+// "./modules/child" has PackageRoot == InstallDir == <pkg>/modules/child, which is NOT
+// equal to the package's OldLocalDir. The old remapper only matched on an exact
+// PackageRoot, so the sub-module's InstallDir was left pointing at the package's
+// pre-rename directory — which ApplySourcetreeIdentityPlan then deletes — so the
+// second ("final") strip plan crashed reading a missing directory.
+func TestApplySourcetreeIdentityPlan_RemapSubDirectoryModuleInstallDir(t *testing.T) {
+	root := t.TempDir()
+	writeTestFile(t, filepath.Join(root, "main.tf"), `
+module "a" { source = "./modules/old-a" }
+module "b" { source = "./modules/old-b" }
+`)
+	pkgA := filepath.Join(root, "modules", "old-a")
+	pkgB := filepath.Join(root, "modules", "old-b")
+	subChild := filepath.Join(pkgA, "modules", "child") // referenced inside pkgA via "./modules/child"
+	require.NoError(t, os.MkdirAll(pkgA, 0o755))
+	require.NoError(t, os.MkdirAll(pkgB, 0o755))
+	require.NoError(t, os.MkdirAll(subChild, 0o755))
+	writeTerraformFile(t, pkgA, "main.tf", `output "id" { value = "same" }`)
+	writeTerraformFile(t, pkgB, "main.tf", `output "id" { value = "same" }`)
+	writeTerraformFile(t, subChild, "main.tf", `output "sub" { value = "child" }`)
+
+	modA := &ModuleNode{Key: "root.a", Name: "a", PackageRoot: pkgA, InstallDir: pkgA, Source: ModuleSource{PackageAddr: "git::file:///repo-a"}, IsRemote: true}
+	modB := &ModuleNode{Key: "root.b", Name: "b", PackageRoot: pkgB, InstallDir: pkgB, Source: ModuleSource{PackageAddr: "git::file:///repo-b"}, IsRemote: true}
+	// Sub-module inside package A: LOCAL sub-reference, PackageRoot == InstallDir == subdir.
+	modChild := &ModuleNode{Key: "root.a.child", Name: "child", PackageRoot: subChild, InstallDir: subChild, IsLocal: true, Parent: modA}
+	modA.Children = []*ModuleNode{modChild}
+
+	tree := &ResolvedTree{
+		Root:       &ModuleNode{Key: "root", Name: "root", InstallDir: root, PackageRoot: root, Children: []*ModuleNode{modA, modB}},
+		Packages:   map[string]*DownloadedPackage{"old-a": {PackageAddr: "git::file:///repo-a", LocalDir: pkgA}, "old-b": {PackageAddr: "git::file:///repo-b", LocalDir: pkgB}},
+		AllModules: []*ModuleNode{modA, modB, modChild},
+		VendorDir:  "modules",
+	}
+	modA.Parent = tree.Root
+	modB.Parent = tree.Root
+
+	stripPlan, err := PlanStripping(context.Background(), tree, StripModeOptimistic)
+	require.NoError(t, err)
+	plan, err := BuildSourcetreeIdentityPlan(context.Background(), tree, stripPlan)
+	require.NoError(t, err)
+	require.NotEmpty(t, plan.ByFinalID, "packages must be relocated")
+
+	// Find the final dir for package A (the one containing the sub-module).
+	var finalPkgDir string
+	for _, identity := range plan.Packages {
+		if filepath.Clean(identity.OldLocalDir) == filepath.Clean(pkgA) {
+			finalPkgDir = identity.FinalLocalDir
+			break
+		}
+	}
+	require.NotEmpty(t, finalPkgDir, "package A must have a final identity dir")
+
+	require.NoError(t, ApplySourcetreeIdentityPlan(context.Background(), tree, plan))
+
+	// The sub-module's pointers must be remapped into the renamed package directory.
+	assert.Equal(t, filepath.Join(finalPkgDir, "modules", "child"), modChild.InstallDir,
+		"sub-module InstallDir must be remapped under the final package dir")
+	assert.Equal(t, filepath.Join(finalPkgDir, "modules", "child"), modChild.PackageRoot,
+		"sub-module PackageRoot must be remapped under the final package dir")
+	assert.DirExists(t, modChild.InstallDir, "remapped sub-module dir must exist on disk")
+
+	// The post-rename strip plan must not crash reading the deleted old package dir.
+	// Before the fix this returned "failed to read directory .../old-a/modules/child".
+	_, err = PlanStripping(context.Background(), tree, StripModeOptimistic)
+	require.NoError(t, err, "final strip plan must not crash reading a renamed-away package subdir")
+}
+
+// TestNamespacedPackageID (review item 6) verifies git-https and registry
+// sources get human-readable namespaced paths, and everything else falls
+// back to the content-addressed pkg-<sha>.
+func TestNamespacedPackageID(t *testing.T) {
+	hash := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	// git-https derives namespace/name from the URL path.
+	assert.Equal(t, "example/pkg-one",
+		namespacedPackageID("git::https://github.com/example/pkg-one.git?ref=v1.0.0", hash))
+	assert.Equal(t, "terraform-aws-modules/vpc",
+		namespacedPackageID("git::https://github.com/terraform-aws-modules/vpc.git?ref=v5.21.0", hash))
+
+	// Registry derives namespace/name (drops provider).
+	assert.Equal(t, "terraform-aws-modules/consul",
+		namespacedPackageID("terraform-aws-modules/consul/aws", hash))
+
+	// Fallback: file/oci/s3 keep the content-addressed pkg-<sha>.
+	assert.Equal(t, "pkg-"+hash,
+		namespacedPackageID("git::file:///tmp/shared-pkg", hash))
+	assert.Equal(t, "pkg-"+hash,
+		namespacedPackageID("oci://registry.example.com/repo?tag=v1", hash))
+	assert.Equal(t, "pkg-"+hash,
+		namespacedPackageID("s3::https://bucket/module.zip", hash))
+
+	// Untrusted provenance must never become a traversing vendor path.
+	assert.Equal(t, "pkg-"+hash,
+		namespacedPackageID("git::https://example.com/../escape.git?ref=v1", hash))
+	assert.Equal(t, "pkg-"+hash,
+		namespacedPackageID("git::https://example.com/%2e%2e/escape.git?ref=v1", hash))
+	assert.Equal(t, "pkg-"+hash,
+		namespacedPackageID("../escape/aws", hash))
+}

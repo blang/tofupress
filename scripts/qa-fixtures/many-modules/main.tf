@@ -1,0 +1,10 @@
+module "m1" { source = "./child" }
+module "m2" { source = "./child" }
+module "m3" { source = "./child" }
+module "m4" { source = "./child" }
+module "m5" { source = "./child" }
+module "m6" { source = "./child" }
+module "m7" { source = "./child" }
+module "m8" { source = "./child" }
+module "m9" { source = "./child" }
+module "m10" { source = "./child" }
